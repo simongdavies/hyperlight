@@ -4,7 +4,6 @@ name: Benchmarks
 
 on:
   workflow_call: # This is called from CreateRelease.yml
-    inputs:
 
 permissions:
   id-token: write
