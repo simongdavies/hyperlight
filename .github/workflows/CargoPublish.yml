@@ -12,7 +12,6 @@ permissions:
 
 jobs:
   publish-hyperlight-packages:
-    environment: release
     runs-on: [self-hosted, Linux, X64, "1ES.Pool=hld-kvm-amd"]
 
     # We should only publish from dev if minver contains `-preview`

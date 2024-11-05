@@ -5,9 +5,6 @@ name: Benchmarks
 on:
   workflow_call: # This is called from CreateRelease.yml
     inputs:
-      environment:
-        required: false
-        type: string
 
 permissions:
   id-token: write
@@ -18,7 +15,6 @@ jobs:
   # its execution. this dependency should be expressed in the dependent
   # workflow
   benchmark:
-    environment: ${{ inputs.environment }}
     strategy:
       fail-fast: true
       matrix:
