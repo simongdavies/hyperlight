@@ -1,0 +1,8 @@
+[package]
+name = "callbackguest"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hyperlight-guest = { path = "../../../hyperlight_guest" }
+hyperlight-common = { path = "../../../hyperlight_common", default-features = false }

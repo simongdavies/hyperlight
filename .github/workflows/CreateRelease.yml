@@ -1,0 +1,279 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+
+name: Create a Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [dev]
+
+permissions:
+  contents: write
+  packages: write # This is needed to publish nuget packages
+  id-token: write # Needed for federated auth to our ADO feeds
+  pull-requests: read
+
+jobs:
+
+  build-rust-ubuntu:
+    # see https://github.com/orgs/community/discussions/26286#discussioncomment-3251208 for why we need to check the ref
+    if: ${{ contains(github.ref, 'refs/heads/release/') }} ||  ${{ github.ref=='refs/heads/dev' }}
+    runs-on: [self-hosted, Linux, X64, "1ES.Pool=HL-Ubuntu-22.04-KVM"]
+    environment: release
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install az-cli (Linux mariner) (move into hyperlight-workflow-setup!)
+        if: ${{ (runner.os == 'Linux') }}
+        run: |
+          if command -v dnf > /dev/null 2>&1; then
+            sudo dnf install azure-cli -y
+          fi
+        shell: bash
+
+
+      - uses: hyperlight-dev/ci-setup-workflow@v1.0.0
+        with:
+          rust-toolchain: "1.81.0"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build Debug
+        run: cargo build --verbose
+
+      - name: Build Release
+        run: cargo build --verbose --release
+
+  build-rust-windows:
+    # see https://github.com/orgs/community/discussions/26286#discussioncomment-3251208 for why we need to check the ref
+    if: ${{ contains(github.ref, 'refs/heads/release/') }} ||  ${{ github.ref=='refs/heads/dev' }}
+    runs-on: windows-2022
+    environment: release
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hyperlight-dev/ci-setup-workflow@v1.0.0
+        with:
+          rust-toolchain: "1.81.0"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build Debug
+        run: cargo build --verbose
+
+      - name: Build Release
+        run: cargo build --verbose --release
+
+  build-guest-binaries:
+    uses: ./.github/workflows/dep_build_guest_binaries.yml
+    secrets: inherit
+    with:
+      environment: release
+
+  fuzzing:
+    uses: ./.github/workflows/dep_fuzzing.yml
+    with:
+      max_total_time: 3600 # 1 hour in seconds
+      environment: release
+    secrets: inherit
+
+  benchmarks:
+    needs: [build-guest-binaries]
+    uses: ./.github/workflows/Benchmarks.yml
+    secrets: inherit
+    with:
+      environment: release
+    permissions:
+      id-token: write
+      contents: read
+
+  cargo-publish:
+    needs: [publish]
+    uses: ./.github/workflows/CargoPublish.yml
+    secrets: inherit
+    permissions:
+      id-token: write
+      contents: read
+
+  publish:
+    environment: release
+    # see https://github.com/orgs/community/discussions/26286#discussioncomment-3251208 for why we need to check the ref
+    if: ${{ contains(github.ref, 'refs/heads/release/') }} ||  ${{ github.ref=='refs/heads/dev' }}
+    runs-on: windows-2022
+    outputs:      
+      HYPERLIGHT_VERSION: ${{ steps.set_hyperlight_version.outputs.HYPERLIGHT_VERSION }}
+    needs:
+      [
+        build-rust-ubuntu,
+        build-rust-windows,
+        build-guest-binaries,
+        benchmarks,
+      ]
+
+    env:
+      PLATFORM: x64
+      FRAMEWORK: net6.0
+      DOTNET_INSTALL_DIR: "./.dotnet"
+
+    steps:
+      - name: Set Debug Configuration
+        if: ${{ github.ref=='refs/heads/dev' }}
+        run: echo "CONFIG=debug" | Out-File -FilePath $Env:GITHUB_ENV -Encoding utf-8 -Append
+        shell: pwsh
+
+      - name: Set Release Configuration
+        if: ${{ contains(github.ref, 'refs/heads/release/') }}
+        run: echo "CONFIG=release" | Out-File -FilePath $Env:GITHUB_ENV -Encoding utf-8 -Append
+        shell: pwsh
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: hyperlight-dev/ci-setup-workflow@v1.0.0
+        with:
+          rust-toolchain: "1.81.0"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup dotnet
+        uses: actions/setup-dotnet@v4.0.1
+        with:
+          dotnet-version: 6.0.x
+
+      - name: Add msbuild to PATH
+        uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-architecture: x64
+
+      - name: Install minver cli
+        run: dotnet tool install minver-cli --global
+        shell: pwsh
+
+      - name: Set HYPERLIGHT_VERSION
+        id: set_hyperlight_version
+        run: |
+          git fetch --tags
+          minver -vd -tv -p preview -a minor
+          echo "HYPERLIGHT_VERSION=$(minver -vd -tv -p preview -a minor)" | Out-File -FilePath $Env:GITHUB_ENV -Encoding utf-8 -Append
+          echo "HYPERLIGHT_VERSION=$(minver -vd -tv -p preview -a minor)" | Out-File -FilePath $Env:GITHUB_OUTPUT -Encoding utf-8 -Append
+        shell: pwsh
+
+      - name: Ensure path exists for debug build
+        if: ${{ env.CONFIG }} == "debug"
+        run: mkdir -p target\debug
+        shell: pwsh
+
+      - name: Ensure path exists for release build
+        if: ${{ env.CONFIG }} == "release"
+        run: mkdir -p target\release
+        shell: pwsh
+
+      - name: Download Guest Binaries
+        uses: actions/download-artifact@v3
+        with:
+          name: guest-binaries-${{ env.CONFIG }}
+          path: ./downloaded-guest-binaries-${{ env.CONFIG }}
+
+      - name: Copy Guest Binaries
+        run: |
+          cp ./downloaded-guest-binaries-${{ env.CONFIG }}/callbackguest ./src/tests/rust_guests/bin/${{ env.CONFIG }}/callbackguest
+          cp ./downloaded-guest-binaries-${{ env.CONFIG }}/callbackguest.exe ./src/tests/rust_guests/bin/${{ env.CONFIG }}/callbackguest.exe
+          cp ./downloaded-guest-binaries-${{ env.CONFIG }}/simpleguest ./src/tests/rust_guests/bin/${{ env.CONFIG }}/simpleguest
+          cp ./downloaded-guest-binaries-${{ env.CONFIG }}/simpleguest.exe ./src/tests/rust_guests/bin/${{ env.CONFIG }}/simpleguest.exe
+          cp ./downloaded-guest-binaries-${{ env.CONFIG }}/dummyguest ./src/tests/rust_guests/bin/${{ env.CONFIG }}/dummyguest
+
+      - name: Build and archive guest library + header files
+        run: |
+          just tar-headers
+          just tar-static-lib
+
+      - name: Determine if we should publish github packages
+        run: |
+          echo "github.ref=${{ github.ref }}"
+          echo "HYPERLIGHT_VERSION=$Env:HYPERLIGHT_VERSION"
+          if (('${{ github.ref }}'.contains('refs/heads/release')) -or
+              (('${{ github.ref }}'.contains('refs/heads/dev')) -and
+               ($Env:HYPERLIGHT_VERSION.contains('-preview')))) {
+            echo "Setting SHOULD_PUBLISH in GITHUB_ENV"
+            echo "SHOULD_PUBLISH=true" | Out-File -FilePath $Env:GITHUB_ENV -Encoding utf-8 -Append
+          }
+
+      - name: Download benchmarks (Windows)
+        uses: actions/download-artifact@v3
+        with:
+          name: benchmarks_Windows_none
+          path: benchmarks_Windows_none
+
+      - name: Download benchmarks (Linux hyperv)
+        uses: actions/download-artifact@v3
+        with:
+          name: benchmarks_Linux_hyperv
+          path: benchmarks_Linux_hyperv
+
+      - name: Download benchmarks (Linux kvm)
+        uses: actions/download-artifact@v3
+        with:
+          name: benchmarks_Linux_kvm
+          path: benchmarks_Linux_kvm
+
+      - name: Archive benchmarks
+        run: |
+          tar -zcvf benchmarks_Windows_none.tar.gz benchmarks_Windows_none
+          tar -zcvf benchmarks_Linux_hyperv.tar.gz benchmarks_Linux_hyperv
+          tar -zcvf benchmarks_Linux_kvm.tar.gz benchmarks_Linux_kvm
+
+      - name: Install github-cli
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          # check if gh cli is installed
+          $installed = [bool](Get-Command -ErrorAction Ignore -Type Application gh)
+          if ($installed) { Write-Host "gh cli already installed"; exit 0 }
+          # download and install gh cli
+          Invoke-WebRequest https://github.com/cli/cli/releases/download/v2.50.0/gh_2.50.0_windows_amd64.msi -OutFile gh.msi
+          msiexec.exe /i gh.msi /quiet /l log.txt | Out-Null
+          Write-Host "msiexec exited with code $LASTEXITCCODE"
+          if ($LASTEXITCODE -ne 0) { cat log.txt; exit 1 }
+
+      # Publish the native guests so that its possible to use Hyperlight without building it.
+      - name: Create release
+        # Only create a release from tag if we are on a release branch
+        if: ${{ contains(github.ref, 'refs/heads/release/') }}
+        run: |
+            gh release create v${{ env.HYPERLIGHT_VERSION }} -t "Release v${{ env.HYPERLIGHT_VERSION }}" --generate-notes `
+            src/tests/rust_guests/bin/${{ env.CONFIG }}/callbackguest `
+            src/tests/rust_guests/bin/${{ env.CONFIG }}/callbackguest.exe `
+            src/tests/rust_guests/bin/${{ env.CONFIG }}/simpleguest `
+            src/tests/rust_guests/bin/${{ env.CONFIG }}/simpleguest.exe `
+            src/tests/rust_guests/bin/${{ env.CONFIG }}/dummyguest `
+            benchmarks_Windows_none.tar.gz `
+            benchmarks_Linux_hyperv.tar.gz `
+            benchmarks_Linux_kvm.tar.gz `
+            hyperlight-guest-c-api-linux.tar.gz `
+            hyperlight-guest-c-api-windows.tar.gz `
+            include.tar.gz
+        env:
+            GH_TOKEN: ${{ github.token }}
+      - name: Create release (dev)
+        # Only create a dev release if we are on the dev branch
+        if: ${{ github.ref=='refs/heads/dev' }}
+        run:  |    
+            gh release delete dev-latest -y --cleanup-tag || $true
+            gh release create dev-latest -t "Latest Development Build From Dev Branch" --latest=false -p `
+            src/tests/rust_guests/bin/${{ env.CONFIG }}/callbackguest `
+            src/tests/rust_guests/bin/${{ env.CONFIG }}/callbackguest.exe `
+            src/tests/rust_guests/bin/${{ env.CONFIG }}/simpleguest `
+            src/tests/rust_guests/bin/${{ env.CONFIG }}/simpleguest.exe `
+            src/tests/rust_guests/bin/${{ env.CONFIG }}/dummyguest `
+            benchmarks_Windows_none.tar.gz `
+            benchmarks_Linux_hyperv.tar.gz `
+            benchmarks_Linux_kvm.tar.gz `
+            hyperlight-guest-c-api-linux.tar.gz `
+            hyperlight-guest-c-api-windows.tar.gz `
+            include.tar.gz
+        env:
+            GH_TOKEN: ${{ github.token }}
+

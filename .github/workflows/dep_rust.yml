@@ -1,0 +1,143 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+
+name: Rust Tests and Lints
+
+# See README.md in this directory for more information about workflow_call
+on:
+  workflow_call:
+    secrets:
+      ADO_HYPERLIGHT_CARGO_RO_AZURE_CLIENT_ID:
+        required: true
+      AZURE_TENANT_ID:
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: FULL
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        build:
+          [
+            windows-2022-debug,
+            linux-kvm-debug,
+            linux-hyperv-debug,
+            windows-2022-release,
+            linux-kvm-release,
+            linux-hyperv-release,
+          ]
+        include:
+          - build: windows-2022-debug
+            os: [self-hosted, Windows, X64, "1ES.Pool=HL-win-2022-amd"]
+            hypervisor: none
+            config: debug
+          - build: linux-kvm-debug
+            os: [self-hosted, Linux, X64, "1ES.Pool=HL-Ubuntu-22.04-KVM"]
+            hypervisor: kvm
+            config: debug
+          - build: linux-hyperv-debug
+            os: [self-hosted, Linux, X64, "1ES.Pool=HL-mshv-dev"]
+            hypervisor: hyperv
+            config: debug
+          - build: windows-2022-release
+            os: [self-hosted, Windows, X64, "1ES.Pool=HL-win-2022-amd"]
+            hypervisor: none
+            config: release
+          - build: linux-kvm-release
+            os: [self-hosted, Linux, X64, "1ES.Pool=HL-Ubuntu-22.04-KVM"]
+            hypervisor: kvm
+            config: release
+          - build: linux-hyperv-release
+            os: [self-hosted, Linux, X64, "1ES.Pool=HL-mshv-dev"]
+            hypervisor: hyperv
+            config: release
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hyperlight-dev/ci-setup-workflow@v1.0.0
+        with:
+          rust-toolchain: "nightly"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: fmt
+        run: just fmt-check
+
+      - name: clippy
+        run: just clippy ${{ matrix.config }}
+
+      - name: Get gh action service name
+        if: ${{ (runner.os == 'Windows' )}}
+        run: (Get-Service actions.runner.*) | Foreach { $_.Name, $_.UserName, $_.ServiceType }
+        shell: pwsh
+
+      - name: Build and move Rust guests
+        run: just build-and-move-rust-guests
+
+      - name: Build c guests
+        run: just build-and-move-c-guests
+
+      - name: Build
+        run: just build-rust ${{ matrix.config }}
+
+      - name: Verify MSRV
+        run: ./dev/verify-msrv.sh hyperlight-host hyperlight-guest hyperlight-common
+        shell: bash
+
+      - name: Run Rust tests
+        env:
+          CARGO_TERM_COLOR: always
+        run: |
+          # with default features
+          just test-rust ${{ matrix.config }}
+
+          # with only one driver enabled (driver mshv/kvm feature is ignored on windows) + seccomp + inprocess
+          just test-rust ${{ matrix.config }} inprocess,seccomp,${{ matrix.hypervisor == 'hyperv' && 'mshv' || 'kvm' }} 
+
+          # without any driver (shouldn't compile)
+          just test-rust-feature-compilation-fail ${{ matrix.config }}
+
+        # One of the examples is flaky on Windows GH runners, so this allows us to disable it for now
+      - name: Run Rust examples - windows
+        if: ${{ (runner.os == 'Windows') }}
+        env:
+          CARGO_TERM_COLOR: always
+          RUST_LOG: debug
+        run: just run-rust-examples ${{ matrix.config }}
+
+      - name: Run Rust examples - linux
+        if: ${{ (runner.os != 'Windows') }}
+        env:
+          CARGO_TERM_COLOR: always
+          RUST_LOG: debug
+        run: just run-rust-examples-linux ${{ matrix.config }}
+
+      ### Benchmarks ###
+      - name: Install github-cli (Linux mariner)
+        if: runner.os == 'Linux' && matrix.hypervisor == 'hyperv'
+        run: sudo dnf install gh -y
+
+      - name: Install github-cli (Linux ubuntu)
+        if: runner.os == 'Linux' && matrix.hypervisor == 'kvm'
+        run: sudo apt install gh -y
+
+      - name: Download benchmarks from "latest"
+        run: just bench-download ${{ runner.os }} ${{ matrix.hypervisor }} dev-latest # compare to pre-release "dev"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+        if: ${{ matrix.config == 'release' }}
+
+      - name: Run benchmarks
+        run: |
+          just bench-ci dev ${{ matrix.config }}
+        if: ${{ matrix.config == 'release' }}

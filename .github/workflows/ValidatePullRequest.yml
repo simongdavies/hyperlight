@@ -1,0 +1,129 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+
+name: Validate Pull Request
+
+on:
+  pull_request:
+    branches: [main, dev, "release/**"]
+  merge_group:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+
+  rust:
+    uses: ./.github/workflows/dep_rust.yml
+    secrets: inherit
+  fuzzing:
+    uses: ./.github/workflows/dep_fuzzing.yml
+    with:
+      max_total_time: 300 # 5 minutes in seconds
+    secrets: inherit
+
+  #####
+  # start build-on-windows
+  #####
+  build-on-windows:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        build: [windows-debug, windows-release]
+        include:
+          - build: windows-debug
+            os: [self-hosted, Windows, X64, "1ES.Pool=HL-win-2022-amd"]
+            config: debug
+            platform: x64
+          - build: windows-release
+            os: [self-hosted, Windows, X64, "1ES.Pool=HL-win-2022-amd"]
+            config: release
+            platform: x64
+    env:
+      RUST_BACKTRACE: FULL
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get system info
+        run: |
+          echo "cmd /ver"
+          cmd /ver
+          echo "systeminfo"
+          systeminfo
+
+      # Run this so we can use just targets in this workflow
+      - uses: hyperlight-dev/ci-setup-workflow@v1.0.0
+        with:
+          rust-toolchain: "1.81.0"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+
+  #####
+  # end build-on-windows
+  #####
+
+  #####
+  # start build-on-linux
+  #####
+  build-on-linux:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        build:
+          [
+            linux-kvm-debug,
+            linux-kvm-release,
+            linux-hyperv-debug,
+            linux-hyperv-release,
+          ]
+        include:
+          - build: linux-kvm-debug
+            os: [self-hosted, Linux, X64, "1ES.Pool=HL-Ubuntu-22.04-KVM"]
+            config: debug
+            platform: x64
+            hypervisor: kvm
+          - build: linux-kvm-release
+            os: [self-hosted, Linux, X64, "1ES.Pool=HL-Ubuntu-22.04-KVM"]
+            config: release
+            platform: x64
+            hypervisor: kvm
+          - build: linux-hyperv-debug
+            os: [self-hosted, Linux, X64, "1ES.Pool=HL-mshv-dev"]
+            config: debug
+            platform: x64
+            hypervisor: hyperv
+          - build: linux-hyperv-release
+            os: [self-hosted, Linux, X64, "1ES.Pool=HL-mshv-dev"]
+            config: release
+            platform: x64
+            hypervisor: hyperv
+    env:
+      RUST_BACKTRACE: FULL
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: uname (linux)
+        run: |
+          echo "uname -a"
+          uname -a
+          echo "cat /etc/os-release"
+          cat /etc/os-release
+
+      - uses: hyperlight-dev/ci-setup-workflow@v1.0.0
+        with:
+          rust-toolchain: "1.81.0"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build C Guest Binaries
+        run: |
+          just build-c-guests ${{ matrix.config }}
+
+  #####
+  # end build-on-linux
+  #####

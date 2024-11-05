@@ -1,0 +1,63 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+
+name: Build Guest Binaries
+
+on:
+  workflow_call:
+    secrets:
+      ADO_HYPERLIGHT_CARGO_RO_AZURE_CLIENT_ID:
+        required: true
+      AZURE_TENANT_ID:
+        required: true
+    inputs:
+      environment: 
+        required: false
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  id-token: write
+  contents: read
+  
+jobs:
+  # this job has no dependencies
+  build-guest-binaries:
+    environment: ${{ inputs.environment }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        build: [windows-2022-debug, windows-2022-release]
+        include:
+          - build: windows-2022-debug
+            os: windows-2022
+            config: debug
+          - build: windows-2022-release
+            os: windows-2022
+            config: release
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hyperlight-dev/ci-setup-workflow@v1.0.0
+        with:
+          rust-toolchain: "1.81.0"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and move Rust guests
+        run: just build-and-move-rust-guests
+
+      - name: Upload Binary Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: guest-binaries-${{ matrix.config }}
+          path: |
+            src\tests\rust_guests\bin\${{ matrix.config }}\callbackguest
+            src\tests\rust_guests\bin\${{ matrix.config }}\callbackguest.exe
+            src\tests\rust_guests\bin\${{ matrix.config }}\dummyguest
+            src\tests\rust_guests\bin\${{ matrix.config }}\simpleguest
+            src\tests\rust_guests\bin\${{ matrix.config }}\simpleguest.exe
+          if-no-files-found: error

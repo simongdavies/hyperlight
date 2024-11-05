@@ -1,0 +1,93 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+
+name: Benchmarks
+
+on:
+  workflow_call: # This is called from CreateRelease.yml
+    secrets:
+      ADO_HYPERLIGHT_CARGO_RO_AZURE_CLIENT_ID:
+        required: true
+      AZURE_TENANT_ID:
+        required: true
+    inputs:
+      environment:
+        required: false
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  # this job requires the build-guest-binaries job be complete prior to
+  # its execution. this dependency should be expressed in the dependent
+  # workflow
+  benchmark:
+    environment: ${{ inputs.environment }}
+    strategy:
+      fail-fast: true
+      matrix:
+        build: [windows-2022-release, linux-kvm-release, linux-hyperv-release]
+        include:
+          - build: windows-2022-release
+            os: [self-hosted, Windows, X64, "1ES.Pool=HL-win-2022-amd"]
+            hypervisor: none
+          - build: linux-kvm-release
+            os: [self-hosted, Linux, X64, "1ES.Pool=HL-Ubuntu-22.04-KVM"]
+            hypervisor: kvm
+          - build: linux-hyperv-release
+            os: [self-hosted, Linux, X64, "1ES.Pool=HL-mshv-dev"]
+            hypervisor: hyperv
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      ### Setup ###
+
+      - uses: actions/checkout@v4
+
+      - uses: hyperlight-dev/ci-setup-workflow@v1.0.0
+        with:
+          rust-toolchain: "1.81.0"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download Guest Binaries
+        uses: actions/download-artifact@v3
+        with:
+          name: guest-binaries-release
+          path: ./downloaded-guest-binaries-release
+
+      - name: Copy Guest Binaries
+        run: |
+          cp ./downloaded-guest-binaries-release/callbackguest ./src/tests/rust_guests/bin/release/callbackguest
+          cp ./downloaded-guest-binaries-release/callbackguest.exe ./src/tests/rust_guests/bin/release/callbackguest.exe
+          cp ./downloaded-guest-binaries-release/simpleguest ./src/tests/rust_guests/bin/release/simpleguest
+          cp ./downloaded-guest-binaries-release/simpleguest.exe ./src/tests/rust_guests/bin/release/simpleguest.exe
+          cp ./downloaded-guest-binaries-release/dummyguest ./src/tests/rust_guests/bin/release/dummyguest
+
+      ### Benchmarks ###
+      - name: Install github-cli (Linux mariner)
+        if: runner.os == 'Linux' && matrix.hypervisor == 'hyperv'
+        run: sudo dnf install gh -y
+
+      - name: Install github-cli (Linux ubuntu)
+        if: runner.os == 'Linux' && matrix.hypervisor == 'kvm'
+        run: sudo apt install gh -y
+
+      - name: Fetch tags
+        run: git fetch --tags origin
+
+      - name: Download benchmarks from most recent release
+        run: just bench-download ${{ runner.os }} ${{ matrix.hypervisor }} # skip tag parameter to compare to latest stable release
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run Benchmarks
+        run: just bench-ci dev release
+
+      - uses: actions/upload-artifact@v3
+        with:
+          name: benchmarks_${{runner.os}}_${{matrix.hypervisor}}
+          path: ./target/criterion/
+          if-no-files-found: error

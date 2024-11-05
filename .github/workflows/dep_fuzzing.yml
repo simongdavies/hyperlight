@@ -1,0 +1,53 @@
+name: Fuzzing Job
+
+on:
+  workflow_call:
+    inputs:
+      max_total_time:
+        description: Maximum total time for the fuzz run in seconds
+        required: true
+        type: number
+      environment:
+        required: false
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  fuzz:
+    environment: ${{ inputs.environment }}
+    runs-on: [ self-hosted, Linux, X64, "1ES.Pool=HL-Ubuntu-22.04-KVM" ]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - uses: hyperlight-dev/ci-setup-workflow@v1.0.0
+        with:
+          rust-toolchain: "1.81.0"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up nightly rust
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Build rust binaries
+        run: |
+          # use these commands in favor of build-and-move-rust-guests to avoid building debug
+          just build-rust-guests release
+          just move-rust-guests release
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+
+      - name: Run Fuzzing
+        run: cargo +nightly fuzz run --release fuzz_target_1 -- -max_total_time=300
+        working-directory: src/hyperlight_host
+
+      - name: Upload Crash Artifacts
+        if: failure() # This ensures artifacts are only uploaded on failure
+        uses: actions/upload-artifact@v3
+        with:
+          name: fuzz-crash-artifacts
+          path: src/hyperlight_host/fuzz/artifacts/

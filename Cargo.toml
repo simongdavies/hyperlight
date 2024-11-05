@@ -1,0 +1,48 @@
+[workspace]
+resolver = "2"
+default-members = [
+    "src/hyperlight_common",
+    "src/hyperlight_host",
+    "src/hyperlight_testing",
+]
+members = [
+    "src/hyperlight_common",
+    "src/hyperlight_guest",
+    "src/hyperlight_host",
+    "src/hyperlight_guest_capi",
+    "src/hyperlight_testing",
+    "src/hyperlight_host/fuzz",
+]
+# Because hyperlight-guest has custom linker flags,
+# we exclude it from the default-members list
+# to avoid cargo test failing on it.
+# Same for the simpleguest and dummyguest tests below.
+exclude = [
+    "src/tests/rust_guests/callbackguest",
+    "src/tests/rust_guests/dummyguest",
+    "src/tests/rust_guests/simpleguest",
+]
+
+[workspace.package]
+version = "0.9.0"
+edition = "2021"
+rust-version = "1.79.0"
+
+[workspace.dependencies]
+mshv-bindings = { version = "=0.2.1" }
+mshv-ioctls = { version = "=0.2.1" }
+
+hyperlight-common = { path = "src/hyperlight_common", version = "0.9.0", default-features = false }
+hyperlight-host = { path = "src/hyperlight_host", version = "0.9.0", default-features = false }
+hyperlight-guest = { path = "src/hyperlight_guest", version = "0.9.0", default-features = false }
+hyperlight-testing = { path = "src/hyperlight_testing", version = "0.9.0", default-features = false }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+# this will generate symbols for release builds
+# so is handy for debugging issues in release builds
+# to use, run `cargo build --profile=release-with-debug`
+[profile.release-with-debug]
+inherits = "release"
+debug = true

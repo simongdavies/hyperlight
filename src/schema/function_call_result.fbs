@@ -1,0 +1,9 @@
+include "function_types.fbs";
+
+namespace Hyperlight.Generated;
+
+table FunctionCallResult {
+    return_value:ReturnValue(required);
+}
+
+root_type FunctionCallResult;
