@@ -4,11 +4,6 @@ name: Benchmarks
 
 on:
   workflow_call: # This is called from CreateRelease.yml
-    secrets:
-      ADO_HYPERLIGHT_CARGO_RO_AZURE_CLIENT_ID:
-        required: true
-      AZURE_TENANT_ID:
-        required: true
     inputs:
       environment:
         required: false

@@ -5,11 +5,6 @@ name: Publish crates to intenral cargo registry
 on:
   workflow_dispatch:
   workflow_call:
-    secrets:
-        ADO_HYPERLIGHT_CARGO_RW_AZURE_CLIENT_ID:
-          required: true
-        AZURE_TENANT_ID:
-          required: true
 
 permissions:
   contents: read

@@ -5,11 +5,6 @@ name: Rust Tests and Lints
 # See README.md in this directory for more information about workflow_call
 on:
   workflow_call:
-    secrets:
-      ADO_HYPERLIGHT_CARGO_RO_AZURE_CLIENT_ID:
-        required: true
-      AZURE_TENANT_ID:
-        required: true
 
 env:
   CARGO_TERM_COLOR: always
