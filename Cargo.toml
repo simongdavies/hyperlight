@@ -27,6 +27,10 @@ exclude = [
 version = "0.9.0"
 edition = "2021"
 rust-version = "1.79.0"
+license = "Apache-2.0"
+homepage = "https://github.com/hyperlight-dev/hyperlight"
+repository = "https://github.com/hyperlight-dev/hyperlight"
+readme = "README.md"
 
 [workspace.dependencies]
 mshv-bindings = { version = "=0.2.1" }

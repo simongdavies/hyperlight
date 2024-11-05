@@ -3,6 +3,14 @@ name = "hyperlight-host"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = """
+A lightweight Virtual Machine Manager that can be hosted in an application to safely
+run untrusted or code within a VM partition with very low latency and overhead.
+"""
 
 [lib]
 # https://docs.rust-embedded.org/book/interoperability/rust-with-c.html
