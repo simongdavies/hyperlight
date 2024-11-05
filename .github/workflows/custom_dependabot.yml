@@ -34,7 +34,7 @@ jobs:
       contents: write  # for Git to git push
       id-token: write
       pull-requests: write  # for repo-sync/pull-request to create pull requests
-    runs-on: [self-hosted, Linux, X64, "1ES.Pool=HL-Ubuntu-22.04-KVM"]
+    runs-on: [self-hosted, Linux, X64, "1ES.Pool=hld-kvm-amd"]
     steps:
 
     - name: Checkout repo

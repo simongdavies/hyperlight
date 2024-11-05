@@ -18,7 +18,7 @@ permissions:
 jobs:
   fuzz:
     environment: ${{ inputs.environment }}
-    runs-on: [ self-hosted, Linux, X64, "1ES.Pool=HL-Ubuntu-22.04-KVM" ]
+    runs-on: [ self-hosted, Linux, X64, "1ES.Pool=hld-kvm-amd" ]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4

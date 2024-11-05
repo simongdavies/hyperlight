@@ -18,7 +18,7 @@ permissions:
 jobs:
   publish-hyperlight-packages:
     environment: release
-    runs-on: [self-hosted, Linux, X64, "1ES.Pool=HL-Ubuntu-22.04-KVM"]
+    runs-on: [self-hosted, Linux, X64, "1ES.Pool=hld-kvm-amd"]
 
     # We should only publish from dev if minver contains `-preview`
     if: ${{ contains(github.ref, 'refs/heads/release/') }} || ${{ github.ref=='refs/heads/dev' }}
