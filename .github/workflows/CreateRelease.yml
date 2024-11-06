@@ -74,6 +74,8 @@ jobs:
   cargo-publish:
     needs: [publish]
     uses: ./.github/workflows/CargoPublish.yml
+    with:
+      dry_run: false
     secrets: inherit
     permissions:
       id-token: write

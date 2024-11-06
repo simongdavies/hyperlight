@@ -1,6 +1,6 @@
 # Releasing a new Hyperlight version to Cargo
 
-This document details the process of releasing a new version of Hyperlight to the [Azure-internal Cargo feeds](https://dev.azure.com/AzureContainerUpstream/hyperlight/_artifacts/feed/hyperlight_packages). It's intended to be used as a checklist for the developer doing the release. The checklist is represented in the below sections.
+This document details the process of releasing a new version of Hyperlight to [crates.io](https://crates.io). It's intended to be used as a checklist for the developer doing the release. The checklist is represented in the below sections.
 
 ## Update Cargo.toml Versions
 
