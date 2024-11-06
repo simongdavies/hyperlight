@@ -9,9 +9,7 @@ on:
 
 permissions:
   contents: write
-  packages: write # This is needed to publish nuget packages
-  id-token: write # Needed for federated auth to our ADO feeds
-  pull-requests: read
+  id-token: write
 
 jobs:
 
