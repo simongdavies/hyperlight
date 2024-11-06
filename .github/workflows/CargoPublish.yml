@@ -14,8 +14,8 @@ jobs:
   publish-hyperlight-packages:
     runs-on: [self-hosted, Linux, X64, "1ES.Pool=hld-kvm-amd"]
 
-    # We should only publish from dev if minver contains `-preview`
-    if: ${{ contains(github.ref, 'refs/heads/release/') }} || ${{ github.ref=='refs/heads/dev' }}
+    # We should only publish from main if minver contains `-preview`
+    if: ${{ contains(github.ref, 'refs/heads/release/') }} || ${{ github.ref=='refs/heads/main' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -46,7 +46,7 @@ jobs:
         run: |
           echo "github.ref=${{ github.ref }}"
           echo "HYPERLIGHT_VERSION=$HYPERLIGHT_VERSION"
-          if [[ ${{ github.ref }} =~ 'refs/heads/release/' || ( ${{ github.ref }} == 'refs/heads/dev' &&  $HYPERLIGHT_VERSION =~ '-preview' ) ]]
+          if [[ ${{ github.ref }} =~ 'refs/heads/release/' || ( ${{ github.ref }} == 'refs/heads/main' &&  $HYPERLIGHT_VERSION =~ '-preview' ) ]]
           then
             echo "Setting SHOULD_PUBLISH in GITHUB_ENV"
             echo "SHOULD_PUBLISH=true" >> "$GITHUB_ENV"

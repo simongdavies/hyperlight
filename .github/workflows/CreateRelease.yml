@@ -5,7 +5,7 @@ name: Create a Release
 on:
   workflow_dispatch:
   push:
-    branches: [dev]
+    branches: [main]
 
 permissions:
   contents: write
@@ -17,7 +17,7 @@ jobs:
 
   build-rust-ubuntu:
     # see https://github.com/orgs/community/discussions/26286#discussioncomment-3251208 for why we need to check the ref
-    if: ${{ contains(github.ref, 'refs/heads/release/') }} ||  ${{ github.ref=='refs/heads/dev' }}
+    if: ${{ contains(github.ref, 'refs/heads/release/') }} ||  ${{ github.ref=='refs/heads/main' }}
     runs-on: [self-hosted, Linux, X64, "1ES.Pool=hld-kvm-amd"]
 
     steps:
@@ -46,7 +46,7 @@ jobs:
 
   build-rust-windows:
     # see https://github.com/orgs/community/discussions/26286#discussioncomment-3251208 for why we need to check the ref
-    if: ${{ contains(github.ref, 'refs/heads/release/') }} ||  ${{ github.ref=='refs/heads/dev' }}
+    if: ${{ contains(github.ref, 'refs/heads/release/') }} ||  ${{ github.ref=='refs/heads/main' }}
     runs-on: windows-2022
 
     steps:
@@ -92,7 +92,7 @@ jobs:
 
   publish:
     # see https://github.com/orgs/community/discussions/26286#discussioncomment-3251208 for why we need to check the ref
-    if: ${{ contains(github.ref, 'refs/heads/release/') }} ||  ${{ github.ref=='refs/heads/dev' }}
+    if: ${{ contains(github.ref, 'refs/heads/release/') }} ||  ${{ github.ref=='refs/heads/main' }}
     runs-on: windows-2022
     outputs:      
       HYPERLIGHT_VERSION: ${{ steps.set_hyperlight_version.outputs.HYPERLIGHT_VERSION }}
@@ -111,7 +111,7 @@ jobs:
 
     steps:
       - name: Set Debug Configuration
-        if: ${{ github.ref=='refs/heads/dev' }}
+        if: ${{ github.ref=='refs/heads/main' }}
         run: echo "CONFIG=debug" | Out-File -FilePath $Env:GITHUB_ENV -Encoding utf-8 -Append
         shell: pwsh
 
@@ -188,7 +188,7 @@ jobs:
           echo "github.ref=${{ github.ref }}"
           echo "HYPERLIGHT_VERSION=$Env:HYPERLIGHT_VERSION"
           if (('${{ github.ref }}'.contains('refs/heads/release')) -or
-              (('${{ github.ref }}'.contains('refs/heads/dev')) -and
+              (('${{ github.ref }}'.contains('refs/heads/main')) -and
                ($Env:HYPERLIGHT_VERSION.contains('-preview')))) {
             echo "Setting SHOULD_PUBLISH in GITHUB_ENV"
             echo "SHOULD_PUBLISH=true" | Out-File -FilePath $Env:GITHUB_ENV -Encoding utf-8 -Append
@@ -249,12 +249,12 @@ jobs:
             include.tar.gz
         env:
             GH_TOKEN: ${{ github.token }}
-      - name: Create release (dev)
-        # Only create a dev release if we are on the dev branch
-        if: ${{ github.ref=='refs/heads/dev' }}
+      - name: Create prerelease
+        # Only create a prerelease if we are on the main branch
+        if: ${{ github.ref=='refs/heads/main' }}
         run:  |    
             gh release delete dev-latest -y --cleanup-tag || $true
-            gh release create dev-latest -t "Latest Development Build From Dev Branch" --latest=false -p `
+            gh release create dev-latest -t "Latest prerelease from main branch" --latest=false -p `
             src/tests/rust_guests/bin/${{ env.CONFIG }}/callbackguest `
             src/tests/rust_guests/bin/${{ env.CONFIG }}/callbackguest.exe `
             src/tests/rust_guests/bin/${{ env.CONFIG }}/simpleguest `

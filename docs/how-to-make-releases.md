@@ -6,13 +6,13 @@ This document details the process of releasing a new version of Hyperlight to th
 
 Currently, we need to manually update the workspace `Cargo.toml` version number to match to whatever release we are making. This will affect the version of all the crates in the workspace.
 
-> Note: we'll use `v0.4.0` as the version for the above and all subsequent instructions. You should replace this with the version you're releasing. Make sure your version follows [SemVer](https://semver.org) conventions as closely as possible, and is prefixed with a `v` character. *In particular do not use a patch version unless you are patching an issue in a release branch, releases from dev should always be minor or major versions*.
+> Note: we'll use `v0.4.0` as the version for the above and all subsequent instructions. You should replace this with the version you're releasing. Make sure your version follows [SemVer](https://semver.org) conventions as closely as possible, and is prefixed with a `v` character. *In particular do not use a patch version unless you are patching an issue in a release branch, releases from main should always be minor or major versions*.
 
-Create a PR with this change and merge it into the dev branch.
+Create a PR with this change and merge it into the main branch.
 
 ## Create a tag
 
-When the above PR has merged into `dev` branch you should create a tag. ***Make sure you have pulled the recently updated `dev` branch***, and do the following on the `dev` branch:
+When the above PR has merged into `main` branch you should create a tag. ***Make sure you have pulled the recently updated `main` branch***, and do the following on the `main` branch:
 
 ```bash
 git tag -a v0.4.0 -m "A brief description of the release"
@@ -33,7 +33,7 @@ After the previous CI job runs to create the new release branch, go to the ["Cre
 2. In the Use workflow from dropdown, select the `release/v0.4.0` branch
 3. Click the green **Run workflow** button
 
-> Note: In case you see a "Create a Release" job already running before starting this step, that is because the "Create a Release" workflow also automatically runs on push to `dev` branch to create a pre-release. You must still do the steps outlined above.
+> Note: In case you see a "Create a Release" job already running before starting this step, that is because the "Create a Release" workflow also automatically runs on push to `main` branch to create a pre-release. You must still do the steps outlined above.
 
 When this job is done, a new [GitHub release](https://github.com/hyperlight-dev/hyperlight/releases) will be created for you. This job also publishes the following rust packages to the crates.io:
 - `hyperlight-common`

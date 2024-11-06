@@ -5,7 +5,7 @@ Hyperlight uses the [Criterion](https://bheisler.github.io/criterion.rs/book/ind
 ## When Benchmarks are ran
 
 1. Every time a branch gets a push
-    - Compares the current branch benchmarking results to the "dev-latest" release (which is the most recent push to "dev" branch). This is done as part of `dep_rust.yml`, which is invoked by `ValidatePullRequest.yml`. These benchmarks are for the developer to compare their branch to dev, and the results can only be seen in the GitHub action logs, and nothing is saved. 
+    - Compares the current branch benchmarking results to the "dev-latest" release (which is the most recent push to "main" branch). This is done as part of `dep_rust.yml`, which is invoked by `ValidatePullRequest.yml`. These benchmarks are for the developer to compare their branch to main, and the results can only be seen in the GitHub action logs, and nothing is saved. 
 
     ```
     sandboxes/create_sandbox
@@ -72,4 +72,4 @@ Found 1 outliers among 100 measurements (1.00%)
 
 ## Running benchmarks locally
 
-Use `just bench [debug/release]` parameter to run benchmarks. Comparing local benchmarks results to github-saved benchmarks doesn't make much sense, since you'd be using different hardware, but you can use `just bench-download os hypervisor [tag] ` to download and extract the GitHub release benchmarks to the correct place folder. You can then run `just bench-ci dev` to compare to (and overwrite) the previous release benchmarks. Note that `dev` is the name of the baselines stored in GitHub.
+Use `just bench [debug/release]` parameter to run benchmarks. Comparing local benchmarks results to github-saved benchmarks doesn't make much sense, since you'd be using different hardware, but you can use `just bench-download os hypervisor [tag] ` to download and extract the GitHub release benchmarks to the correct place folder. You can then run `just bench-ci main` to compare to (and overwrite) the previous release benchmarks. Note that `main` is the name of the baselines stored in GitHub.

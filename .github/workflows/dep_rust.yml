@@ -126,7 +126,7 @@ jobs:
         run: sudo apt install gh -y
 
       - name: Download benchmarks from "latest"
-        run: just bench-download ${{ runner.os }} ${{ matrix.hypervisor }} dev-latest # compare to pre-release "dev"
+        run: just bench-download ${{ runner.os }} ${{ matrix.hypervisor }} dev-latest # compare to prerelease
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         continue-on-error: true
@@ -134,5 +134,5 @@ jobs:
 
       - name: Run benchmarks
         run: |
-          just bench-ci dev ${{ matrix.config }}
+          just bench-ci main ${{ matrix.config }}
         if: ${{ matrix.config == 'release' }}
