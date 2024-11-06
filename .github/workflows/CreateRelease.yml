@@ -9,9 +9,7 @@ on:
 
 permissions:
   contents: write
-  packages: write # This is needed to publish nuget packages
-  id-token: write # Needed for federated auth to our ADO feeds
-  pull-requests: read
+  id-token: write
 
 jobs:
 
@@ -22,15 +20,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install az-cli (Linux mariner) (move into hyperlight-workflow-setup!)
-        if: ${{ (runner.os == 'Linux') }}
-        run: |
-          if command -v dnf > /dev/null 2>&1; then
-            sudo dnf install azure-cli -y
-          fi
-        shell: bash
-
 
       - uses: hyperlight-dev/ci-setup-workflow@v1.0.0
         with:
@@ -94,8 +83,6 @@ jobs:
     # see https://github.com/orgs/community/discussions/26286#discussioncomment-3251208 for why we need to check the ref
     if: ${{ contains(github.ref, 'refs/heads/release/') }} ||  ${{ github.ref=='refs/heads/main' }}
     runs-on: windows-2022
-    outputs:      
-      HYPERLIGHT_VERSION: ${{ steps.set_hyperlight_version.outputs.HYPERLIGHT_VERSION }}
     needs:
       [
         build-rust-ubuntu,
@@ -103,11 +90,6 @@ jobs:
         build-guest-binaries,
         benchmarks,
       ]
-
-    env:
-      PLATFORM: x64
-      FRAMEWORK: net6.0
-      DOTNET_INSTALL_DIR: "./.dotnet"
 
     steps:
       - name: Set Debug Configuration
@@ -131,27 +113,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Setup dotnet
-        uses: actions/setup-dotnet@v4.0.1
-        with:
-          dotnet-version: 6.0.x
-
-      - name: Add msbuild to PATH
-        uses: microsoft/setup-msbuild@v2
-        with:
-          msbuild-architecture: x64
-
-      - name: Install minver cli
-        run: dotnet tool install minver-cli --global
-        shell: pwsh
-
       - name: Set HYPERLIGHT_VERSION
+        if: ${{ contains(github.ref, 'refs/heads/release/') }}
         id: set_hyperlight_version
         run: |
           git fetch --tags
-          minver -vd -tv -p preview -a minor
-          echo "HYPERLIGHT_VERSION=$(minver -vd -tv -p preview -a minor)" | Out-File -FilePath $Env:GITHUB_ENV -Encoding utf-8 -Append
-          echo "HYPERLIGHT_VERSION=$(minver -vd -tv -p preview -a minor)" | Out-File -FilePath $Env:GITHUB_OUTPUT -Encoding utf-8 -Append
+          $version="${{ github.ref }}"
+          $version=$version -replace "refs/heads/release/v", ""
+          echo "HYPERLIGHT_VERSION=$version" | Out-File -FilePath $Env:GITHUB_ENV -Encoding utf-8 -Append
+          echo "HYPERLIGHT_VERSION=$Env:HYPERLIGHT_VERSION"
         shell: pwsh
 
       - name: Ensure path exists for debug build
@@ -182,17 +152,6 @@ jobs:
         run: |
           just tar-headers
           just tar-static-lib
-
-      - name: Determine if we should publish github packages
-        run: |
-          echo "github.ref=${{ github.ref }}"
-          echo "HYPERLIGHT_VERSION=$Env:HYPERLIGHT_VERSION"
-          if (('${{ github.ref }}'.contains('refs/heads/release')) -or
-              (('${{ github.ref }}'.contains('refs/heads/main')) -and
-               ($Env:HYPERLIGHT_VERSION.contains('-preview')))) {
-            echo "Setting SHOULD_PUBLISH in GITHUB_ENV"
-            echo "SHOULD_PUBLISH=true" | Out-File -FilePath $Env:GITHUB_ENV -Encoding utf-8 -Append
-          }
 
       - name: Download benchmarks (Windows)
         uses: actions/download-artifact@v4
