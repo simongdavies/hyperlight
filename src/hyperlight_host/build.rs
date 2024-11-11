@@ -18,6 +18,10 @@ use anyhow::Result;
 use built::write_built_file;
 
 fn main() -> Result<()> {
+    // mshv2 and mshv3 features are mutually exclusive.
+    #[cfg(all(feature = "mshv2", feature = "mshv3"))]
+    panic!("mshv2 and mshv3 features are mutually exclusive");
+
     // re-run the build if this script is changed (or deleted!),
     // even if the rust code is completely unchanged.
     println!("cargo:rerun-if-changed=build.rs");
@@ -85,12 +89,12 @@ fn main() -> Result<()> {
     }
 
     // Makes #[cfg(kvm)] == #[cfg(all(feature = "kvm", target_os = "linux"))]
-    // and #[cfg(mshv)] == #[cfg(all(feature = "mshv", target_os = "linux"))].
+    // and #[cfg(mshv)] == #[cfg(all(any(feature = "mshv2", feature = "mshv3"), target_os = "linux"))].
     // Essentially the kvm and mshv features are ignored on windows as long as you use #[cfg(kvm)] and not #[cfg(feature = "kvm")].
     // You should never use #[cfg(feature = "kvm")] or #[cfg(feature = "mshv")] in the codebase.
     cfg_aliases::cfg_aliases! {
         kvm: { all(feature = "kvm", target_os = "linux") },
-        mshv: { all(feature = "mshv", target_os = "linux") },
+        mshv: { all(any(feature = "mshv2", feature = "mshv3"), target_os = "linux") },
         // inprocess feature is aliased with debug_assertions to make it only available in debug-builds.
         // You should never use #[cfg(feature = "inprocess")] in the codebase. Use #[cfg(inprocess)] instead.
         inprocess: { all(feature = "inprocess", debug_assertions) },
