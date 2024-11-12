@@ -133,7 +133,7 @@ jobs:
           just test-rust ${{ matrix.config }}
 
           # with only one driver enabled (driver mshv/kvm feature is ignored on windows) + seccomp + inprocess
-          just test-rust ${{ matrix.config }} inprocess,seccomp,${{ matrix.hypervisor == 'hyperv' && 'mshv' || 'kvm' }} 
+          just test-rust ${{ matrix.config }} inprocess,seccomp,${{ matrix.hypervisor == 'hyperv' && 'mshv2' || 'kvm' }} 
 
           # without any driver (shouldn't compile)
           just test-rust-feature-compilation-fail ${{ matrix.config }}
