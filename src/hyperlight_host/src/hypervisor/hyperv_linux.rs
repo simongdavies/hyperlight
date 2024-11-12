@@ -14,20 +14,20 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-#[cfg(feature = "mshv2")]
+#[cfg(mshv2)]
 extern crate mshv_bindings2 as mshv_bindings;
-#[cfg(feature = "mshv2")]
+#[cfg(mshv2)]
 extern crate mshv_ioctls2 as mshv_ioctls;
 
-#[cfg(feature = "mshv3")]
+#[cfg(mshv3)]
 extern crate mshv_bindings3 as mshv_bindings;
-#[cfg(feature = "mshv3")]
+#[cfg(mshv3)]
 extern crate mshv_ioctls3 as mshv_ioctls;
 
 use std::fmt::{Debug, Formatter};
 
 use log::error;
-#[cfg(feature = "mshv2")]
+#[cfg(mshv2)]
 use mshv_bindings::hv_message;
 use mshv_bindings::{
     hv_message_type, hv_message_type_HVMSG_GPA_INTERCEPT, hv_message_type_HVMSG_UNMAPPED_GPA,
@@ -35,7 +35,7 @@ use mshv_bindings::{
     hv_register_name_HV_X64_REGISTER_RIP, hv_register_value, mshv_user_mem_region,
     FloatingPointUnit, SegmentRegister, SpecialRegisters, StandardRegisters,
 };
-#[cfg(feature = "mshv3")]
+#[cfg(mshv3)]
 use mshv_bindings::{
     hv_partition_property_code_HV_PARTITION_PROPERTY_SYNTHETIC_PROC_FEATURES,
     hv_partition_synthetic_processor_features,
@@ -105,9 +105,9 @@ impl HypervLinuxDriver {
         }
         let mshv = Mshv::new()?;
         let pr = Default::default();
-        #[cfg(feature = "mshv2")]
+        #[cfg(mshv2)]
         let vm_fd = mshv.create_vm_with_config(&pr)?;
-        #[cfg(feature = "mshv3")]
+        #[cfg(mshv3)]
         let vm_fd = {
             let vm_fd = mshv.create_vm_with_args(&pr)?;
             let features: hv_partition_synthetic_processor_features = Default::default();
@@ -311,12 +311,12 @@ impl Hypervisor for HypervLinuxDriver {
         const UNMAPPED_GPA_MESSAGE: hv_message_type = hv_message_type_HVMSG_UNMAPPED_GPA;
         const INVALID_GPA_ACCESS_MESSAGE: hv_message_type = hv_message_type_HVMSG_GPA_INTERCEPT;
 
-        #[cfg(feature = "mshv2")]
+        #[cfg(mshv2)]
         let run_result = {
             let hv_message: hv_message = Default::default();
             &self.vcpu_fd.run(hv_message)
         };
-        #[cfg(feature = "mshv3")]
+        #[cfg(mshv3)]
         let run_result = &self.vcpu_fd.run();
 
         let result = match run_result {

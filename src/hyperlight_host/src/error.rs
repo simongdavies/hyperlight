@@ -14,10 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-#[cfg(feature = "mshv2")]
+#[cfg(mshv2)]
 extern crate mshv_ioctls2 as mshv_ioctls;
 
-#[cfg(feature = "mshv3")]
+#[cfg(mshv3)]
 extern crate mshv_ioctls3 as mshv_ioctls;
 
 use std::array::TryFromSliceError;

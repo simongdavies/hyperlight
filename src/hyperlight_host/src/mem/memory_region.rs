@@ -14,14 +14,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-#[cfg(feature = "mshv2")]
+#[cfg(mshv2)]
 extern crate mshv_bindings2 as mshv_bindings;
-#[cfg(feature = "mshv2")]
+#[cfg(mshv2)]
 extern crate mshv_ioctls2 as mshv_ioctls;
 
-#[cfg(feature = "mshv3")]
+#[cfg(mshv3)]
 extern crate mshv_bindings3 as mshv_bindings;
-#[cfg(feature = "mshv3")]
+#[cfg(mshv3)]
 extern crate mshv_ioctls3 as mshv_ioctls;
 
 use std::ops::Range;
@@ -32,11 +32,11 @@ use hyperlight_common::mem::PAGE_SHIFT;
 use hyperlight_common::mem::PAGE_SIZE_USIZE;
 #[cfg(mshv)]
 use mshv_bindings::{hv_x64_memory_intercept_message, mshv_user_mem_region};
-#[cfg(feature = "mshv2")]
+#[cfg(mshv2)]
 use mshv_bindings::{
     HV_MAP_GPA_EXECUTABLE, HV_MAP_GPA_PERMISSIONS_NONE, HV_MAP_GPA_READABLE, HV_MAP_GPA_WRITABLE,
 };
-#[cfg(feature = "mshv3")]
+#[cfg(mshv3)]
 use mshv_bindings::{
     MSHV_SET_MEM_BIT_EXECUTABLE, MSHV_SET_MEM_BIT_UNMAP, MSHV_SET_MEM_BIT_WRITABLE,
 };
@@ -242,7 +242,7 @@ impl From<MemoryRegion> for mshv_user_mem_region {
         let guest_pfn = region.guest_region.start as u64 >> PAGE_SHIFT;
         let userspace_addr = region.host_region.start as u64;
 
-        #[cfg(feature = "mshv2")]
+        #[cfg(mshv2)]
         {
             let flags = region.flags.iter().fold(0, |acc, flag| {
                 let flag_value = match flag {
@@ -261,7 +261,7 @@ impl From<MemoryRegion> for mshv_user_mem_region {
                 flags,
             }
         }
-        #[cfg(feature = "mshv3")]
+        #[cfg(mshv3)]
         {
             let flags: u8 = region.flags.iter().fold(0, |acc, flag| {
                 let flag_value = match flag {
