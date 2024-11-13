@@ -109,6 +109,10 @@ impl HypervLinuxDriver {
         let vm_fd = mshv.create_vm_with_config(&pr)?;
         #[cfg(mshv3)]
         let vm_fd = {
+            // It's important to avoid create_vm() and explicitly use
+            // create_vm_with_args() with an empty arguments structure
+            // here, because otherwise the partition is set up with a SynIC.
+
             let vm_fd = mshv.create_vm_with_args(&pr)?;
             let features: hv_partition_synthetic_processor_features = Default::default();
             vm_fd.hvcall_set_partition_property(
