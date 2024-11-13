@@ -94,18 +94,14 @@ fn main() -> Result<()> {
         // inprocess feature is aliased with debug_assertions to make it only available in debug-builds.
         // You should never use #[cfg(feature = "inprocess")] in the codebase. Use #[cfg(inprocess)] instead.
         inprocess: { all(feature = "inprocess", debug_assertions) },
-        // the following is a bit of a hack to stop clippy failing wehn run with -all features as it enables both mshv2 and mshv3 at the same time causing errors
-        mshv2: { all(feature = "mshv2", target_os = "linux", not(clippy)) },
+        // the following features are mutually exclusive but rather than enforcing that here we are enabling mshv3 to override mshv2 when both are enabled
+        // because mshv2 is in the default feature set we want to allow users to enable mshv3 without having to set --no-default-features and the re-enable
+        // the other features they want.
+        mshv2: { all(feature = "mshv2", not(feature="mshv3"), target_os = "linux") },
         mshv3: { all(feature = "mshv3", target_os = "linux") },
     }
 
     write_built_file()?;
-
-    // mshv2 and mshv3 features are mutually exclusive
-    #[cfg(all(feature = "mshv2", feature = "mshv3", not(clippy)))]
-    Err(anyhow::anyhow!(
-        "mshv2 and mshv3 features are mutually exclusive"
-    ))?;
 
     Ok(())
 }
