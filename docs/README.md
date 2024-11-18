@@ -32,12 +32,12 @@ This project is composed internally of several internal components, depicted in 
 
 ## For developers
 
-* [Security guidance for developers](./security-guidance-for-developers)
-* [Paging Development Notes](./paging-development-notes)
-* [How to use Flatbuffers in Hyperlight](./how-to-use-flatbuffers)
-* [How to make a Hyperlight release](./how-to-make-releases)
-* [Getting Hyperlight Metrics, Logs, and Traces](./hyperlight-metrics-logs-and-traces)
-* [Benchmarking Hyperlight](./benchmarking-hyperlight)
-* [Hyperlight Surrogate Development Notes](./hyperlight-surrogate-development-notes)
-* [Debugging Hyperlight](./debugging-hyperlight)
+* [Security guidance for developers](./security-guidance-for-developers.md)
+* [Paging Development Notes](./paging-development-notes.md)
+* [How to use Flatbuffers in Hyperlight](./how-to-use-flatbuffers.md)
+* [How to make a Hyperlight release](./how-to-make-releases.md)
+* [Getting Hyperlight Metrics, Logs, and Traces](./hyperlight-metrics-logs-and-traces.md)
+* [Benchmarking Hyperlight](./benchmarking-hyperlight.md)
+* [Hyperlight Surrogate Development Notes](./hyperlight-surrogate-development-notes.md)
+* [Debugging Hyperlight](./debugging-hyperlight.md)
 * [Signal Handling in Hyperlight](./signal-handlers-development-notes.md)
