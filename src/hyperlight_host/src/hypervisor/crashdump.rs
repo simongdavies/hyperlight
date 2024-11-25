@@ -6,8 +6,8 @@ use super::Hypervisor;
 use crate::{new_error, Result};
 
 /// Dump registers + memory regions + raw memory to a tempfile
-#[cfg(feature = "dump_on_crash")]
-pub(crate) fn dump_on_crash_to_tempfile(hv: &dyn Hypervisor) -> Result<()> {
+#[cfg(crashdump)]
+pub(crate) fn crashdump_to_tempfile(hv: &dyn Hypervisor) -> Result<()> {
     let mut temp_file = NamedTempFile::with_prefix("mem")?;
     let hv_details = format!("{:#x?}", hv);
 
@@ -35,7 +35,7 @@ pub(crate) fn dump_on_crash_to_tempfile(hv: &dyn Hypervisor) -> Result<()> {
     let persist_path = temp_file.path().with_extension("dmp");
     temp_file
         .persist(&persist_path)
-        .map_err(|e| new_error!("Failed to persist dump_on_crash file: {:?}", e))?;
+        .map_err(|e| new_error!("Failed to persist crashdump file: {:?}", e))?;
 
     println!("Memory dumped to file: {:?}", persist_path);
     log::error!("Memory dumped to file: {:?}", persist_path);

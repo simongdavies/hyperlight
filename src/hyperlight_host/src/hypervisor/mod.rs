@@ -55,8 +55,8 @@ pub(crate) mod windows_hypervisor_platform;
 #[cfg(target_os = "windows")]
 pub(crate) mod wrappers;
 
-#[cfg(feature = "dump_on_crash")]
-pub(crate) mod dump_on_crash;
+#[cfg(crashdump)]
+pub(crate) mod crashdump;
 
 use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
@@ -187,7 +187,7 @@ pub(crate) trait Hypervisor: Debug + Sync + Send {
     #[cfg(target_os = "windows")]
     fn get_partition_handle(&self) -> windows::Win32::System::Hypervisor::WHV_PARTITION_HANDLE;
 
-    #[cfg(feature = "dump_on_crash")]
+    #[cfg(crashdump)]
     fn get_memory_regions(&self) -> &[MemoryRegion];
 }
 
@@ -212,8 +212,8 @@ impl VirtualCPU {
                     hv.handle_io(port, data, rip, instruction_length, outb_handle_fn.clone())?
                 }
                 Ok(HyperlightExit::Mmio(addr)) => {
-                    #[cfg(feature = "dump_on_crash")]
-                    dump_on_crash::dump_on_crash_to_tempfile(hv)?;
+                    #[cfg(crashdump)]
+                    crashdump::crashdump_to_tempfile(hv)?;
 
                     mem_access_fn
                         .clone()
@@ -224,8 +224,8 @@ impl VirtualCPU {
                     log_then_return!("MMIO access address {:#x}", addr);
                 }
                 Ok(HyperlightExit::AccessViolation(addr, tried, region_permission)) => {
-                    #[cfg(feature = "dump_on_crash")]
-                    dump_on_crash::dump_on_crash_to_tempfile(hv)?;
+                    #[cfg(crashdump)]
+                    crashdump::crashdump_to_tempfile(hv)?;
 
                     if region_permission.intersects(MemoryRegionFlags::STACK_GUARD) {
                         return Err(HyperlightError::StackOverflow());
@@ -250,15 +250,15 @@ impl VirtualCPU {
                     log_then_return!(ExecutionCanceledByHost());
                 }
                 Ok(HyperlightExit::Unknown(reason)) => {
-                    #[cfg(feature = "dump_on_crash")]
-                    dump_on_crash::dump_on_crash_to_tempfile(hv)?;
+                    #[cfg(crashdump)]
+                    crashdump::crashdump_to_tempfile(hv)?;
 
                     log_then_return!("Unexpected VM Exit {:?}", reason);
                 }
                 Ok(HyperlightExit::Retry()) => continue,
                 Err(e) => {
-                    #[cfg(feature = "dump_on_crash")]
-                    dump_on_crash::dump_on_crash_to_tempfile(hv)?;
+                    #[cfg(crashdump)]
+                    crashdump::crashdump_to_tempfile(hv)?;
 
                     return Err(e);
                 }

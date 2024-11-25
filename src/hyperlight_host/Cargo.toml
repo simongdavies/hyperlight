@@ -118,9 +118,7 @@ function_call_metrics = []
 executable_heap = []
 # This feature enables printing of debug information to stdout in debug builds
 print_debug = []
-# This feature enables dunping of the VMs details to a file when an unexpected or error exit occurs in a VM in debug mode
-# the name of the file is output to stdout and logged.
-dump_on_crash = ["dep:tempfile"]
+crashdump = ["dep:tempfile"] # Dumps the VM state to a file on unexpected errors or crashes. The path of the file will be printed on stdout and logged. This feature can only be used in debug builds.
 kvm = ["dep:kvm-bindings", "dep:kvm-ioctls"]
 mshv = ["dep:mshv-bindings", "dep:mshv-ioctls"]
 inprocess = []

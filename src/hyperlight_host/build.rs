@@ -94,6 +94,8 @@ fn main() -> Result<()> {
         // inprocess feature is aliased with debug_assertions to make it only available in debug-builds.
         // You should never use #[cfg(feature = "inprocess")] in the codebase. Use #[cfg(inprocess)] instead.
         inprocess: { all(feature = "inprocess", debug_assertions) },
+        // crashdump feature is aliased with debug_assertions to make it only available in debug-builds.
+        crashdump: { all(feature = "crashdump", debug_assertions) },
     }
 
     write_built_file()?;

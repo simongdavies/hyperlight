@@ -18,7 +18,7 @@ use std::fmt::Debug;
 use std::os::raw::c_void;
 
 use super::{HyperlightExit, Hypervisor};
-#[cfg(feature = "dump_on_crash")]
+#[cfg(crashdump)]
 use crate::mem::memory_region::MemoryRegion;
 use crate::sandbox::leaked_outb::LeakedOutBWrapper;
 use crate::Result;
@@ -126,7 +126,7 @@ impl<'a> Hypervisor for InprocessDriver<'a> {
         unimplemented!("get_partition_handle should not be needed since we are in in-process mode")
     }
 
-    #[cfg(feature = "dump_on_crash")]
+    #[cfg(crashdump)]
     fn get_memory_regions(&self) -> &[MemoryRegion] {
         unimplemented!("get_memory_regions is not supported since we are in in-process mode")
     }
