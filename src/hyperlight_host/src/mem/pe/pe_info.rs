@@ -23,7 +23,7 @@ use goblin::pe::PE;
 use tracing::{instrument, Span};
 
 use crate::mem::pe::base_relocations;
-use crate::{debug, log_then_return, Result};
+use crate::{log_then_return, Result};
 
 const IMAGE_REL_BASED_DIR64: u8 = 10;
 const IMAGE_REL_BASED_ABSOLUTE: u8 = 0;
@@ -106,9 +106,11 @@ impl PEInfo {
             let name = section.name().unwrap_or("Unknown");
             let virtual_size = section.virtual_size;
             let raw_size = section.size_of_raw_data;
-            debug!(
+            crate::debug!(
                 "Section: {}, Virtual Size: {}, On-Disk Size: {}",
-                name, virtual_size, raw_size
+                name,
+                virtual_size,
+                raw_size
             );
 
             if virtual_size > raw_size {
@@ -122,16 +124,16 @@ impl PEInfo {
 
                     data_section_raw_pointer = section.pointer_to_raw_data;
                     data_section_additional_bytes = virtual_size - raw_size;
-                    debug!(
+                    crate::debug!(
                         "Resizing the data section - Additional bytes required: {}",
                         data_section_additional_bytes
                     );
-                    debug!(
+                    crate::debug!(
                         "Resizing the data section - Existing PE File Size: {} New PE File Size: {}",
                         pe_bytes.len(),
                         pe_bytes.len() + data_section_additional_bytes as usize,
                     );
-                    debug!(
+                    crate::debug!(
                         "Resizing the data section - Data Section Raw Pointer: {}",
                         data_section_raw_pointer
                     );
@@ -140,19 +142,19 @@ impl PEInfo {
                     end_of_data_index =
                         (section.pointer_to_raw_data + section.size_of_raw_data) as usize;
 
-                    debug!("End of data index: {}", end_of_data_index);
+                    crate::debug!("End of data index: {}", end_of_data_index);
 
                     // the remainder of the data is the rest of the file after the .data section if any
 
                     let next_section = pe.sections.get(i + 1);
 
                     if let Some(next_section) = next_section {
-                        debug!(
+                        crate::debug!(
                             "Start of section after data index: {}",
                             next_section.pointer_to_raw_data
                         );
                     } else {
-                        debug!("No more sections after the .data section");
+                        crate::debug!("No more sections after the .data section");
                     }
                 } else {
                     log_then_return!(

@@ -96,6 +96,8 @@ fn main() -> Result<()> {
         inprocess: { all(feature = "inprocess", debug_assertions) },
         // crashdump feature is aliased with debug_assertions to make it only available in debug-builds.
         crashdump: { all(feature = "crashdump", debug_assertions) },
+        // print_debug feature is aliased with debug_assertions to make it only available in debug-builds.
+        print_debug: { all(feature = "print_debug", debug_assertions) },
     }
 
     write_built_file()?;
