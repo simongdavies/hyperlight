@@ -19,7 +19,6 @@ use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::string::String;
 
-use cfg_if::cfg_if;
 use hyperlight_common::mem::PAGE_SIZE_USIZE;
 use tracing::{instrument, Span};
 use windows::Win32::Foundation::HANDLE;
@@ -463,19 +462,10 @@ impl Hypervisor for HypervWindowsDriver {
                 // see https://learn.microsoft.com/en-us/virtualization/api/hypervisor-platform/funcs/whvexitcontextdatatypes)
                 let instruction_length = exit_context.VpContext._bitfield & 0xF;
                 unsafe {
-                    cfg_if! {
-                        if #[cfg(all(feature = "print_debug", debug_assertions))] {
-                            println!(
-                                "HyperV IO Details :\n Port: {:#x} \n {:#?}",
-                                exit_context.Anonymous.IoPortAccess.PortNumber, &self
-                            );
-                        } else {
-                            debug!(
-                                "HyperV IO Details :\n Port: {:#x} \n {:#?}",
-                                exit_context.Anonymous.IoPortAccess.PortNumber, &self
-                            );
-                        }
-                    }
+                    debug!(
+                        "HyperV IO Details :\n Port: {:#x} \n {:#?}",
+                        exit_context.Anonymous.IoPortAccess.PortNumber, &self
+                    );
                     HyperlightExit::IoOut(
                         exit_context.Anonymous.IoPortAccess.PortNumber,
                         exit_context
@@ -508,18 +498,6 @@ impl Hypervisor for HypervWindowsDriver {
                     "HyperV Memory Access Details :\n GPA: {:#?}\n Access Info :{:#?}\n {:#?} ",
                     gpa, access_info, &self
                 );
-                #[cfg(all(debug_assertions, feature = "dump_on_crash"))]
-                {
-                    if let Err(e) = unsafe {
-                        self.write_dump_file(
-                            self.mem_regions.clone(),
-                            self.source_address.add(PAGE_SIZE_USIZE) as *const u8,
-                            self.size,
-                        )
-                    } {
-                        println!("Error dumping memory: {}", e);
-                    }
-                }
 
                 match self.get_memory_access_violation(gpa as usize, &self.mem_regions, access_info)
                 {
@@ -539,18 +517,6 @@ impl Hypervisor for HypervWindowsDriver {
                     "HyperV Unexpected Exit Details :#nReason {:#?}\n {:#?}",
                     exit_context.ExitReason, &self
                 );
-                #[cfg(all(debug_assertions, feature = "dump_on_crash"))]
-                {
-                    if let Err(e) = unsafe {
-                        self.write_dump_file(
-                            self.mem_regions.clone(),
-                            self.source_address.add(PAGE_SIZE_USIZE) as *const u8,
-                            self.size,
-                        )
-                    } {
-                        println!("Error dumping memory: {}", e);
-                    }
-                }
                 match self.get_exit_details(exit_context.ExitReason) {
                     Ok(error) => HyperlightExit::Unknown(error),
                     Err(e) => HyperlightExit::Unknown(format!("Error getting exit details: {}", e)),
@@ -568,6 +534,11 @@ impl Hypervisor for HypervWindowsDriver {
     #[instrument(skip_all, parent = Span::current(), level = "Trace")]
     fn as_mut_hypervisor(&mut self) -> &mut dyn Hypervisor {
         self as &mut dyn Hypervisor
+    }
+
+    #[cfg(feature = "dump_on_crash")]
+    fn get_memory_regions(&self) -> &[MemoryRegion] {
+        &self.mem_regions
     }
 }
 

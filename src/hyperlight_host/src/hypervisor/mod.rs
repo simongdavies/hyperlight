@@ -55,6 +55,9 @@ pub(crate) mod windows_hypervisor_platform;
 #[cfg(target_os = "windows")]
 pub(crate) mod wrappers;
 
+#[cfg(feature = "dump_on_crash")]
+pub(crate) mod dump_on_crash;
+
 use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 
@@ -184,70 +187,8 @@ pub(crate) trait Hypervisor: Debug + Sync + Send {
     #[cfg(target_os = "windows")]
     fn get_partition_handle(&self) -> windows::Win32::System::Hypervisor::WHV_PARTITION_HANDLE;
 
-    /// Dump memory to a file on crash
-    #[cfg(all(debug_assertions, feature = "dump_on_crash", target_os = "linux"))]
-    fn dump_on_crash(&self, mem_regions: Vec<MemoryRegion>) {
-        let memory_size = mem_regions
-            .iter()
-            .map(|region| region.guest_region.end - region.guest_region.start)
-            .sum();
-        if let Err(e) = unsafe {
-            self.write_dump_file(
-                mem_regions.clone(),
-                mem_regions[0].host_region.start as *const u8,
-                memory_size,
-            )
-        } {
-            println!("Error dumping memory: {}", e);
-        }
-    }
-
-    /// A function that takes an address and a size and writes the memory at that address to a file in the temp/tmp directory
-    ///  # Safety
-    /// This function is unsafe because it is writing memory to a file, make sure that the address is valid and that the size is correct
-    /// This function is only available when the `dump_on_crash` feature is enabled and running in debug mode
-    #[cfg(all(feature = "dump_on_crash", debug_assertions))]
-    unsafe fn write_dump_file(
-        &self,
-        regions: Vec<MemoryRegion>,
-        address: *const u8,
-        size: usize,
-    ) -> Result<()> {
-        use std::io::Write;
-
-        use tempfile::NamedTempFile;
-
-        if address.is_null() || size == 0 {
-            return Err(new_error!("Invalid address or size"));
-        }
-
-        let hv_details = format!("{:#?}", self);
-        let regions_details = format!("{:#?}", regions);
-
-        // Create a temporary file
-        let mut file = NamedTempFile::with_prefix("mem")?;
-        let temp_path = file.path().to_path_buf();
-
-        file.write_all(hv_details.as_bytes())?;
-        file.write_all(b"\n")?;
-        file.write_all(regions_details.as_bytes())?;
-        file.write_all(b"\n")?;
-
-        // SAFETY: Ensure the address and size are valid and accessible
-        unsafe {
-            let slice = std::slice::from_raw_parts(address, size);
-            file.write_all(slice)?;
-            file.flush()?;
-        }
-        let persist_path = temp_path.with_extension("dmp");
-        file.persist(&persist_path)
-            .map_err(|e| new_error!("Failed to persist file: {:?}", e))?;
-
-        print!("Memory dumped to file: {:?}", persist_path);
-        log::error!("Memory dumped to file: {:?}", persist_path);
-
-        Ok(())
-    }
+    #[cfg(feature = "dump_on_crash")]
+    fn get_memory_regions(&self) -> &[MemoryRegion];
 }
 
 /// A virtual CPU that can be run until an exit occurs
@@ -263,22 +204,29 @@ impl VirtualCPU {
         mem_access_fn: Arc<Mutex<dyn MemAccessHandlerCaller>>,
     ) -> Result<()> {
         loop {
-            match hv.run()? {
-                HyperlightExit::Halt() => {
+            match hv.run() {
+                Ok(HyperlightExit::Halt()) => {
                     break;
                 }
-                HyperlightExit::IoOut(port, data, rip, instruction_length) => {
+                Ok(HyperlightExit::IoOut(port, data, rip, instruction_length)) => {
                     hv.handle_io(port, data, rip, instruction_length, outb_handle_fn.clone())?
                 }
-                HyperlightExit::Mmio(addr) => {
+                Ok(HyperlightExit::Mmio(addr)) => {
+                    #[cfg(feature = "dump_on_crash")]
+                    dump_on_crash::dump_on_crash_to_tempfile(hv)?;
+
                     mem_access_fn
                         .clone()
                         .try_lock()
                         .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?
                         .call()?;
+
                     log_then_return!("MMIO access address {:#x}", addr);
                 }
-                HyperlightExit::AccessViolation(addr, tried, region_permission) => {
+                Ok(HyperlightExit::AccessViolation(addr, tried, region_permission)) => {
+                    #[cfg(feature = "dump_on_crash")]
+                    dump_on_crash::dump_on_crash_to_tempfile(hv)?;
+
                     if region_permission.intersects(MemoryRegionFlags::STACK_GUARD) {
                         return Err(HyperlightError::StackOverflow());
                     }
@@ -288,7 +236,7 @@ impl VirtualCPU {
                         region_permission
                     ));
                 }
-                HyperlightExit::Cancelled() => {
+                Ok(HyperlightExit::Cancelled()) => {
                     // Shutdown is returned when the host has cancelled execution
                     // After termination, the main thread will re-initialize the VM
                     if let Some(hvh) = hv_handler {
@@ -301,10 +249,19 @@ impl VirtualCPU {
                     int_counter_inc!(&NumberOfCancelledGuestExecutions);
                     log_then_return!(ExecutionCanceledByHost());
                 }
-                HyperlightExit::Unknown(reason) => {
+                Ok(HyperlightExit::Unknown(reason)) => {
+                    #[cfg(feature = "dump_on_crash")]
+                    dump_on_crash::dump_on_crash_to_tempfile(hv)?;
+
                     log_then_return!("Unexpected VM Exit {:?}", reason);
                 }
-                HyperlightExit::Retry() => continue,
+                Ok(HyperlightExit::Retry()) => continue,
+                Err(e) => {
+                    #[cfg(feature = "dump_on_crash")]
+                    dump_on_crash::dump_on_crash_to_tempfile(hv)?;
+
+                    return Err(e);
+                }
             }
         }
 

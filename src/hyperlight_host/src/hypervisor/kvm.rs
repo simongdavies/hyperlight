@@ -17,7 +17,6 @@ limitations under the License.
 use std::convert::TryFrom;
 use std::fmt::Debug;
 
-use cfg_if::cfg_if;
 use kvm_bindings::{kvm_fpu, kvm_regs, kvm_userspace_memory_region, KVM_MEM_READONLY};
 use kvm_ioctls::Cap::UserMemory;
 use kvm_ioctls::{Kvm, VcpuExit, VcpuFd, VmFd};
@@ -283,11 +282,9 @@ impl Hypervisor for KVMDriver {
             }
             Ok(VcpuExit::MmioRead(addr, _)) => {
                 debug!("KVM MMIO Read -Details: Address: {} \n {:#?}", addr, &self);
-                #[cfg(all(debug_assertions, feature = "dump_on_crash"))]
-                self.dump_on_crash(self.mem_regions.clone());
-                let gpa = addr as usize;
+
                 match self.get_memory_access_violation(
-                    gpa,
+                    addr as usize,
                     &self.mem_regions,
                     MemoryRegionFlags::READ,
                 ) {
@@ -297,11 +294,9 @@ impl Hypervisor for KVMDriver {
             }
             Ok(VcpuExit::MmioWrite(addr, _)) => {
                 debug!("KVM MMIO Write -Details: Address: {} \n {:#?}", addr, &self);
-                #[cfg(all(debug_assertions, feature = "dump_on_crash"))]
-                self.dump_on_crash(self.mem_regions.clone());
-                let gpa = addr as usize;
+
                 match self.get_memory_access_violation(
-                    gpa,
+                    addr as usize,
                     &self.mem_regions,
                     MemoryRegionFlags::WRITE,
                 ) {
@@ -315,25 +310,12 @@ impl Hypervisor for KVMDriver {
                 libc::EAGAIN => HyperlightExit::Retry(),
                 _ => {
                     debug!("KVM Error -Details: Address: {} \n {:#?}", e, &self);
-                    #[cfg(all(debug_assertions, feature = "dump_on_crash"))]
-                    self.dump_on_crash(self.mem_regions.clone());
                     log_then_return!("Error running VCPU {:?}", e);
                 }
             },
             Ok(other) => {
-                cfg_if! {
-                    if #[cfg(all(feature = "print_debug", debug_assertions))] {
-                        let _ = other;
-                        debug!("KVM Other Exit: \n {:#?}", &self);
-                        HyperlightExit::Unknown("Unexpected KVM Exit".to_string())
-                    } else if #[cfg(all(feature = "dump_on_crash", debug_assertions))] {
-                            self.dump_on_crash(self.mem_regions.clone());
-                            HyperlightExit::Unknown(format!("Unexpected KVM Exit {:?}", other))
-                    } else{
-                        debug!("KVM Other Exit {:?}", other);
-                        HyperlightExit::Unknown(format!("Unexpected KVM Exit {:?}", other))
-                    }
-                }
+                debug!("KVM Other Exit {:?}", other);
+                HyperlightExit::Unknown(format!("Unexpected KVM Exit {:?}", other))
             }
         };
         Ok(result)
@@ -342,6 +324,11 @@ impl Hypervisor for KVMDriver {
     #[instrument(skip_all, parent = Span::current(), level = "Trace")]
     fn as_mut_hypervisor(&mut self) -> &mut dyn Hypervisor {
         self as &mut dyn Hypervisor
+    }
+
+    #[cfg(feature = "dump_on_crash")]
+    fn get_memory_regions(&self) -> &[MemoryRegion] {
+        &self.mem_regions
     }
 }
 
