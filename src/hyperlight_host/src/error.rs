@@ -233,7 +233,7 @@ pub enum HyperlightError {
     #[error("Failed To Convert Parameter Value {0:?} to {1:?}")]
     ParameterValueConversionFailure(ParameterValue, &'static str),
 
-    /// a failure occured processing a PE file
+    /// a failure occurred processing a PE file
     #[error("Failure processing PE File {0:?}")]
     PEFileProcessingFailure(#[from] goblin::error::Error),
 
