@@ -19,7 +19,7 @@ double echo_double(double d) { return d; }
 
 hl_Vec *set_byte_array_to_zero(const hl_FunctionCall* params) {
   hl_Vec input = params->parameters[0].value.VecBytes;
-  uint8_t *x = hlmalloc(input.len);
+  uint8_t *x = malloc(input.len);
   for (uintptr_t i = 0; i < input.len; i++) {
     x[i] = 0;
   }
@@ -90,7 +90,7 @@ int small_var(void) {
 }
 
 int call_malloc(int32_t size) {
-  void *heap_memory = hlmalloc(size);
+  void *heap_memory = malloc(size);
   if (NULL == heap_memory) {
     hl_set_error(hl_ErrorCode_GuestError, "Malloc Failed");
   }
@@ -99,12 +99,12 @@ int call_malloc(int32_t size) {
 }
 
 int malloc_and_free(int32_t size) {
-  void *heap_memory = hlmalloc(size);
+  void *heap_memory = malloc(size);
   if (NULL == heap_memory) {
     hl_set_error(hl_ErrorCode_GuestError, "Malloc Failed");
   }
 
-  hlfree(heap_memory);
+  free(heap_memory);
 
   return size;
 }

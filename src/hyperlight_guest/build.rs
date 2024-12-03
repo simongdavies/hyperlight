@@ -133,11 +133,6 @@ fn cargo_main() {
         cfg.define("__x86_64__", None);
         cfg.define("__LITTLE_ENDIAN__", None);
 
-        cfg.define("malloc", "hlmalloc");
-        cfg.define("calloc", "hlcalloc");
-        cfg.define("free", "hlfree");
-        cfg.define("realloc", "hlrealloc");
-
         // silence compiler warnings
         cfg.flag("-Wno-sign-compare");
         cfg.flag("-Wno-bitwise-op-parentheses");
