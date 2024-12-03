@@ -78,9 +78,14 @@ pub extern "C" fn hlrealloc(ptr: *mut c_void, size: usize) -> *mut c_void {
     }
 
     unsafe {
+        let total_new_size = size
+            .checked_add(size_of::<Layout>())
+            .expect("data and layout size should not overflow in realloc");
+
         let block_start = (ptr as *const Layout).sub(1);
-        let layout = block_start.read();
-        let total_new_size = size + size_of::<Layout>();
+        let old_layout = block_start.read();
+        let new_layout = Layout::from_size_align(total_new_size, align_of::<usize>()).unwrap();
+
         let new_block_start =
             alloc::alloc::realloc(block_start as *mut u8, layout, total_new_size) as *mut Layout;
 
@@ -88,8 +93,8 @@ pub extern "C" fn hlrealloc(ptr: *mut c_void, size: usize) -> *mut c_void {
             // Realloc failed
             abort_with_code(ErrorCode::MallocFailed as i32);
         } else {
-            // Return the pointer just after the layout information
-            // since old layout should still as it would have been copied
+            // Update the stored Layout, then return ptr to memory right after the Layout.
+            new_block_start.write(new_layout);
             new_block_start.add(1) as *mut c_void
         }
     }
