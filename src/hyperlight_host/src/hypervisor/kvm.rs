@@ -76,9 +76,6 @@ impl KVMDriver {
         entrypoint: u64,
         rsp: u64,
     ) -> Result<Self> {
-        if !is_hypervisor_present() {
-            log_then_return!("KVM is not present");
-        };
         let kvm = Kvm::new()?;
 
         let vm_fd = kvm.create_vm_with_type(0)?;

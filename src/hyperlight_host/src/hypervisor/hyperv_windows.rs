@@ -35,16 +35,15 @@ use super::surrogate_process_manager::*;
 use super::windows_hypervisor_platform::{VMPartition, VMProcessor};
 use super::wrappers::WHvFPURegisters;
 use super::{
-    windows_hypervisor_platform as whp, HyperlightExit, Hypervisor, VirtualCPU, CR0_AM, CR0_ET,
-    CR0_MP, CR0_NE, CR0_PE, CR0_PG, CR0_WP, CR4_OSFXSR, CR4_OSXMMEXCPT, CR4_PAE, EFER_LMA,
-    EFER_LME, EFER_NX, EFER_SCE,
+    HyperlightExit, Hypervisor, VirtualCPU, CR0_AM, CR0_ET, CR0_MP, CR0_NE, CR0_PE, CR0_PG, CR0_WP,
+    CR4_OSFXSR, CR4_OSXMMEXCPT, CR4_PAE, EFER_LMA, EFER_LME, EFER_NX, EFER_SCE,
 };
 use crate::hypervisor::fpu::FP_CONTROL_WORD_DEFAULT;
 use crate::hypervisor::hypervisor_handler::HypervisorHandler;
 use crate::hypervisor::wrappers::WHvGeneralRegisters;
 use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags};
 use crate::mem::ptr::{GuestPtr, RawPtr};
-use crate::HyperlightError::{NoHypervisorFound, WindowsAPIError};
+use crate::HyperlightError::WindowsAPIError;
 use crate::{debug, log_then_return, new_error, Result};
 
 /// A Hypervisor driver for HyperV-on-Windows.
@@ -75,10 +74,6 @@ impl HypervWindowsDriver {
         entrypoint: u64,
         rsp: u64,
     ) -> Result<Self> {
-        if !whp::is_hypervisor_present() {
-            log_then_return!(NoHypervisorFound());
-        }
-
         // create and setup hypervisor partition
         let mut partition = VMPartition::new(1)?;
 

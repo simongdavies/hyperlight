@@ -84,9 +84,6 @@ impl HypervLinuxDriver {
         rsp_ptr: GuestPtr,
         pml4_ptr: GuestPtr,
     ) -> Result<Self> {
-        if !is_hypervisor_present() {
-            log_then_return!("Hyper-V is not present on this system");
-        }
         let mshv = Mshv::new()?;
         let pr = Default::default();
         let vm_fd = mshv.create_vm_with_config(&pr)?;
