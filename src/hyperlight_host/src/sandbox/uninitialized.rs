@@ -142,6 +142,10 @@ impl UninitializedSandbox {
     ) -> Result<Self> {
         log_build_details();
 
+        // hyperlight is only supported on Windows 11 and Windows Server 2022 and later
+        #[cfg(target_os = "windows")]
+        check_windows_version()?;
+
         // If the guest binary is a file make sure it exists
         let guest_binary = match guest_binary {
             GuestBinary::FilePath(binary_path) => {
@@ -302,6 +306,30 @@ impl UninitializedSandbox {
             SandboxMemoryManager::load_guest_binary_into_memory(cfg, &mut exe_info, inprocess)
         }
     }
+}
+// Check to see if the current version of Windows is supported
+// Hyperlight is only supported on Windows 11 and Windows Server 2022 and later
+#[cfg(target_os = "windows")]
+fn check_windows_version() -> Result<()> {
+    use windows_version::{is_server, OsVersion};
+    const WINDOWS_MAJOR: u32 = 10;
+    const WINDOWS_MINOR: u32 = 0;
+    const WINDOWS_PACK: u32 = 0;
+
+    // Windows Server 2022 has version numbers 10.0.20348 or greater
+    if is_server() {
+        if OsVersion::current() < OsVersion::new(WINDOWS_MAJOR, WINDOWS_MINOR, WINDOWS_PACK, 20348)
+        {
+            return Err(new_error!(
+                "Hyperlight Requires Windows Server 2022 or newer"
+            ));
+        }
+    } else if OsVersion::current()
+        < OsVersion::new(WINDOWS_MAJOR, WINDOWS_MINOR, WINDOWS_PACK, 22000)
+    {
+        return Err(new_error!("Hyperlight Requires Windows 11 or newer"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
