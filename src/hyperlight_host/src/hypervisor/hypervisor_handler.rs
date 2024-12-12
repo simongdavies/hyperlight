@@ -592,7 +592,29 @@ impl HypervisorHandler {
                 HandlerMsg::Error(e) => Err(e),
                 HandlerMsg::FinishedHypervisorHandlerAction => Ok(()),
             },
-            Err(_) => Err(HyperlightError::HypervisorHandlerMessageReceiveTimedout()),
+            Err(_) => {
+                // If we have timed out it may be that the handler thread returned an error before it sent a message, so rather than just timeout here
+                // we will try and get the join handle for the thread and if it has finished check to see if it returned an error
+                // if it did then we will return that error, otherwise we will return the timeout error
+                // we need to take ownership of the handle to join it
+                match self
+                    .execution_variables
+                    .join_handle
+                    .try_lock()
+                    .map_err(|_| HyperlightError::HypervisorHandlerMessageReceiveTimedout())?
+                    .take_if(|handle| handle.is_finished())
+                {
+                    Some(handle) => {
+                        // If the thread has finished, we try to join it and return the error if it has one
+                        let res = handle.join();
+                        if res.as_ref().is_ok_and(|inner_res| inner_res.is_err()) {
+                            return Err(res.unwrap().unwrap_err());
+                        }
+                        Err(HyperlightError::HypervisorHandlerMessageReceiveTimedout())
+                    }
+                    None => Err(HyperlightError::HypervisorHandlerMessageReceiveTimedout()),
+                }
+            }
         }
     }
 
