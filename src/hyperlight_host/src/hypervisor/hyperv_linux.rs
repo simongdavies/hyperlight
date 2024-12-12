@@ -53,7 +53,7 @@ use crate::hypervisor::hypervisor_handler::HypervisorHandler;
 use crate::hypervisor::HyperlightExit;
 use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags};
 use crate::mem::ptr::{GuestPtr, RawPtr};
-use crate::{debug, log_then_return, new_error, Result};
+use crate::{log_then_return, new_error, Result};
 
 /// Determine whether the HyperV for Linux hypervisor API is present
 /// and functional.
@@ -326,7 +326,7 @@ impl Hypervisor for HypervLinuxDriver {
         let result = match run_result {
             Ok(m) => match m.header.message_type {
                 HALT_MESSAGE => {
-                    debug!("mshv - Halt Details : {:#?}", &self);
+                    crate::debug!("mshv - Halt Details : {:#?}", &self);
                     HyperlightExit::Halt()
                 }
                 IO_PORT_INTERCEPT_MESSAGE => {
@@ -335,7 +335,7 @@ impl Hypervisor for HypervLinuxDriver {
                     let rip = io_message.header.rip;
                     let rax = io_message.rax;
                     let instruction_length = io_message.header.instruction_length() as u64;
-                    debug!("mshv IO Details : \nPort : {}\n{:#?}", port_number, &self);
+                    crate::debug!("mshv IO Details : \nPort : {}\n{:#?}", port_number, &self);
                     HyperlightExit::IoOut(
                         port_number,
                         rax.to_le_bytes().to_vec(),
@@ -346,24 +346,22 @@ impl Hypervisor for HypervLinuxDriver {
                 UNMAPPED_GPA_MESSAGE => {
                     let mimo_message = m.to_memory_info()?;
                     let addr = mimo_message.guest_physical_address;
-                    debug!(
+                    crate::debug!(
                         "mshv MMIO unmapped GPA -Details: Address: {} \n {:#?}",
-                        addr, &self
+                        addr,
+                        &self
                     );
-                    #[cfg(all(debug_assertions, feature = "dump_on_crash"))]
-                    self.dump_on_crash(self.mem_regions.clone());
                     HyperlightExit::Mmio(addr)
                 }
                 INVALID_GPA_ACCESS_MESSAGE => {
                     let mimo_message = m.to_memory_info()?;
                     let gpa = mimo_message.guest_physical_address;
                     let access_info = MemoryRegionFlags::try_from(mimo_message)?;
-                    debug!(
+                    crate::debug!(
                         "mshv MMIO invalid GPA access -Details: Address: {} \n {:#?}",
-                        gpa, &self
+                        gpa,
+                        &self
                     );
-                    #[cfg(all(debug_assertions, feature = "dump_on_crash"))]
-                    self.dump_on_crash(self.mem_regions.clone());
                     match self.get_memory_access_violation(
                         gpa as usize,
                         &self.mem_regions,
@@ -374,9 +372,7 @@ impl Hypervisor for HypervLinuxDriver {
                     }
                 }
                 other => {
-                    debug!("mshv Other Exit: Exit: {:#?} \n {:#?}", other, &self);
-                    #[cfg(all(debug_assertions, feature = "dump_on_crash"))]
-                    self.dump_on_crash(self.mem_regions.clone());
+                    crate::debug!("mshv Other Exit: Exit: {:#?} \n {:#?}", other, &self);
                     log_then_return!("unknown Hyper-V run message type {:?}", other);
                 }
             },
@@ -385,9 +381,7 @@ impl Hypervisor for HypervLinuxDriver {
                 libc::EINTR => HyperlightExit::Cancelled(),
                 libc::EAGAIN => HyperlightExit::Retry(),
                 _ => {
-                    debug!("mshv Error - Details: Error: {} \n {:#?}", e, &self);
-                    #[cfg(all(debug_assertions, feature = "dump_on_crash"))]
-                    self.dump_on_crash(self.mem_regions.clone());
+                    crate::debug!("mshv Error - Details: Error: {} \n {:#?}", e, &self);
                     log_then_return!("Error running VCPU {:?}", e);
                 }
             },
@@ -398,6 +392,11 @@ impl Hypervisor for HypervLinuxDriver {
     #[instrument(skip_all, parent = Span::current(), level = "Trace")]
     fn as_mut_hypervisor(&mut self) -> &mut dyn Hypervisor {
         self as &mut dyn Hypervisor
+    }
+
+    #[cfg(crashdump)]
+    fn get_memory_regions(&self) -> &[MemoryRegion] {
+        &self.mem_regions
     }
 }
 

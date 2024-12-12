@@ -1,4 +1,4 @@
-# HIP NNNN - SKIP NAME
+# HIP NNNN - HIP NAME
 
 <!-- toc -->
 - [Summary](#summary)

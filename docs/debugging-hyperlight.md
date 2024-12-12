@@ -39,6 +39,6 @@ cargo test --package hyperlight-host --test integration_test --features print_de
 
 ## Dumping the memory configuration, virtual processor register state and memory contents on a crash or unexpected VM Exit
 
-To dump the details of the memory configuration, the virtual processors register state and the contents of the VM memory set the feature `dump_on_crash` and run a debug build. This will result in a dump file being created in the temporary directory. The name and location of the dump file will be printed to the console and logged as an error message.
+To dump the details of the memory configuration, the virtual processors register state and the contents of the VM memory set the feature `crashdump` and run a debug build. This will result in a dump file being created in the temporary directory. The name and location of the dump file will be printed to the console and logged as an error message.
 
 There are no tools at this time to analyze the dump file, but it can be useful for debugging.

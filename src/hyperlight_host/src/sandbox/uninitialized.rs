@@ -35,7 +35,7 @@ use crate::sandbox::SandboxConfiguration;
 use crate::sandbox_state::sandbox::EvolvableSandbox;
 use crate::sandbox_state::transition::Noop;
 use crate::{
-    debug, log_build_details, log_then_return, new_error, MultiUseSandbox, Result, SingleUseSandbox,
+    log_build_details, log_then_return, new_error, MultiUseSandbox, Result, SingleUseSandbox,
 };
 
 /// A preliminary `Sandbox`, not yet ready to execute guest code.
@@ -258,7 +258,7 @@ impl UninitializedSandbox {
             }
         }
 
-        debug!("Sandbox created:  {:#?}", sandbox);
+        crate::debug!("Sandbox created:  {:#?}", sandbox);
 
         Ok(sandbox)
     }

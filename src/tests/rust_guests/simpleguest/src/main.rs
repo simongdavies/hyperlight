@@ -54,7 +54,7 @@ use hyperlight_guest::guest_function_register::register_function;
 use hyperlight_guest::host_function_call::{
     call_host_function, get_host_value_return_as_int, get_host_value_return_as_ulong,
 };
-use hyperlight_guest::memory::hlmalloc;
+use hyperlight_guest::memory::malloc;
 use hyperlight_guest::{logging, MIN_STACK_ADDRESS};
 use log::{error, LevelFilter};
 
@@ -623,11 +623,9 @@ fn execute_on_heap(_function_call: &FunctionCall) -> Result<Vec<u8>> {
     Ok(get_flatbuffer_result_from_string("fail"))
 }
 
-#[no_mangle]
-#[allow(improper_ctypes_definitions)]
-pub extern "C" fn test_rust_malloc(function_call: &FunctionCall) -> Result<Vec<u8>> {
+fn test_rust_malloc(function_call: &FunctionCall) -> Result<Vec<u8>> {
     if let ParameterValue::Int(code) = function_call.parameters.clone().unwrap()[0].clone() {
-        let ptr = hlmalloc(code as usize);
+        let ptr = unsafe { malloc(code as usize) };
         Ok(get_flatbuffer_result_from_int(ptr as i32))
     } else {
         Err(HyperlightGuestError::new(
@@ -1012,7 +1010,7 @@ pub extern "C" fn hyperlight_main() {
     register_function(guest_panic_def);
 
     let rust_malloc_def = GuestFunctionDefinition::new(
-        "TestHlMalloc".to_string(),
+        "TestMalloc".to_string(),
         Vec::from(&[ParameterType::Int]),
         ReturnType::Int,
         test_rust_malloc as i64,

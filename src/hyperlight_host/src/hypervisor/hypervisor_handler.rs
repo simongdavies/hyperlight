@@ -16,6 +16,7 @@ limitations under the License.
 
 #[cfg(target_os = "windows")]
 use core::ffi::c_void;
+use std::ops::DerefMut;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -228,13 +229,9 @@ impl HypervisorHandler {
     #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
     pub(crate) fn start_hypervisor_handler(
         &mut self,
-        mut sandbox_memory_manager: SandboxMemoryManager<GuestSharedMemory>,
+        sandbox_memory_manager: SandboxMemoryManager<GuestSharedMemory>,
     ) -> Result<()> {
         let configuration = self.configuration.clone();
-        let mut hv = set_up_hypervisor_partition(
-            &mut sandbox_memory_manager,
-            configuration.outb_handler.clone(),
-        )?;
         #[cfg(target_os = "windows")]
         let in_process = sandbox_memory_manager.is_in_process();
 
@@ -267,18 +264,8 @@ impl HypervisorHandler {
         #[cfg(target_os = "linux")]
         self.execution_variables.run_cancelled.store(false);
 
-        #[cfg(target_os = "windows")]
-        if !in_process {
-            self.execution_variables
-                .set_partition_handle(hv.get_partition_handle())?;
-        }
-
         let to_handler_rx = self.communication_channels.to_handler_rx.clone();
-        #[cfg(target_os = "windows")]
-        let execution_variables = self.execution_variables.clone();
-        #[cfg(target_os = "linux")]
         let mut execution_variables = self.execution_variables.clone();
-        // ^^^ this needs to be mut on linux to set_thread_id
         let from_handler_tx = self.communication_channels.from_handler_tx.clone();
         let hv_handler_clone = self.clone();
 
@@ -295,9 +282,24 @@ impl HypervisorHandler {
             thread::Builder::new()
                 .name("Hypervisor Handler".to_string())
                 .spawn(move || -> Result<()> {
+                    let mut hv: Option<Box<dyn Hypervisor>> = None;
                     for action in to_handler_rx {
                         match action {
                             HypervisorHandlerAction::Initialise => {
+                                {
+                                    hv = Some(set_up_hypervisor_partition(
+                                        execution_variables.shm.try_lock().unwrap().deref_mut().as_mut().unwrap(),
+                                        configuration.outb_handler.clone(),
+                                    )?);
+                                }
+                                let hv = hv.as_mut().unwrap();
+
+                                #[cfg(target_os = "windows")]
+                                if !in_process {
+                                    execution_variables
+                                        .set_partition_handle(hv.get_partition_handle())?;
+                                }
+
                                 #[cfg(target_os = "linux")]
                                 {
                                     // We cannot use the Killable trait, so we get the `pthread_t` via a libc
@@ -328,6 +330,7 @@ impl HypervisorHandler {
                                     .shared_mem
                                     .lock
                                     .try_read();
+
                                 let res = hv.initialise(
                                     configuration.peb_addr.clone(),
                                     configuration.seed,
@@ -362,6 +365,8 @@ impl HypervisorHandler {
                                 }
                             }
                             HypervisorHandlerAction::DispatchCallFromHost(function_name) => {
+                                let hv = hv.as_mut().unwrap();
+
                                 // Lock to indicate an action is being performed in the hypervisor
                                 execution_variables.running.store(true, Ordering::SeqCst);
 
@@ -941,6 +946,13 @@ mod tests {
 
         for handle in handles {
             handle.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn create_10_sandboxes() {
+        for _ in 0..10 {
+            create_multi_use_sandbox();
         }
     }
 

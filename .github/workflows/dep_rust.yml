@@ -74,6 +74,10 @@ jobs:
           # with only one driver enabled (driver mshv/kvm feature is ignored on windows) + seccomp + inprocess
           just test-rust ${{ matrix.config }} inprocess,seccomp,${{ matrix.hypervisor == 'mshv' && 'mshv' || 'kvm' }} 
 
+          # make sure certain cargo features compile
+          cargo check -p hyperlight-host --features crashdump
+          cargo check -p hyperlight-host --features print_debug
+
           # without any driver (shouldn't compile)
           just test-rust-feature-compilation-fail ${{ matrix.config }}
 

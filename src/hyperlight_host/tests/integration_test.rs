@@ -186,14 +186,14 @@ fn guest_panic() {
 }
 
 #[test]
-fn guest_hlmalloc() {
+fn guest_malloc() {
     // this test is rust-only
     let sbox1: SingleUseSandbox = new_uninit_rust().unwrap().evolve(Noop::default()).unwrap();
 
     let size_to_allocate = 2000;
     let res = sbox1
         .call_guest_function_by_name(
-            "TestHlMalloc", // uses hlmalloc
+            "TestMalloc",
             ReturnType::Int,
             Some(vec![ParameterValue::Int(size_to_allocate)]),
         )
@@ -202,7 +202,7 @@ fn guest_hlmalloc() {
 }
 
 #[test]
-fn guest_malloc() {
+fn guest_allocate_vec() {
     let sbox1: SingleUseSandbox = new_uninit().unwrap().evolve(Noop::default()).unwrap();
 
     let size_to_allocate = 2000;
@@ -220,14 +220,14 @@ fn guest_malloc() {
 
 // checks that malloc failures are captured correctly
 #[test]
-fn guest_hlmalloc_abort() {
+fn guest_malloc_abort() {
     let sbox1: SingleUseSandbox = new_uninit_rust().unwrap().evolve(Noop::default()).unwrap();
 
     let size = 20000000; // some big number that should fail when allocated
 
     let res = sbox1
         .call_guest_function_by_name(
-            "TestHlMalloc",
+            "TestMalloc",
             ReturnType::Int,
             Some(vec![ParameterValue::Int(size)]),
         )
