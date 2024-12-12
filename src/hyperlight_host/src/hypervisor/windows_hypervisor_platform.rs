@@ -17,13 +17,16 @@ limitations under the License.
 use core::ffi::c_void;
 
 use tracing::{instrument, Span};
-use windows::Win32::Foundation::HANDLE;
+use windows::core::s;
+use windows::Win32::Foundation::{FreeLibrary, HANDLE};
 use windows::Win32::System::Hypervisor::*;
+use windows::Win32::System::LibraryLoader::*;
+use windows_result::HRESULT;
 
 use super::wrappers::HandleWrapper;
 use crate::hypervisor::wrappers::{WHvFPURegisters, WHvGeneralRegisters, WHvSpecialRegisters};
 use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags};
-use crate::Result;
+use crate::{new_error, Result};
 
 // We need to pass in a primitive array of register names/values
 // to WHvSetVirtualProcessorRegisters and rust needs to know array size
@@ -90,8 +93,18 @@ impl VMPartition {
         process_handle: HandleWrapper,
     ) -> Result<()> {
         let process_handle: HANDLE = process_handle.into();
+        // The function pointer to WHvMapGpaRange2 is resolved dynamically to allow us to detect
+        // when we are running on older versions of windows that do not support this API and
+        // return a more informative error message, rather than failing with an error about a missing entrypoint
+        let whvmapgparange2_func = unsafe {
+            match try_load_whv_map_gpa_range2() {
+                Ok(func) => func,
+                Err(e) => return Err(new_error!("Cant find API: {}", e)),
+            }
+        };
+
         regions.iter().try_for_each(|region| unsafe {
-            WHvMapGpaRange2(
+            let res = whvmapgparange2_func(
                 self.0,
                 process_handle,
                 region.host_region.start as *const c_void,
@@ -109,10 +122,57 @@ impl VMPartition {
                         _ => panic!("Invalid flag"),
                     })
                     .fold(WHvMapGpaRangeFlagNone, |acc, flag| acc | flag), // collect using bitwise OR,
-            )
+            );
+            if res.is_err() {
+                return Err(new_error!("Call to WHvMapGpaRange2 failed"));
+            }
+            Ok(())
         })?;
         Ok(())
     }
+}
+
+// This function dynamically loads the WHvMapGpaRange2 function from the winhvplatform.dll
+// WHvMapGpaRange2 only available on Windows 11 or Windows Server 2022 and later
+// we do things this way to allow a user trying to load hyperlight on an older version of windows to
+// get an error message saying that hyperlight requires a newer version of windows, rather than just failing
+// with an error about a missing entrypoint
+// This function should always succeed since before we get here we have already checked that the hypervisor is present and
+// that we are on a supported version of windows.
+type WHvMapGpaRange2Func = unsafe extern "cdecl" fn(
+    WHV_PARTITION_HANDLE,
+    HANDLE,
+    *const c_void,
+    u64,
+    u64,
+    WHV_MAP_GPA_RANGE_FLAGS,
+) -> HRESULT;
+
+pub unsafe fn try_load_whv_map_gpa_range2() -> Result<WHvMapGpaRange2Func> {
+    let library = unsafe {
+        LoadLibraryExA(
+            s!("winhvplatform.dll"),
+            None,
+            LOAD_LIBRARY_SEARCH_DEFAULT_DIRS,
+        )
+    };
+
+    if let Err(e) = library {
+        return Err(new_error!("{}", e));
+    }
+
+    let library = library.unwrap();
+
+    let address = unsafe { GetProcAddress(library, s!("WHvMapGpaRange2")) };
+
+    if address.is_none() {
+        unsafe { FreeLibrary(library)? };
+        return Err(new_error!(
+            "Failed to find WHvMapGpaRange2 in winhvplatform.dll"
+        ));
+    }
+
+    unsafe { Ok(std::mem::transmute_copy(&address)) }
 }
 
 impl Drop for VMPartition {
