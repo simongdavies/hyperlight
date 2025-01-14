@@ -14,7 +14,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: FULL
+  RUST_BACKTRACE: full
 
 permissions:
   id-token: write
