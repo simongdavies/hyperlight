@@ -364,7 +364,28 @@ mod tests {
             None,
         );
 
-        // in process should only be enabled with the inprocess feature and on debug builds, and requires windows
+        // debug mode should fail with an elf executable
+        assert!(sbox.is_err());
+
+        let simple_guest_path = simple_guest_exe_as_string().unwrap();
+        let sbox = UninitializedSandbox::new(
+            GuestBinary::FilePath(simple_guest_path.clone()),
+            None,
+            Some(SandboxRunOptions::RunInProcess(false)),
+            None,
+        );
+
+        // in process should only be enabled with the inprocess feature and on debug builds
+        assert_eq!(sbox.is_ok(), cfg!(all(inprocess)));
+
+        let sbox = UninitializedSandbox::new(
+            GuestBinary::FilePath(simple_guest_path.clone()),
+            None,
+            Some(SandboxRunOptions::RunInProcess(true)),
+            None,
+        );
+
+        // debug mode should succeed with a PE executable on windows with inprocess enabled
         assert_eq!(sbox.is_ok(), cfg!(all(inprocess, target_os = "windows")));
     }
 
@@ -592,7 +613,14 @@ mod tests {
         }
         #[cfg(target_os = "windows")]
         {
-            let _ = mgr_res.unwrap();
+            #[cfg(inprocess)]
+            {
+                assert!(mgr_res.is_ok())
+            }
+            #[cfg(not(inprocess))]
+            {
+                assert!(mgr_res.is_err())
+            }
         }
     }
 
