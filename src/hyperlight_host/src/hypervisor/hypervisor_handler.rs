@@ -38,6 +38,8 @@ use windows::Win32::System::Hypervisor::{WHvCancelRunVirtualProcessor, WHV_PARTI
 #[cfg(feature = "function_call_metrics")]
 use crate::histogram_vec_observe;
 use crate::hypervisor::handlers::{MemAccessHandlerWrapper, OutBHandlerWrapper};
+#[cfg(target_os = "windows")]
+use crate::hypervisor::wrappers::HandleWrapper;
 use crate::hypervisor::Hypervisor;
 use crate::mem::layout::SandboxMemoryLayout;
 use crate::mem::mgr::SandboxMemoryManager;
@@ -905,6 +907,9 @@ fn set_up_hypervisor_partition(
 
             #[cfg(target_os = "windows")]
             Some(HypervisorType::Whp) => {
+                let mmap_file_handle = mgr
+                    .shared_mem
+                    .with_exclusivity(|e| e.get_mmap_file_handle())?;
                 let hv = crate::hypervisor::hyperv_windows::HypervWindowsDriver::new(
                     regions,
                     mgr.shared_mem.raw_mem_size(), // we use raw_* here because windows driver requires 64K aligned addresses,
@@ -912,6 +917,7 @@ fn set_up_hypervisor_partition(
                     pml4_ptr.absolute()?,
                     entrypoint_ptr.absolute()?,
                     rsp_ptr.absolute()?,
+                    HandleWrapper::from(mmap_file_handle),
                 )?;
                 Ok(Box::new(hv))
             }
