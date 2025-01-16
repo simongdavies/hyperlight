@@ -21,7 +21,6 @@ use std::string::String;
 
 use hyperlight_common::mem::PAGE_SIZE_USIZE;
 use tracing::{instrument, Span};
-use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::Hypervisor::{
     WHvX64RegisterCr0, WHvX64RegisterCr3, WHvX64RegisterCr4, WHvX64RegisterCs, WHvX64RegisterEfer,
     WHV_MEMORY_ACCESS_TYPE, WHV_PARTITION_HANDLE, WHV_REGISTER_VALUE, WHV_RUN_VP_EXIT_CONTEXT,
@@ -33,7 +32,7 @@ use super::handlers::{MemAccessHandlerWrapper, OutBHandlerWrapper};
 use super::surrogate_process::SurrogateProcess;
 use super::surrogate_process_manager::*;
 use super::windows_hypervisor_platform::{VMPartition, VMProcessor};
-use super::wrappers::WHvFPURegisters;
+use super::wrappers::{HandleWrapper, WHvFPURegisters};
 use super::{
     HyperlightExit, Hypervisor, VirtualCPU, CR0_AM, CR0_ET, CR0_MP, CR0_NE, CR0_PE, CR0_PG, CR0_WP,
     CR4_OSFXSR, CR4_OSXMMEXCPT, CR4_PAE, EFER_LMA, EFER_LME, EFER_NX, EFER_SCE,
@@ -43,15 +42,14 @@ use crate::hypervisor::hypervisor_handler::HypervisorHandler;
 use crate::hypervisor::wrappers::WHvGeneralRegisters;
 use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags};
 use crate::mem::ptr::{GuestPtr, RawPtr};
-use crate::HyperlightError::WindowsAPIError;
-use crate::{debug, log_then_return, new_error, Result};
+use crate::{debug, new_error, Result};
 
 /// A Hypervisor driver for HyperV-on-Windows.
 pub(crate) struct HypervWindowsDriver {
     size: usize, // this is the size of the memory region, excluding the 2 surrounding guard pages
     processor: VMProcessor,
-    surrogate_process: SurrogateProcess,
-    source_address: *mut c_void, // this points into the first guard page
+    _surrogate_process: SurrogateProcess, // we need to keep a reference to the SurrogateProcess for the duration of the driver since otherwise it will dropped and the memory mapping will be unmapped and the surrogate process will be returned to the pool
+    source_address: *mut c_void,          // this points into the first guard page
     entrypoint: u64,
     orig_rsp: GuestPtr,
     mem_regions: Vec<MemoryRegion>,
@@ -73,6 +71,7 @@ impl HypervWindowsDriver {
         pml4_address: u64,
         entrypoint: u64,
         rsp: u64,
+        mmap_file_handle: HandleWrapper,
     ) -> Result<Self> {
         // create and setup hypervisor partition
         let mut partition = VMPartition::new(1)?;
@@ -81,7 +80,7 @@ impl HypervWindowsDriver {
         // with guard pages setup
         let surrogate_process = {
             let mgr = get_surrogate_process_manager()?;
-            mgr.get_surrogate_process(raw_size, raw_source_address)
+            mgr.get_surrogate_process(raw_size, raw_source_address, mmap_file_handle)
         }?;
 
         partition.map_gpa_range(&mem_regions, surrogate_process.process_handle)?;
@@ -95,7 +94,7 @@ impl HypervWindowsDriver {
         Ok(Self {
             size: mem_size,
             processor: proc,
-            surrogate_process,
+            _surrogate_process: surrogate_process,
             source_address: raw_source_address,
             entrypoint,
             orig_rsp: GuestPtr::try_from(RawPtr::from(rsp))?,
@@ -402,53 +401,7 @@ impl Hypervisor for HypervWindowsDriver {
 
     #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
     fn run(&mut self) -> Result<super::HyperlightExit> {
-        let bytes_written: Option<*mut usize> = None;
-        let bytes_read: Option<*mut usize> = None;
-        let handle: HANDLE = self.surrogate_process.process_handle.into();
-
-        // TODO optimise this
-        // the following write to and read from process memory is required as we need to use
-        // surrogate processes to allow more than one WHP Partition per process
-        // see HyperVSurrogateProcessManager
-        // this needs updating so that
-        // 1. it only writes to memory that changes between usage
-        // 2. memory is allocated in the process once and then only freed and reallocated if the
-        // memory needs to grow.
-
-        // - copy stuff to surrogate process
-
-        if let Err(e) = unsafe {
-            windows::Win32::System::Diagnostics::Debug::WriteProcessMemory(
-                handle,
-                self.surrogate_process
-                    .allocated_address
-                    .add(PAGE_SIZE_USIZE),
-                self.source_address.add(PAGE_SIZE_USIZE),
-                self.size,
-                bytes_written,
-            )
-        } {
-            log_then_return!(WindowsAPIError(e.clone()));
-        }
-
-        // - call WHvRunVirtualProcessor
         let exit_context: WHV_RUN_VP_EXIT_CONTEXT = self.processor.run()?;
-
-        // - call read-process memory
-
-        if let Err(e) = unsafe {
-            windows::Win32::System::Diagnostics::Debug::ReadProcessMemory(
-                handle,
-                self.surrogate_process
-                    .allocated_address
-                    .add(PAGE_SIZE_USIZE),
-                self.source_address.add(PAGE_SIZE_USIZE),
-                self.size,
-                bytes_read,
-            )
-        } {
-            log_then_return!(WindowsAPIError(e.clone()));
-        }
 
         let result = match exit_context.ExitReason {
             // WHvRunVpExitReasonX64IoPortAccess
