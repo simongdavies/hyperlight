@@ -809,7 +809,7 @@ impl SandboxMemoryManager<HostSharedMemory> {
 mod tests {
     use hyperlight_testing::rust_guest_as_pathbuf;
     use serde_json::to_string;
-    #[cfg(target_os = "windows")]
+    #[cfg(all(target_os = "windows", inprocess))]
     use serial_test::serial;
 
     use super::SandboxMemoryManager;
@@ -848,7 +848,7 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(all(target_os = "windows", inprocess))]
     #[test]
     #[serial]
     fn load_guest_binary_using_load_library() {
