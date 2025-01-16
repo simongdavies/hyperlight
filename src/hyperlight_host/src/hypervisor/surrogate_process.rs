@@ -18,7 +18,9 @@ use core::ffi::c_void;
 
 use tracing::{instrument, Span};
 use windows::Win32::Foundation::HANDLE;
-use windows::Win32::System::Memory::{VirtualFreeEx, MEM_RELEASE};
+use windows::Win32::System::Memory::{
+    UnmapViewOfFile2, MEMORY_MAPPED_VIEW_ADDRESS, UNMAP_VIEW_OF_FILE_FLAGS,
+};
 
 use super::surrogate_process_manager::get_surrogate_process_manager;
 use super::wrappers::HandleWrapper;
@@ -54,10 +56,16 @@ impl Default for SurrogateProcess {
 impl Drop for SurrogateProcess {
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     fn drop(&mut self) {
-        let handle: HANDLE = self.process_handle.into();
-        if let Err(e) = unsafe { VirtualFreeEx(handle, self.allocated_address, 0, MEM_RELEASE) } {
+        let process_handle: HANDLE = self.process_handle.into();
+        let memory_mapped_view_address = MEMORY_MAPPED_VIEW_ADDRESS {
+            Value: self.allocated_address,
+        };
+        let flags = UNMAP_VIEW_OF_FILE_FLAGS(0);
+        if let Err(e) =
+            unsafe { UnmapViewOfFile2(process_handle, memory_mapped_view_address, flags) }
+        {
             tracing::error!(
-                "Failed to free surrogate process resources (VirtualFreeEx failed): {:?}",
+                "Failed to free surrogate process resources (UnmapViewOfFile2 failed): {:?}",
                 e
             );
         }
@@ -66,9 +74,21 @@ impl Drop for SurrogateProcess {
         // of the SurrogateProcess being dropped. this is ok to
         // do because we are in the process of dropping ourselves
         // anyway.
-        get_surrogate_process_manager()
-            .unwrap()
-            .return_surrogate_process(self.process_handle)
-            .unwrap();
+        match get_surrogate_process_manager() {
+            Ok(manager) => match manager.return_surrogate_process(self.process_handle) {
+                Ok(_) => (),
+                Err(e) => {
+                    tracing::error!("Failed to return surrogate process to surrogate process manager when dropping : {:?}", e);
+                    return;
+                }
+            },
+            Err(e) => {
+                tracing::error!(
+                    "Failed to get surrogate process manager when dropping SurrogateProcess: {:?}",
+                    e
+                );
+                return;
+            }
+        }
     }
 }
