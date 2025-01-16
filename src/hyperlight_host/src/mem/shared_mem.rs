@@ -17,13 +17,21 @@ limitations under the License.
 use std::any::type_name;
 use std::ffi::c_void;
 use std::io::Error;
+#[cfg(target_os = "linux")]
 use std::ptr::null_mut;
 use std::sync::{Arc, RwLock};
 
 use hyperlight_common::mem::PAGE_SIZE_USIZE;
 use tracing::{instrument, Span};
 #[cfg(target_os = "windows")]
-use windows::Win32::System::Memory::{VirtualAlloc, MEM_COMMIT, PAGE_EXECUTE_READWRITE};
+use windows::core::PCSTR;
+#[cfg(target_os = "windows")]
+use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+#[cfg(target_os = "windows")]
+use windows::Win32::System::Memory::{
+    CreateFileMappingA, MapViewOfFile, UnmapViewOfFile, VirtualProtect, FILE_MAP_ALL_ACCESS,
+    MEMORY_MAPPED_VIEW_ADDRESS, PAGE_EXECUTE_READWRITE, PAGE_PROTECTION_FLAGS, PAGE_READWRITE,
+};
 
 #[cfg(target_os = "windows")]
 use crate::HyperlightError::{MemoryRequestTooBig, WindowsAPIError};
@@ -82,6 +90,8 @@ macro_rules! generate_writer {
 pub struct HostMapping {
     ptr: *mut u8,
     size: usize,
+    #[cfg(target_os = "windows")]
+    handle: HANDLE,
 }
 
 impl Drop for HostMapping {
@@ -95,10 +105,19 @@ impl Drop for HostMapping {
     }
     #[cfg(target_os = "windows")]
     fn drop(&mut self) {
-        use windows::Win32::System::Memory::{VirtualFree, MEM_DECOMMIT};
+        let mem_mapped_address = MEMORY_MAPPED_VIEW_ADDRESS {
+            Value: self.ptr as *mut c_void,
+        };
+        if let Err(e) = unsafe { UnmapViewOfFile(mem_mapped_address) } {
+            tracing::error!(
+                "Failed to drop HostMapping (UnmapViewOfFile failed): {:?}",
+                e
+            );
+        }
 
-        if let Err(e) = unsafe { VirtualFree(self.ptr as *mut c_void, self.size, MEM_DECOMMIT) } {
-            tracing::error!("Failed to free shared memory (VirtualFree failed): {:?}", e);
+        let file_handle: HANDLE = self.handle;
+        if let Err(e) = unsafe { CloseHandle(file_handle) } {
+            tracing::error!("Failed to  drop HostMapping (CloseHandle failed): {:?}", e);
         }
     }
 }
@@ -369,7 +388,9 @@ impl ExclusiveSharedMemory {
     #[cfg(target_os = "windows")]
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub fn new(min_size_bytes: usize) -> Result<Self> {
-        use windows::Win32::System::Memory::PAGE_READWRITE;
+        #[cfg(inprocess)]
+        use windows::Win32::System::Memory::FILE_MAP_EXECUTE;
+        use windows::Win32::System::Memory::{PAGE_NOACCESS, PAGE_PROTECTION_FLAGS};
 
         use crate::HyperlightError::MemoryAllocationFailed;
 
@@ -394,16 +415,67 @@ impl ExclusiveSharedMemory {
             return Err(MemoryRequestTooBig(total_size, isize::MAX as usize));
         }
 
-        // allocate the memory
+        let mut dwmaximumsizehigh = 0;
+        let mut dwmaximumsizelow = 0;
+
+        if std::mem::size_of::<usize>() == 8 {
+            dwmaximumsizehigh = (total_size >> 32) as u32;
+            dwmaximumsizelow = (total_size & 0xFFFFFFFF) as u32;
+        }
+
+        // Allocate the memory use CreateFileMapping instead of VirtualAlloc
+        // This allows us to map the memory into the surrogate process using MapViewOfFile2
+        let handle = unsafe {
+            CreateFileMappingA(
+                INVALID_HANDLE_VALUE,
+                None,
+                PAGE_READWRITE,
+                dwmaximumsizehigh,
+                dwmaximumsizelow,
+                PCSTR::null(),
+            )?
+        };
+
+        #[cfg(inprocess)]
         let addr =
-            unsafe { VirtualAlloc(Some(null_mut()), total_size, MEM_COMMIT, PAGE_READWRITE) };
-        if addr.is_null() {
+            unsafe { MapViewOfFile(handle, FILE_MAP_ALL_ACCESS | FILE_MAP_EXECUTE, 0, 0, 0) };
+        #[cfg(not(inprocess))]
+        let addr = unsafe { MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, 0) };
+        if addr.Value.is_null() {
             log_then_return!(MemoryAllocationFailed(
                 Error::last_os_error().raw_os_error()
             ));
         }
 
-        // TODO protect the guard pages
+        // Set the first and last pages to be guard pages
+
+        let mut unused_out_old_prot_flags = PAGE_PROTECTION_FLAGS(0);
+
+        // If the following calls to VirtualProtect are changed make sure to update the calls to VirtualProtectEx in surrogate_process_manager.rs
+
+        let first_guard_page_start = addr.Value;
+        if let Err(e) = unsafe {
+            VirtualProtect(
+                first_guard_page_start,
+                PAGE_SIZE_USIZE,
+                PAGE_NOACCESS,
+                &mut unused_out_old_prot_flags,
+            )
+        } {
+            log_then_return!(WindowsAPIError(e.clone()));
+        }
+
+        let last_guard_page_start = unsafe { addr.Value.add(total_size - PAGE_SIZE_USIZE) };
+        if let Err(e) = unsafe {
+            VirtualProtect(
+                last_guard_page_start,
+                PAGE_SIZE_USIZE,
+                PAGE_NOACCESS,
+                &mut unused_out_old_prot_flags,
+            )
+        } {
+            log_then_return!(WindowsAPIError(e.clone()));
+        }
 
         Ok(Self {
             // HostMapping is only non-Send/Sync because raw pointers
@@ -416,8 +488,9 @@ impl ExclusiveSharedMemory {
             // is not pointless as the lint suggests.
             #[allow(clippy::arc_with_non_send_sync)]
             region: Arc::new(HostMapping {
-                ptr: addr as *mut u8,
+                ptr: addr.Value as *mut u8,
                 size: total_size,
+                handle,
             }),
         })
     }
@@ -425,8 +498,6 @@ impl ExclusiveSharedMemory {
     pub(super) fn make_memory_executable(&self) -> Result<()> {
         #[cfg(target_os = "windows")]
         {
-            use windows::Win32::System::Memory::{VirtualProtect, PAGE_PROTECTION_FLAGS};
-
             let mut _old_flags = PAGE_PROTECTION_FLAGS::default();
             if let Err(e) = unsafe {
                 VirtualProtect(
@@ -472,7 +543,7 @@ impl ExclusiveSharedMemory {
     ///   must be properly aligned.
     ///
     ///   The rules on validity are still somewhat unspecified, but we
-    ///   assume that the result of our calls to mmap/VirtualAlloc may
+    ///   assume that the result of our calls to mmap/CreateFileMappings may
     ///   be considered a single "allocated object". The use of
     ///   non-atomic accesses is alright from a Safe Rust standpoint,
     ///   because SharedMemoryBuilder is  not Sync.
@@ -482,7 +553,7 @@ impl ExclusiveSharedMemory {
     ///   Again, the exact provenance restrictions on what is
     ///   considered to be initialized values are unclear, but we make
     ///   sure to use mmap(MAP_ANONYMOUS) and
-    ///   VirtualAlloc(MEM_COMMIT), so the pages in question are
+    ///   CreateFileMapping(SEC_COMMIT), so the pages in question are
     ///   zero-initialized, which we hope counts for u8.
     /// - The memory referenced by the returned slice must not be
     ///   accessed through any other pointer (not derived from the
@@ -584,6 +655,12 @@ impl ExclusiveSharedMemory {
                 lock: lock.clone(),
             },
         )
+    }
+
+    /// Gets the file handle of the shared memory region for this Sandbox
+    #[cfg(target_os = "windows")]
+    pub fn get_mmap_file_handle(&self) -> HANDLE {
+        self.region.handle
     }
 }
 
