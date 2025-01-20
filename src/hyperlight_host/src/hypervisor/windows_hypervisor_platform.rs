@@ -99,7 +99,7 @@ impl VMPartition {
         let whvmapgparange2_func = unsafe {
             match try_load_whv_map_gpa_range2() {
                 Ok(func) => func,
-                Err(e) => return Err(new_error!("Cant find API: {}", e)),
+                Err(e) => return Err(new_error!("Can't find API: {}", e)),
             }
         };
 

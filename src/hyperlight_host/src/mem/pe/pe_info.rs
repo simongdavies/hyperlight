@@ -360,7 +360,7 @@ mod tests {
                 load_address: 5368709120,
                 num_relocations: (900..1200).collect(),
                 // range of possible # of relocations
-                // (hardware dependant)
+                // (hardware dependent)
             }
         } else {
             PEFileTest {

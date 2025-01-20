@@ -55,7 +55,7 @@ pub enum HyperlightError {
     BoundsCheckFailed(u64, usize),
 
     /// Checked Add Overflow
-    #[error("Couldnt add offset to base address. Offset: {0}, Base Address: {1}")]
+    #[error("Couldn't add offset to base address. Offset: {0}, Base Address: {1}")]
     CheckedAddOverflow(u64, u64),
 
     /// Cross beam channel receive error

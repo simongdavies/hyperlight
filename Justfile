@@ -74,7 +74,7 @@ clean-rust:
 
 # TESTING
 # Some tests cannot run with other tests, they are marked as ignored so that cargo test works
-# there may be tests that we really want to ignore so we cant just use --ignored and we have to
+# there may be tests that we really want to ignore so we can't just use --ignored and we have to
 # Specify the test name of the ignored tests that we want to run
 test-rust target=default-target features="": (test-rust-int "rust" target features) (test-rust-int "c" target features) (test-seccomp target)
     # unit tests

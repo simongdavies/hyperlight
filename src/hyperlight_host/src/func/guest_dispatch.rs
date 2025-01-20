@@ -384,7 +384,7 @@ mod tests {
 
     fn terminate_vcpu_after_1000ms() -> Result<()> {
         // This test relies upon a Hypervisor being present so for now
-        // we will skip it if there isnt one.
+        // we will skip it if there isn't one.
         if !is_hypervisor_present() {
             println!("Skipping terminate_vcpu_after_1000ms because no hypervisor is present");
             return Ok(());
@@ -433,7 +433,7 @@ mod tests {
     #[test]
     fn test_terminate_vcpu_calling_host_spinning_cpu() {
         // This test relies upon a Hypervisor being present so for now
-        // we will skip it if there isnt one.
+        // we will skip it if there isn't one.
         if !is_hypervisor_present() {
             println!("Skipping test_call_guest_function_by_name because no hypervisor is present");
             return;
