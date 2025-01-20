@@ -26,11 +26,15 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        hypervisor: [hyperv, mshv, kvm] # hyperv is windows, mshv and kvm are linux
+        hypervisor: [hyperv, mshv, mshv3, kvm] # hyperv is windows, mshv and kvm are linux
         cpu: [amd, intel]
         config: [debug, release]
 
-    runs-on: ${{ fromJson(format('["self-hosted", "{0}", "X64", "1ES.Pool=hld-{1}-{2}"]', matrix.hypervisor == 'hyperv' && 'Windows' || 'Linux', matrix.hypervisor == 'hyperv' && 'win2022' || matrix.hypervisor, matrix.cpu)) }} 
+    runs-on: ${{ fromJson(
+        format('["self-hosted", "{0}", "X64", "1ES.Pool=hld-{1}-{2}"]', 
+          matrix.hypervisor == 'hyperv' && 'Windows' || 'Linux', 
+          matrix.hypervisor == 'hyperv' && 'win2022' || matrix.hypervisor == 'mshv3' && 'azlinux3-mshv' || matrix.hypervisor, 
+          matrix.cpu)) }} 
     steps:
       - uses: actions/checkout@v4
 
@@ -75,10 +79,10 @@ jobs:
           CARGO_TERM_COLOR: always
         run: |
           # with default features
-          just test-rust ${{ matrix.config }}
+          just test-rust ${{ matrix.config }} ${{ matrix.hypervisor == 'mshv3' && 'mshv3' || ''}}
 
           # with only one driver enabled (driver mshv/kvm feature is ignored on windows) + seccomp + inprocess
-          just test-rust ${{ matrix.config }} inprocess,seccomp,${{ matrix.hypervisor == 'mshv' && 'mshv' || 'kvm' }} 
+          just test-rust ${{ matrix.config }} inprocess,seccomp,${{ matrix.hypervisor == 'mshv' && 'mshv2' || matrix.hypervisor == 'mshv3' && 'mshv3' || 'kvm' }} 
 
           # make sure certain cargo features compile
           cargo check -p hyperlight-host --features crashdump
@@ -100,7 +104,7 @@ jobs:
         env:
           CARGO_TERM_COLOR: always
           RUST_LOG: debug
-        run: just run-rust-examples-linux ${{ matrix.config }}
+        run: just run-rust-examples-linux ${{ matrix.config }} ${{ matrix.hypervisor == 'mshv3' && 'mshv3' || ''}}
 
       ### Benchmarks ###
       - name: Install github-cli (Linux mariner)
@@ -120,5 +124,5 @@ jobs:
 
       - name: Run benchmarks
         run: |
-          just bench-ci main ${{ matrix.config }}
+          just bench-ci main ${{ matrix.config }} ${{ matrix.hypervisor == 'mshv3' && 'mshv3' || ''}}
         if: ${{ matrix.config == 'release' }}
