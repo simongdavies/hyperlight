@@ -1102,8 +1102,10 @@ dependencies = [
  "lazy_static",
  "libc",
  "log",
- "mshv-bindings",
- "mshv-ioctls",
+ "mshv-bindings 0.2.1",
+ "mshv-bindings 0.3.2",
+ "mshv-ioctls 0.2.1",
+ "mshv-ioctls 0.3.2",
  "once_cell",
  "opentelemetry",
  "opentelemetry-otlp",
@@ -1617,7 +1619,19 @@ dependencies = [
  "libc",
  "num_enum",
  "vmm-sys-util",
- "zerocopy",
+ "zerocopy 0.7.35",
+]
+
+[[package]]
+name = "mshv-bindings"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e0cb5031f3243a7459b7c13d960d25420980874eebda816db24ce6077e21d43"
+dependencies = [
+ "libc",
+ "num_enum",
+ "vmm-sys-util",
+ "zerocopy 0.8.14",
 ]
 
 [[package]]
@@ -1627,8 +1641,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d57586da719aacc905042eea71ff2efb52d16c7228a94af155c9ea45fe09c1c7"
 dependencies = [
  "libc",
- "mshv-bindings",
+ "mshv-bindings 0.2.1",
  "thiserror 1.0.69",
+ "vmm-sys-util",
+]
+
+[[package]]
+name = "mshv-ioctls"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89abe853221fa6f14ad4066affb9abda241a03d65622887d5794e1422d0bd75a"
+dependencies = [
+ "libc",
+ "mshv-bindings 0.3.2",
+ "thiserror 2.0.10",
  "vmm-sys-util",
 ]
 
@@ -1910,7 +1936,7 @@ version = "0.2.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77957b295656769bb8ad2b6a6b09d897d94f05c41b069aede1fcdaa675eaea04"
 dependencies = [
- "zerocopy",
+ "zerocopy 0.7.35",
 ]
 
 [[package]]
@@ -3499,7 +3525,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1b9b4fd18abc82b8136838da5d50bae7bdea537c574d8dc1a34ed098d6c166f0"
 dependencies = [
  "byteorder",
- "zerocopy-derive",
+ "zerocopy-derive 0.7.35",
+]
+
+[[package]]
+name = "zerocopy"
+version = "0.8.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a367f292d93d4eab890745e75a778da40909cab4d6ff8173693812f79c4a2468"
+dependencies = [
+ "zerocopy-derive 0.8.14",
 ]
 
 [[package]]
@@ -3507,6 +3542,17 @@ name = "zerocopy-derive"
 version = "0.7.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fa4f8080344d4671fb4e831a13ad1e68092748387dfc4f55e356242fae12ce3e"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "zerocopy-derive"
+version = "0.8.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3931cb58c62c13adec22e38686b559c86a30565e16ad6e8510a337cedc611e1"
 dependencies = [
  "proc-macro2",
  "quote",
