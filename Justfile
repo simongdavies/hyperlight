@@ -76,7 +76,7 @@ clean-rust:
 # Some tests cannot run with other tests, they are marked as ignored so that cargo test works
 # there may be tests that we really want to ignore so we can't just use --ignored and we have to
 # Specify the test name of the ignored tests that we want to run
-test-rust target=default-target features="": (test-rust-int "rust" target features) (test-rust-int "c" target features) (test-seccomp target)
+test-rust target=default-target features="": (test-rust-int "rust" target features) (test-rust-int "c" target features) (test-seccomp target features)
     # unit tests
     cargo test {{ if features =="" {''} else if features=="no-default-features" {"--no-default-features" } else {"--no-default-features -F " + features } }} --profile={{ if target == "debug" { "dev" } else { target } }}  --lib
     
@@ -91,23 +91,23 @@ test-rust target=default-target features="": (test-rust-int "rust" target featur
     cargo test {{ if features =="" {''} else if features=="no-default-features" {"--no-default-features" } else {"--no-default-features -F " + features } }} --profile={{ if target == "debug" { "dev" } else { target } }} hypervisor::hypervisor_handler::tests::create_1000_sandboxes -p hyperlight-host --lib -- --ignored
     {{ set-trace-env-vars }} cargo test {{ if features =="" {''} else if features=="no-default-features" {"--no-default-features" } else {"--no-default-features -F " + features } }} --profile={{ if target == "debug" { "dev" } else { target } }} --lib sandbox::outb::tests::test_log_outb_log -- --ignored
 
-test-seccomp target=default-target:
+test-seccomp target=default-target features="":
     # run seccomp test with feature "seccomp" on and off
-    cargo test --profile={{ if target == "debug" { "dev" } else { target } }} -p hyperlight-host test_violate_seccomp_filters --lib -- --ignored
-    cargo test --profile={{ if target == "debug" { "dev" } else { target } }} -p hyperlight-host test_violate_seccomp_filters --no-default-features --features mshv,kvm --lib -- --ignored
+    cargo test --profile={{ if target == "debug" { "dev" } else { target } }} -p hyperlight-host test_violate_seccomp_filters --lib {{ if features =="" {''} else { "--features " + features } }} -- --ignored
+    cargo test --profile={{ if target == "debug" { "dev" } else { target } }} -p hyperlight-host test_violate_seccomp_filters --no-default-features {{ if features =~"mshv3" {"--features mshv3"} else {"--features mshv2,kvm" } }} --lib -- --ignored
 
 # rust integration tests. guest can either be "rust" or "c"
 test-rust-int guest target=default-target features="":
     # integration tests
 
     # run execute_on_heap test with feature "executable_heap" on and off
-    {{if os() == "windows" { "$env:" } else { "" } }}GUEST="{{guest}}"{{if os() == "windows" { ";" } else { "" } }} cargo test --profile={{ if target == "debug" { "dev" } else { target } }} --test integration_test execute_on_heap --features executable_heap -- --ignored
-    {{if os() == "windows" { "$env:" } else { "" } }}GUEST="{{guest}}"{{if os() == "windows" { ";" } else { "" } }} cargo test --profile={{ if target == "debug" { "dev" } else { target } }} --test integration_test execute_on_heap -- --ignored
+    {{if os() == "windows" { "$env:" } else { "" } }}GUEST="{{guest}}"{{if os() == "windows" { ";" } else { "" } }} cargo test --profile={{ if target == "debug" { "dev" } else { target } }} --test integration_test execute_on_heap {{ if features =="" {" --features executable_heap"} else {"--features executable_heap," + features} }} -- --ignored
+    {{if os() == "windows" { "$env:" } else { "" } }}GUEST="{{guest}}"{{if os() == "windows" { ";" } else { "" } }} cargo test --profile={{ if target == "debug" { "dev" } else { target } }} --test integration_test execute_on_heap {{ if features =="" {""} else {"--features " + features} }} -- --ignored
     # run the rest of the integration tests
     {{if os() == "windows" { "$env:" } else { "" } }}GUEST="{{guest}}"{{if os() == "windows" { ";" } else { "" } }} cargo test -p hyperlight-host {{ if features =="" {''} else if features=="no-default-features" {"--no-default-features" } else {"--no-default-features -F " + features } }} --profile={{ if target == "debug" { "dev" } else { target } }} --test '*'
 
 test-rust-feature-compilation-fail target=default-target:
-    @# the following should fail on linux because either kvm or msh feature must be specified, which is why the exit code is inverted with an !.
+    @# the following should fail on linux because one of kvm, mshv, or mshv3 feature must be specified, which is why the exit code is inverted with an !.
     {{ if os() == "linux" { "! cargo check -p hyperlight-host --no-default-features 2> /dev/null"} else { "" } }}
 
 test target=default-target: (test-rust target)
@@ -149,15 +149,15 @@ gen-all-fbs-rust-code:
     just fmt-apply
 
 # RUST EXAMPLES
-run-rust-examples target=default-target: (build-rust target)
-    cargo run --profile={{ if target == "debug" { "dev" } else { target } }} --example metrics
-    cargo run --profile={{ if target == "debug" { "dev" } else { target } }} --example metrics --features "function_call_metrics"
-    {{ set-trace-env-vars }} cargo run --profile={{ if target == "debug" { "dev" } else { target } }} --example logging
+run-rust-examples target=default-target features="": (build-rust target)
+    cargo run --profile={{ if target == "debug" { "dev" } else { target } }} --example metrics {{ if features =="" {''} else { "--features " + features } }}
+    cargo run --profile={{ if target == "debug" { "dev" } else { target } }} --example metrics {{ if features =="" {"--features function_call_metrics"} else {"--features function_call_metrics," + features} }}
+    {{ set-trace-env-vars }} cargo run --profile={{ if target == "debug" { "dev" } else { target } }} --example logging {{ if features =="" {''} else { "--features " + features } }}
 
 # The two tracing examples are flaky on windows so we run them on linux only for now, need to figure out why as they run fine locally on windows
-run-rust-examples-linux target=default-target: (build-rust target) (run-rust-examples target)
-    {{ set-trace-env-vars }} cargo run --profile={{ if target == "debug" { "dev" } else { target } }} --example tracing
-    {{ set-trace-env-vars }} cargo run --profile={{ if target == "debug" { "dev" } else { target } }} --example tracing --features "function_call_metrics"
+run-rust-examples-linux target=default-target features="": (build-rust target) (run-rust-examples target features)
+    {{ set-trace-env-vars }} cargo run --profile={{ if target == "debug" { "dev" } else { target } }} --example tracing {{ if features =="" {''} else { "--features " + features } }}
+    {{ set-trace-env-vars }} cargo run --profile={{ if target == "debug" { "dev" } else { target } }} --example tracing {{ if features =="" {"--features function_call_metrics" } else {"--features function_call_metrics," + features} }}
 
 # BENCHMARKING
 
@@ -174,11 +174,11 @@ bench-download os hypervisor cpu tag="":
     tar -zxvf target/benchmarks_{{ os }}_{{ hypervisor }}_{{ cpu }}.tar.gz -C target/criterion/ --strip-components=1
 
 # Warning: compares to and then OVERWRITES the given baseline
-bench-ci baseline target=default-target:
-    cargo bench --profile={{ if target == "debug" { "dev" } else { target } }} -- --verbose --save-baseline {{ baseline }}
+bench-ci baseline target=default-target features="":
+    cargo bench --profile={{ if target == "debug" { "dev" } else { target } }} {{ if features =="" {''} else { "--features " + features } }} -- --verbose --save-baseline {{ baseline }}
 
-bench target=default-target:
-    cargo bench --profile={{ if target == "debug" { "dev" } else { target } }} -- --verbose
+bench target=default-target features="":
+    cargo bench --profile={{ if target == "debug" { "dev" } else { target } }} {{ if features =="" {''} else { "--features " + features } }} -- --verbose
 
 # FUZZING
 fuzz:
