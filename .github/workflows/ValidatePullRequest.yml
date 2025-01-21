@@ -40,6 +40,21 @@ jobs:
             let all_file_count = ${{steps.changes.outputs.all_count}};
             return all_file_count === docs_file_count;
           result-encoding: string
+      # Check to see if this a dependabot PR and if it updates either the common or guest Cargo.toml files
+      # if it does we need to try and generate a new Cargo.lock file as the PR validation checks that these are up to date
+      - name: Update Cargo.lock for dependabot changes
+        if: ${{ github.actor == 'dependabot[bot]' && (github.event.pull_request.changed_files.* == 'src/hyperlight_common/Cargo.toml' || github.event.pull_request.changed_files.* == 'src/hyperlight_guest/Cargo.toml') }}
+        run: |
+          cargo update --manifest-path src/tests/rust_guests/simpleguest/Cargo.toml
+          cargo update --manifest-path src/tests/rust_guests/callbackguest/Cargo.toml
+          if [ -n "$(git status --porcelain src/tests/rust_guests/simpleguest/Cargo.lock src/tests/rust_guests/callbackguest/Cargo.lock)" ]; then
+            git config --global user.name "github-actions[bot]"
+            git config --global user.email "github-actions[bot]@users.noreply.github.com"
+            git add src/tests/rust_guests/simpleguest/Cargo.lock
+            git add src/tests/rust_guests/callbackguest/Cargo.lock
+            git commit -m "Update Cargo.lock files for dependabot changes"
+            git push
+          fi
 
   rust:
     needs:
