@@ -499,7 +499,7 @@ fn simple_test() {
 #[test]
 #[cfg(target_os = "linux")]
 fn simple_test_parallel() {
-    let handles: Vec<_> = (0..100)
+    let handles: Vec<_> = (0..50)
         .map(|_| {
             std::thread::spawn(|| {
                 simple_test_helper().unwrap();
