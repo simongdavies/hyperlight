@@ -5,6 +5,6 @@ updates:
     schedule:
       interval: "daily"
   - package-ecosystem: "cargo"
-    directory: "/"
+    directories: ["/", "src/tests/rust_guests/simpleguest","src/tests/rust_guests/callbackguest"]
     schedule:
       interval: "daily"
