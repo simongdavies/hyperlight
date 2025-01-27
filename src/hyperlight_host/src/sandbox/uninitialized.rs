@@ -1114,6 +1114,12 @@ mod tests {
             None,
             None,
         );
+        println!("{:?}", sbox);
+        #[cfg(target_os = "windows")]
+        assert!(
+            matches!(sbox, Err(e) if e.to_string().contains("GuestBinary not found: 'some/path/that/does/not/exist': The system cannot find the path specified. (os error 3)"))
+        );
+        #[cfg(target_os = "linux")]
         assert!(
             matches!(sbox, Err(e) if e.to_string().contains("GuestBinary not found: 'some/path/that/does/not/exist': No such file or directory (os error 2)"))
         );

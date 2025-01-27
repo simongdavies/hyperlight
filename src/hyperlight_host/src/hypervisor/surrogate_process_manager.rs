@@ -361,7 +361,7 @@ fn create_surrogate_process(
     if let Err(e) = unsafe {
         CreateProcessA(
             PCSTR::null(),
-            p_cmd_line.into(),
+            Some(p_cmd_line.into()),
             Some(&process_attributes),
             Some(&thread_attributes),
             false,
@@ -442,7 +442,9 @@ mod tests {
                     let process_handle: HANDLE = surrogate_process.process_handle.into();
                     let job_handle: HANDLE = job_handle.into();
                     unsafe {
-                        assert!(IsProcessInJob(process_handle, job_handle, &mut result).is_ok());
+                        assert!(
+                            IsProcessInJob(process_handle, Some(job_handle), &mut result).is_ok()
+                        );
                         assert!(result.as_bool());
                     }
 
