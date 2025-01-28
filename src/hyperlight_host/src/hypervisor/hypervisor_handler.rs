@@ -322,6 +322,12 @@ impl HypervisorHandler {
                                             e
                                         )
                                     })?;
+                                // This apparently-useless lock is
+                                // needed to ensure the host does not
+                                // make unsynchronized accesses while
+                                // the guest is executing.  See the
+                                // documentation for
+                                // GuestSharedMemory::lock.
                                 let mem_lock_guard = evar_lock_guard
                                     .as_mut()
                                     .ok_or_else(|| {
@@ -399,6 +405,12 @@ impl HypervisorHandler {
                                             e
                                         )
                                     })?;
+                                // This apparently-useless lock is
+                                // needed to ensure the host does not
+                                // make unsynchronized accesses while
+                                // the guest is executing.  See the
+                                // documentation for
+                                // GuestSharedMemory::lock.
                                 let mem_lock_guard = evar_lock_guard
                                     .as_mut()
                                     .ok_or_else(|| {

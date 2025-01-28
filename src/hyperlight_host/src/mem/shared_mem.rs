@@ -126,6 +126,15 @@ unsafe impl Send for ExclusiveSharedMemory {}
 pub struct GuestSharedMemory {
     region: Arc<HostMapping>,
     /// The lock that indicates this shared memory is being used by non-Rust code
+    ///
+    /// This lock _must_ be held whenever the guest is executing,
+    /// because it prevents the host from converting its
+    /// HostSharedMemory to an ExclusiveSharedMemory. Since the guest
+    /// may arbitrarily mutate the shared memory, only synchronized
+    /// accesses from Rust should be allowed!
+    ///
+    /// We cannot enforce this in the type system, because the memory
+    /// is mapped in to the VM at VM creation time.
     pub lock: Arc<RwLock<()>>,
 }
 unsafe impl Send for GuestSharedMemory {}
