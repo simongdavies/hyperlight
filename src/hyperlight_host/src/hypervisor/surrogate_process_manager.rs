@@ -33,9 +33,9 @@ use windows::Win32::System::JobObjects::{
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 use windows::Win32::System::Memory::{
-    VirtualAllocEx, VirtualProtectEx, MEM_COMMIT, MEM_RESERVE, PAGE_NOACCESS,
-    PAGE_PROTECTION_FLAGS, PAGE_READWRITE,
+    MapViewOfFileNuma2, VirtualProtectEx, PAGE_NOACCESS, PAGE_PROTECTION_FLAGS, PAGE_READWRITE,
 };
+use windows::Win32::System::SystemServices::NUMA_NO_PREFERRED_NODE;
 use windows::Win32::System::Threading::{
     CreateProcessA, CREATE_SUSPENDED, PROCESS_INFORMATION, STARTUPINFOA,
 };
@@ -79,7 +79,7 @@ const NUMBER_OF_SURROGATE_PROCESSES: usize = 512;
 /// There is, however, another API (WHvMapGpaRange2) that has a second
 /// parameter which is a handle to a process. This process merely has to exist,
 /// the memory being mapped from the host to the virtual machine is
-/// allocated/freed  in this process using VirtualAllocEx/VirtualFreeEx.
+/// allocated/freed  in this process using CreateFileMapping/MapViewOfFile.
 /// Memory for the HyperVisor partition is copied to and from the host process
 /// from/into the surrogate process in Sandbox before and after the VCPU is run.
 ///
@@ -145,27 +145,47 @@ impl SurrogateProcessManager {
         &self,
         raw_size: usize,
         raw_source_address: *const c_void,
+        mmap_file_handle: HandleWrapper,
     ) -> Result<SurrogateProcess> {
-        let process_handle: HANDLE = self.process_receiver.recv()?.into();
+        let surrogate_process_handle: HANDLE = self.process_receiver.recv()?.into();
+        let mapping_file_handle: HANDLE = mmap_file_handle.into();
 
-        // allocate memory
+        // Allocate the memory by creating a view over the memory mapped file
+
+        // Use MapViewOfFile2 to map memoy into the surrogate process, the MapViewOfFile2 API is implemented in as an inline function in a windows header file
+        // (see https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-mapviewoffile2#remarks) so we use the same API it uses in the header file here instead of
+        // MapViewOfFile2 which does not exist in the rust crate (see https://github.com/microsoft/windows-rs/issues/2595)
         let allocated_address = unsafe {
-            VirtualAllocEx(
-                process_handle,
+            MapViewOfFileNuma2(
+                mapping_file_handle,
+                surrogate_process_handle,
+                0,
                 Some(raw_source_address),
                 raw_size,
-                MEM_COMMIT | MEM_RESERVE,
-                PAGE_READWRITE,
+                0,
+                PAGE_READWRITE.0,
+                NUMA_NO_PREFERRED_NODE,
             )
         };
-        if allocated_address.is_null() {
+
+        if allocated_address.Value.is_null() {
             log_then_return!(
-                "VirtualAllocEx failed for mem address {:?}",
+                "MapViewOfFileNuma2 failed for mem address {:?}",
                 raw_source_address
             );
         }
 
-        // set up guard page
+        if allocated_address.Value as *const c_void != raw_source_address {
+            log_then_return!(
+                "Address Mismatch Allocated: {:?} Requested: {:?}",
+                allocated_address.Value,
+                raw_source_address
+            );
+        }
+
+        // set up guard pages
+
+        // If the following calls to VirtualProtectEx are changed make sure to update the calls to VirtualProtect in shared_mem.rs
 
         let mut unused_out_old_prot_flags = PAGE_PROTECTION_FLAGS(0);
 
@@ -173,7 +193,7 @@ impl SurrogateProcessManager {
         let first_guard_page_start = raw_source_address;
         if let Err(e) = unsafe {
             VirtualProtectEx(
-                process_handle,
+                surrogate_process_handle,
                 first_guard_page_start,
                 PAGE_SIZE_USIZE,
                 PAGE_NOACCESS,
@@ -187,7 +207,7 @@ impl SurrogateProcessManager {
         let last_guard_page_start = unsafe { raw_source_address.add(raw_size - PAGE_SIZE_USIZE) };
         if let Err(e) = unsafe {
             VirtualProtectEx(
-                process_handle,
+                surrogate_process_handle,
                 last_guard_page_start,
                 PAGE_SIZE_USIZE,
                 PAGE_NOACCESS,
@@ -197,7 +217,10 @@ impl SurrogateProcessManager {
             log_then_return!(WindowsAPIError(e.clone()));
         }
 
-        Ok(SurrogateProcess::new(allocated_address, process_handle))
+        Ok(SurrogateProcess::new(
+            allocated_address.Value,
+            surrogate_process_handle,
+        ))
     }
 
     /// Returns a surrogate process to the pool of surrogate processes.
@@ -391,15 +414,17 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
+    use hyperlight_common::mem::PAGE_SIZE_USIZE;
     use rand::{thread_rng, Rng};
     use serial_test::serial;
-    use windows::Win32::Foundation::BOOL;
+    use windows::Win32::Foundation::{CloseHandle, BOOL, HANDLE, INVALID_HANDLE_VALUE};
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32First, Process32Next, PROCESSENTRY32, TH32CS_SNAPPROCESS,
     };
     use windows::Win32::System::JobObjects::IsProcessInJob;
     use windows::Win32::System::Memory::{
-        VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE,
+        CreateFileMappingA, MapViewOfFile, UnmapViewOfFile, FILE_MAP_ALL_ACCESS, PAGE_READWRITE,
+        SEC_COMMIT,
     };
 
     use super::*;
@@ -423,13 +448,29 @@ mod tests {
                 // surrogate process, make sure we actually got one,
                 // then put it back
                 for p in 0..NUMBER_OF_SURROGATE_PROCESSES {
-                    let allocated_address = unsafe {
-                        VirtualAlloc(None, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)
+                    let dwmaximumsizehigh = 0;
+                    let dwmaximumsizelow = (size & 0xFFFFFFFF) as u32;
+                    let handle = unsafe {
+                        CreateFileMappingA(
+                            INVALID_HANDLE_VALUE, // Causes the page file to be used as the backing store
+                            None,
+                            PAGE_READWRITE | SEC_COMMIT,
+                            dwmaximumsizehigh,
+                            dwmaximumsizelow,
+                            PCSTR::null(),
+                        )
+                        .unwrap()
                     };
+
+                    let addr = unsafe { MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, 0) };
+
                     let timer = Instant::now();
                     let surrogate_process = {
-                        let res = surrogate_process_manager
-                            .get_surrogate_process(size, allocated_address)?;
+                        let res = surrogate_process_manager.get_surrogate_process(
+                            size,
+                            addr.Value,
+                            HandleWrapper::from(handle),
+                        )?;
                         let elapsed = timer.elapsed();
                         // Print out the time it took to get the process if its greater than 150ms (this is just to allow us to see that threads are blocking on the process queue)
                         if (elapsed.as_millis() as u64) > 150 {
@@ -454,10 +495,11 @@ mod tests {
                     // dropping the surrogate process, as we do in the line
                     // below, will return it to the surrogate process manager
                     drop(surrogate_process);
-                    unsafe {
-                        let res = VirtualFree(allocated_address, 0, MEM_RELEASE);
-                        assert!(res.is_ok())
-                    }
+                    let res = unsafe { UnmapViewOfFile(addr) };
+                    assert!(res.is_ok(), "Failed to UnmapViewOfFile: {:?}", res.err());
+
+                    let res = unsafe { CloseHandle(handle) };
+                    assert!(res.is_ok(), "Failed to CloseHandle: {:?}", res.err());
                 }
                 Ok(())
             });
@@ -516,7 +558,11 @@ mod tests {
         let mem = ExclusiveSharedMemory::new(SIZE).unwrap();
 
         let process = mgr
-            .get_surrogate_process(mem.raw_mem_size(), mem.raw_ptr() as *mut c_void)
+            .get_surrogate_process(
+                mem.raw_mem_size(),
+                mem.raw_ptr() as *mut c_void,
+                HandleWrapper::from(mem.get_mmap_file_handle()),
+            )
             .unwrap();
 
         let buffer = vec![0u8; SIZE];
