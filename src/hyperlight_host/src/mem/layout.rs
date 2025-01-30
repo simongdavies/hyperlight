@@ -13,14 +13,12 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-
 use std::fmt::Debug;
 use std::mem::{offset_of, size_of};
 
 use hyperlight_common::mem::{GuestStackData, HyperlightPEB, RunMode, PAGE_SIZE_USIZE};
 use paste::paste;
-use rand::rngs::OsRng;
-use rand::RngCore;
+use rand::{rng, RngCore};
 use tracing::{instrument, Span};
 
 use super::memory_region::MemoryRegionType::{
@@ -1100,7 +1098,7 @@ impl SandboxMemoryLayout {
 
         // Set up the security cookie seed
         let mut security_cookie_seed = [0u8; 8];
-        OsRng.fill_bytes(&mut security_cookie_seed);
+        rng().fill_bytes(&mut security_cookie_seed);
         shared_mem.copy_from_slice(&security_cookie_seed, self.peb_security_cookie_seed_offset)?;
 
         // Skip guest_dispatch_function_ptr_offset because it is set by the guest

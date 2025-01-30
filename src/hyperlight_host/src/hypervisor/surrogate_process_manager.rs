@@ -415,7 +415,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use hyperlight_common::mem::PAGE_SIZE_USIZE;
-    use rand::{thread_rng, Rng};
+    use rand::{rng, Rng};
     use serial_test::serial;
     use windows::Win32::Foundation::{CloseHandle, BOOL, HANDLE, INVALID_HANDLE_VALUE};
     use windows::Win32::System::Diagnostics::ToolHelp::{
@@ -439,7 +439,7 @@ mod tests {
         for t in 0..NUMBER_OF_SURROGATE_PROCESSES * 2 {
             let thread_handle = thread::spawn(move || -> Result<()> {
                 let surrogate_process_manager_res = get_surrogate_process_manager();
-                let mut rng = thread_rng();
+                let mut rng = rng();
                 let size = PAGE_SIZE_USIZE * 3;
                 assert!(surrogate_process_manager_res.is_ok());
                 let surrogate_process_manager = surrogate_process_manager_res.unwrap();
@@ -490,7 +490,7 @@ mod tests {
                     }
 
                     // in real use the process will not get returned immediately
-                    let n: u64 = rng.gen_range(1..16);
+                    let n: u64 = rng.random_range(1..16);
                     thread::sleep(Duration::from_millis(n));
                     // dropping the surrogate process, as we do in the line
                     // below, will return it to the surrogate process manager
