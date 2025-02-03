@@ -178,8 +178,8 @@ fn run_example(wait_input: bool) -> HyperlightResult<()> {
                     multiuse_sandbox = result.unwrap();
                 }
                 let sleep_for = {
-                    let mut rng = rand::thread_rng();
-                    rng.gen_range(500..3000)
+                    let mut rng = rand::rng();
+                    rng.random_range(500..3000)
                 };
                 thread::sleep(std::time::Duration::from_millis(sleep_for));
             }

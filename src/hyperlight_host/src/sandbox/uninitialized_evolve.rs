@@ -102,8 +102,8 @@ fn hv_init(
     let outb_hdl = outb_handler_wrapper(hshm.clone(), host_funcs);
     let mem_access_hdl = mem_access_handler_wrapper(hshm.clone());
     let seed = {
-        let mut rng = rand::thread_rng();
-        rng.gen::<u64>()
+        let mut rng = rand::rng();
+        rng.random::<u64>()
     };
     let peb_addr = {
         let peb_u64 = u64::try_from(gshm.layout.peb_address)?;
