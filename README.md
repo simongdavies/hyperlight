@@ -261,6 +261,13 @@ Hyperlight.
 > Note: For general Hyperlight development, you may also need flatc (Flatbuffer compiler): for instructions,
 > see [here](https://github.com/google/flatbuffers).
 
+## Join our Community Meetings
+
+This project holds fortnightly community meetings to discuss the project's progress, roadmap, and any other topics of interest. The meetings are open to everyone, and we encourage you to join us.
+
+- **When**: Every other Wednesday 09:00 (PST/PDT) [Convert to your local time](https://dateful.com/convert/pst-pdt-pacific-time?t=09)
+- **Where**: Zoom! - Agenda and information on how to join can be found in the [Hyperlight Community Meeting Notes](https://hackmd.io/blCrncfOSEuqSbRVT9KYkg#Agenda). Please log into hackmd to edit!
+
 ## More Information
 
 For more information, please refer to our compilation of documents in the [`docs/` directory](./docs/README.md).
