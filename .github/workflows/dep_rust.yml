@@ -50,11 +50,10 @@ jobs:
       - name: clippy
         run: just clippy ${{ matrix.config }}
 
+      # Does not check for updated Cargo.lock files for test rust guests as this causes an issue with this checkwhen deoendabot updates dependencies in common crates
       - name: Ensure up-to-date Cargo.lock
         run: |
           cargo fetch --locked
-          cargo fetch --manifest-path src/tests/rust_guests/simpleguest/Cargo.toml --locked
-          cargo fetch --manifest-path src/tests/rust_guests/callbackguest/Cargo.toml --locked
 
       - name: Get gh action service name
         if: ${{ (runner.os == 'Windows' )}}

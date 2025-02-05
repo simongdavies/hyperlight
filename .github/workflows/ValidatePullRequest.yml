@@ -18,7 +18,7 @@ permissions:
   contents: write
 
 jobs:
-  docs-and-common-deps-pr:
+  docs-pr:
     runs-on: ubuntu-latest
     outputs:
       docs-only: ${{ steps.docs-only.outputs.result }}
@@ -32,9 +32,6 @@ jobs:
               - '**/*.txt'
             all:
               - '**/*'
-            common_deps:
-              - '**/src/hyperlight_guest/Cargo.toml'
-              - '**/src/hyperlight_common/Cargo.toml'
       - uses: actions/github-script@v7
         id: docs-only
         with:
@@ -43,42 +40,22 @@ jobs:
             let all_file_count = ${{steps.changes.outputs.all_count}};
             return all_file_count === docs_file_count;
           result-encoding: string
-      # Check to see if this a dependabot PR and if it updates either the common or guest Cargo.toml files
-      # if it does we need to try and generate a new Cargo.lock file as the PR validation checks that these are up to date
-      - name: checkout
-        if: ${{ github.actor == 'dependabot[bot]' && steps.changes.outputs.common_deps_count > 0 }}
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.head_ref }}
-      - name: Update Cargo.lock for dependabot changes
-        if: ${{ github.actor == 'dependabot[bot]' && steps.changes.outputs.common_deps_count > 0 }}
-        run: |
-          cargo update --manifest-path src/tests/rust_guests/simpleguest/Cargo.toml
-          cargo update --manifest-path src/tests/rust_guests/callbackguest/Cargo.toml
-          if [ -n "$(git status --porcelain src/tests/rust_guests/simpleguest/Cargo.lock src/tests/rust_guests/callbackguest/Cargo.lock)" ]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add src/tests/rust_guests/simpleguest/Cargo.lock
-            git add src/tests/rust_guests/callbackguest/Cargo.lock
-            git commit -m "Update Cargo.lock files for dependabot changes"
-            git push
-          fi
 
   rust:
     needs:
-      - docs-and-common-deps-pr
+      - docs-pr
     uses: ./.github/workflows/dep_rust.yml
     secrets: inherit
     with: 
-      docs_only: ${{needs.docs-and-common-deps-pr.outputs.docs-only}}
+      docs_only: ${{needs.docs-pr.outputs.docs-only}}
 
   fuzzing:
     needs:
-      - docs-and-common-deps-pr
+      - docs-pr
     uses: ./.github/workflows/dep_fuzzing.yml
     with:
       max_total_time: 300 # 5 minutes in seconds
-      docs_only: ${{needs.docs-and-common-deps-pr.outputs.docs-only}}
+      docs_only: ${{needs.docs-pr.outputs.docs-only}}
     secrets: inherit
 
   spelling:
