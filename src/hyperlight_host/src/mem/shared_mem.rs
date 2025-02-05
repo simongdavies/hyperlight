@@ -27,12 +27,18 @@ use tracing::{instrument, Span};
 use windows::core::PCSTR;
 #[cfg(target_os = "windows")]
 use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+#[cfg(all(target_os = "windows", inprocess))]
+use windows::Win32::System::Memory::FILE_MAP_EXECUTE;
+#[cfg(all(target_os = "windows", not(inprocess)))]
+use windows::Win32::System::Memory::PAGE_READWRITE;
 #[cfg(target_os = "windows")]
 use windows::Win32::System::Memory::{
     CreateFileMappingA, MapViewOfFile, UnmapViewOfFile, VirtualProtect, FILE_MAP_ALL_ACCESS,
-    MEMORY_MAPPED_VIEW_ADDRESS, PAGE_EXECUTE_READWRITE, PAGE_PROTECTION_FLAGS, PAGE_READWRITE,
+    MEMORY_MAPPED_VIEW_ADDRESS, PAGE_EXECUTE_READWRITE, PAGE_NOACCESS, PAGE_PROTECTION_FLAGS,
 };
 
+#[cfg(target_os = "windows")]
+use crate::HyperlightError::MemoryAllocationFailed;
 #[cfg(target_os = "windows")]
 use crate::HyperlightError::{MemoryRequestTooBig, WindowsAPIError};
 use crate::{log_then_return, new_error, Result};
@@ -388,12 +394,6 @@ impl ExclusiveSharedMemory {
     #[cfg(target_os = "windows")]
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub fn new(min_size_bytes: usize) -> Result<Self> {
-        #[cfg(inprocess)]
-        use windows::Win32::System::Memory::FILE_MAP_EXECUTE;
-        use windows::Win32::System::Memory::{PAGE_NOACCESS, PAGE_PROTECTION_FLAGS};
-
-        use crate::HyperlightError::MemoryAllocationFailed;
-
         if min_size_bytes == 0 {
             return Err(new_error!("Cannot create shared memory with size 0"));
         }
@@ -425,22 +425,36 @@ impl ExclusiveSharedMemory {
 
         // Allocate the memory use CreateFileMapping instead of VirtualAlloc
         // This allows us to map the memory into the surrogate process using MapViewOfFile2
+
+        #[cfg(not(inprocess))]
+        let flags = PAGE_READWRITE;
+        #[cfg(inprocess)]
+        let flags = PAGE_EXECUTE_READWRITE;
+
         let handle = unsafe {
             CreateFileMappingA(
                 INVALID_HANDLE_VALUE,
                 None,
-                PAGE_READWRITE,
+                flags,
                 dwmaximumsizehigh,
                 dwmaximumsizelow,
                 PCSTR::null(),
             )?
         };
 
-        #[cfg(inprocess)]
-        let addr =
-            unsafe { MapViewOfFile(handle, FILE_MAP_ALL_ACCESS | FILE_MAP_EXECUTE, 0, 0, 0) };
+        if handle.is_invalid() {
+            log_then_return!(MemoryAllocationFailed(
+                Error::last_os_error().raw_os_error()
+            ));
+        }
+
         #[cfg(not(inprocess))]
-        let addr = unsafe { MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, 0) };
+        let file_map = FILE_MAP_ALL_ACCESS;
+        #[cfg(inprocess)]
+        let file_map = FILE_MAP_ALL_ACCESS | FILE_MAP_EXECUTE;
+
+        let addr = unsafe { MapViewOfFile(handle, file_map, 0, 0, 0) };
+
         if addr.Value.is_null() {
             log_then_return!(MemoryAllocationFailed(
                 Error::last_os_error().raw_os_error()

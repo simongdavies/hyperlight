@@ -871,7 +871,7 @@ fn set_up_hypervisor_partition(
                     leaked_outb_wrapper,
                 })?;
                 Ok(Box::new(hv))
-            } else if #[cfg(feature = "inprocess")]{
+            } else if #[cfg(inprocess)]{
                 // in-process feature, but not debug build
                 log_then_return!("In-process mode is only available on debug-builds");
             } else if #[cfg(debug_assertions)] {
@@ -937,6 +937,8 @@ mod tests {
     use hyperlight_common::flatbuffer_wrappers::function_types::{ParameterValue, ReturnType};
     use hyperlight_testing::simple_guest_as_string;
 
+    #[cfg(target_os = "windows")]
+    use crate::sandbox::SandboxConfiguration;
     use crate::sandbox::WrapperGetter;
     use crate::sandbox_state::sandbox::EvolvableSandbox;
     use crate::sandbox_state::transition::Noop;
@@ -950,9 +952,26 @@ mod tests {
         if !is_hypervisor_present() {
             panic!("Panic on create_multi_use_sandbox because no hypervisor is present");
         }
+
+        // Tests that use this function seem to fail with timeouts sporadically on windows so timeouts are raised here
+
+        let cfg = {
+            #[cfg(target_os = "windows")]
+            {
+                let mut cfg = SandboxConfiguration::default();
+                cfg.set_max_initialization_time(std::time::Duration::from_secs(10));
+                cfg.set_max_execution_time(std::time::Duration::from_secs(3));
+                Some(cfg)
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                None
+            }
+        };
+
         let usbox = UninitializedSandbox::new(
             GuestBinary::FilePath(simple_guest_as_string().expect("Guest Binary Missing")),
-            None,
+            cfg,
             None,
             None,
         )
