@@ -20,6 +20,9 @@ anyhow = { version = "1.0.95", default-features = false }
 log = "0.4.25"
 tracing = { version = "0.1.41", optional = true }
 strum = {version = "0.27",  default-features = false, features = ["derive"]}
+mesh = { git = "https://github.com/microsoft/openvmm"}
+# mesh = { path = "../../../openvmm/support/mesh" }
+
 
 [features]
 default = ["tracing"]

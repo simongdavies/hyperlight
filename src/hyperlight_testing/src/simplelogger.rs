@@ -53,14 +53,21 @@ impl SimpleLogger {
     }
 
     pub fn num_log_calls(&self) -> usize {
-        unsafe { LOGCALLS.len() }
+        #[allow(static_mut_refs)]
+        unsafe {
+            LOGCALLS.len()
+        }
     }
     pub fn get_log_call(&self, idx: usize) -> Option<LogCall> {
-        unsafe { LOGCALLS.get(idx).cloned() }
+        #[allow(static_mut_refs)]
+        unsafe {
+            LOGCALLS.get(idx).cloned()
+        }
     }
 
     pub fn clear_log_calls(&self) {
         unsafe {
+            #[allow(static_mut_refs)]
             LOGCALLS.clear();
             NUMBER_OF_ENABLED_CALLS = 0;
         }
@@ -95,6 +102,7 @@ impl Log for SimpleLogger {
         }
 
         unsafe {
+            #[allow(static_mut_refs)]
             LOGCALLS.push(LogCall {
                 level: record.level(),
                 args: format!("{}", record.args()),
