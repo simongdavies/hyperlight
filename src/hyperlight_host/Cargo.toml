@@ -48,6 +48,15 @@ strum = { version = "0.27", features = ["derive"] }
 tempfile = { version = "3.16", optional = true }
 serde_yaml = "0.9"
 anyhow = "1.0"
+mesh = { git = "https://github.com/microsoft/openvmm"}
+mesh_process = { git = "https://github.com/microsoft/openvmm" }
+mesh_worker = { git ="https://github.com/microsoft/openvmm" }
+mesh_channel = { git ="https://github.com/microsoft/openvmm" }
+futures = "0.3"
+pal_async= { git ="https://github.com/microsoft/openvmm" }
+futures-concurrency = "7.2.1"
+uuid = { version = "1.13.1", features = ["v4"] }
+tokio = { version = "1.0", features = ["full"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.59", features = [

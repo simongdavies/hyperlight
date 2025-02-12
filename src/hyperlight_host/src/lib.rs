@@ -86,6 +86,10 @@ pub(crate) mod signal_handlers;
 #[cfg(test)]
 pub(crate) mod testing;
 
+#[deny(missing_docs, unused_mut)]
+/// Module to handle the hosting of Sandboxes in a mesh
+pub(crate) mod mesh;
+
 /// The re-export for the `HyperlightError` type
 pub use error::HyperlightError;
 /// The re-export for the set_registry function

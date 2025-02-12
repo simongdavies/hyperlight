@@ -35,6 +35,7 @@ use crossbeam_channel::{RecvError, SendError};
 use flatbuffers::InvalidFlatbuffer;
 use hyperlight_common::flatbuffer_wrappers::function_types::{ParameterValue, ReturnValue};
 use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
+use mesh::error::RemoteError;
 use serde::{Deserialize, Serialize};
 use serde_yaml;
 use thiserror::Error;
@@ -252,6 +253,10 @@ pub enum HyperlightError {
     /// RefCell mut borrow failed
     #[error("RefCell mut borrow failed")]
     RefCellMutBorrowFailed(#[from] BorrowMutError),
+
+    /// Error from a mesh RPC call
+    #[error("RPC Error {0:?}")]
+    RpcCallError(#[from] mesh::rpc::RpcError<RemoteError>),
 
     /// Failed to get value from return value
     #[error("Failed To Convert Return Value {0:?} to {1:?}")]

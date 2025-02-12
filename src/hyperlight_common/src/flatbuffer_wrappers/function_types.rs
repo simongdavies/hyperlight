@@ -19,6 +19,7 @@ use alloc::vec::Vec;
 
 use anyhow::{anyhow, bail, Error, Result};
 use flatbuffers::size_prefixed_root;
+use mesh::MeshPayload;
 #[cfg(feature = "tracing")]
 use tracing::{instrument, Span};
 
@@ -32,7 +33,7 @@ use crate::flatbuffers::hyperlight::generated::{
 };
 
 /// Supported parameter types with values for function calling.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, MeshPayload)]
 pub enum ParameterValue {
     /// i32
     Int(i32),
@@ -55,7 +56,7 @@ pub enum ParameterValue {
 }
 
 /// Supported parameter types for function calling.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, MeshPayload)]
 #[repr(C)]
 pub enum ParameterType {
     /// i32
@@ -79,7 +80,7 @@ pub enum ParameterType {
 }
 
 /// Supported return types with values from function calling.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, MeshPayload)]
 pub enum ReturnValue {
     /// i32
     Int(i32),
@@ -104,7 +105,7 @@ pub enum ReturnValue {
 }
 
 /// Supported return types from function calling.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default, MeshPayload)]
 #[repr(C)]
 pub enum ReturnType {
     /// i32
