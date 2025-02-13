@@ -46,7 +46,7 @@ pub fn new_uninit_rust() -> Result<UninitializedSandbox> {
 }
 
 pub fn get_simpleguest_sandboxes(
-    writer: Option<&dyn HostFunction1<String, i32>>, // An optional writer to make sure correct info is passed to the host printer
+    writer: Option<&dyn HostFunction1<String, i32, UninitializedSandbox>>, // An optional writer to make sure correct info is passed to the host printer
 ) -> Vec<MultiUseSandbox> {
     let elf_path = get_c_or_rust_simpleguest_path();
     let exe_path = format!("{elf_path}.exe");
@@ -99,7 +99,7 @@ pub fn get_simpleguest_sandboxes(
 }
 
 pub fn get_callbackguest_uninit_sandboxes(
-    writer: Option<&dyn HostFunction1<String, i32>>, // An optional writer to make sure correct info is passed to the host printer
+    writer: Option<&dyn HostFunction1<String, i32, UninitializedSandbox>>, // An optional writer to make sure correct info is passed to the host printer
 ) -> Vec<UninitializedSandbox> {
     let elf_path = get_c_or_rust_callbackguest_path();
     let exe_path = format!("{elf_path}.exe");

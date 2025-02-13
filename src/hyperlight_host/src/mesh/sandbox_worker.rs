@@ -113,32 +113,19 @@ impl SandboxWorker {
                             None,
                             None,
                         ) {
-                            Ok(sandbox) => {
-                                let res = match sandbox.evolve(Noop::default()) {
-                                    Ok(sandbox) => {
-                                        self.sandbox = Some(sandbox);
-                                        Ok(())
-                                    }
-                                    Err(e) => Err(e),
-                                };
-                                res
-                            }
+                            Ok(sandbox) => match sandbox.evolve(Noop::default()) {
+                                Ok(sandbox) => {
+                                    self.sandbox = Some(sandbox);
+                                    Ok(())
+                                }
+                                Err(e) => Err(e),
+                            },
                             Err(e) => Err(e),
                         }
                     };
                     failable_rpc.complete(res.map_err(|e| RemoteError::new(e.to_string())))
                 }
                 Event::SandboxWorkerRpc(Ok(SandboxWorkerRpc::CallGuestFunction(failable_rpc))) => {
-                    // let res = {
-                    //     //let guest_function_call = failable_rpc.input();
-                    //     let sandbox = self.sandbox.as_mut().ok_or_else(|| anyhow::anyhow!("Sandbox not created"))?;
-                    //     let res = match sandbox.call_guest_function_by_name(&guest_function_call.function_name, guest_function_call.function_return_type.clone(), guest_function_call.function_args){
-                    //         Ok(return_value) => Ok(return_value),
-                    //         Err(e) => Err(e),
-                    //     };
-                    //     res
-                    // };
-
                     failable_rpc.handle_failable_sync(|input| {
                         let sandbox = self
                             .sandbox
@@ -146,12 +133,10 @@ impl SandboxWorker {
                             .ok_or_else(|| anyhow::anyhow!("Sandbox not created"))?;
                         sandbox.call_guest_function_by_name(
                             &input.function_name,
-                            input.function_return_type.clone(),
+                            input.function_return_type,
                             input.function_args,
                         )
                     });
-
-                    //failable_rpc.complete(res.map_err(|e| RemoteError::new(e.to_string())))
                 }
                 Event::SandboxWorkerRpc(Err(e)) => {
                     break Err(anyhow::anyhow!("Error {:?}", e));

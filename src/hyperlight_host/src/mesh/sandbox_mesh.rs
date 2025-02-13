@@ -54,7 +54,6 @@ impl SandboxMesh {
             mesh.launch_host(
                 ProcessConfig::new(name),
                 SandboxMeshHostParameters { runner },
-                
             )
             .await?;
             host

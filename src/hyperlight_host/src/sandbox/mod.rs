@@ -17,7 +17,7 @@ limitations under the License.
 /// Configuration needed to establish a sandbox.
 pub mod config;
 /// Functionality for reading, but not modifying host functions
-mod host_funcs;
+pub(crate) mod host_funcs;
 /// Functionality for dealing with `Sandbox`es that contain Hypervisors
 pub(crate) mod hypervisor;
 /// Functionality for dealing with initialized sandboxes that can

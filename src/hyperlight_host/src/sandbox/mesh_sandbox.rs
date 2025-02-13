@@ -25,7 +25,8 @@ impl MeshSandbox {
         let mesh_name = format!("sandbox_{}", Uuid::new_v4());
         run_mesh_host(mesh_name.as_str())?;
         let sandbox_mesh = SandboxMesh::new(single_process, &mesh_name)?;
-        let (sandbox_rpc_tx, sandbox_worker) = futures::executor::block_on(async {Self::run_sandbox_worker(&sandbox_mesh).await})?;
+        let (sandbox_rpc_tx, sandbox_worker) =
+            futures::executor::block_on(async { Self::run_sandbox_worker(&sandbox_mesh).await })?;
 
         // Send the create sandbox rpc
 
@@ -70,8 +71,10 @@ impl MeshSandbox {
             let sandbox_host = sandbox_mesh.create_worker_host("sandboxworkerhost").await?;
             let sandbox_worker_parameters = sandbox_worker::SandboxWorkerParameters {
                 rpc: sandbox_rpc_rx,
-            }; 
-            sandbox_host.launch_worker(SANDBOX_WORKER_ID, sandbox_worker_parameters).await?
+            };
+            sandbox_host
+                .launch_worker(SANDBOX_WORKER_ID, sandbox_worker_parameters)
+                .await?
         };
         Ok((sandbox_rpc_tx, sandbox_worker))
     }
@@ -84,13 +87,18 @@ impl Drop for MeshSandbox {
     }
 }
 
+// impl UninitializedSandbox for MeshSandbox {
+
+// }
+
 #[cfg(test)]
 mod test {
-    use super::*;
     use hyperlight_common::flatbuffer_wrappers::function_types::{
         ParameterValue, ReturnType, ReturnValue,
     };
     use hyperlight_testing::simple_guest_as_string;
+
+    use super::*;
 
     #[test]
     fn test_mesh_sandbox_creation() {
@@ -102,7 +110,7 @@ mod test {
 
     #[test]
     fn test_call_function_with_args() {
-        let guest_binary =  simple_guest_as_string().unwrap();
+        let guest_binary = simple_guest_as_string().unwrap();
         let single_process = true;
         let sandbox = MeshSandbox::new(guest_binary, single_process).unwrap();
         let function_name = "Echo".to_string();
@@ -119,7 +127,7 @@ mod test {
 
     #[test]
     fn test_mesh_name() {
-        let guest_binary =  simple_guest_as_string().unwrap();
+        let guest_binary = simple_guest_as_string().unwrap();
         let single_process = true;
         let sandbox = MeshSandbox::new(guest_binary, single_process).unwrap();
         assert!(sandbox.mesh_name().starts_with("sandbox_"));

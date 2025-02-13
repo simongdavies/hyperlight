@@ -17,11 +17,13 @@ limitations under the License.
 use std::fmt::Debug;
 use std::panic;
 
+use hyperlight_common::flatbuffer_wrappers::host_function_definition::HostFunctionDefinition;
 use tracing::{instrument, Span};
 
 use super::transition::TransitionMetadata;
+use crate::func::HyperlightFunction;
+use crate::sandbox::ExtraAllowedSyscall;
 use crate::Result;
-
 /// The minimal functionality of a Hyperlight sandbox. Most of the types
 /// and operations within this crate require `Sandbox` implementations.
 ///
@@ -63,6 +65,21 @@ pub trait UninitializedSandbox: Sandbox {
     fn is_running_in_process(&self) -> bool {
         self.get_uninitialized_sandbox().run_inprocess
     }
+}
+/// A trait to allow registering host functions with a sandbox.
+pub trait HostFunctionRegistry {
+    fn register_host_function(
+        &mut self,
+        host_function_definition: HostFunctionDefinition,
+        host_function: HyperlightFunction,
+    ) -> Result<()>;
+
+    fn register_host_function_with_syscalls(
+        &mut self,
+        host_function_definition: HostFunctionDefinition,
+        host_function: HyperlightFunction,
+        syscalls: Vec<ExtraAllowedSyscall>,
+    ) -> Result<()>;
 }
 
 /// A `Sandbox` that knows how to "evolve" into a next state.

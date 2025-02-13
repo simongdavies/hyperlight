@@ -1,14 +1,16 @@
-
+use clap::builder::ValueParser;
+use clap::{Arg, Command};
+use hyperlight_host::func::{ParameterValue, ReturnType, ReturnValue};
+use hyperlight_host::sandbox::MeshSandbox;
 use hyperlight_testing::simple_guest_as_string;
-use hyperlight_host::{func::{ParameterValue, ReturnType, ReturnValue}, sandbox::MeshSandbox};
-use clap::{builder::{ ValueParser}, Arg, Command};
 
 fn main() {
     // Use clap to parse command line arguments
-    let matches = Command::new("Mesh Example").ignore_errors(true)
-    .arg(
-        Arg::new("in_process")
-        .value_parser(ValueParser::bool())
+    let matches = Command::new("Mesh Example")
+        .ignore_errors(true)
+        .arg(
+            Arg::new("in_process")
+                .value_parser(ValueParser::bool())
                 .short('i')
                 .default_value("false")
                 .help("Run in process"),
@@ -17,12 +19,14 @@ fn main() {
 
     // Get the value of the --in-process argument
     let run_in_process = match matches.get_one::<bool>("in_process") {
-        Some(value) => value.clone(),
+        Some(value) => *value,
         None => {
             eprintln!("Invalid value for --in-process argument");
             return;
         }
     };
+
+    println!("Running Mesh Example In Process: {}", run_in_process);
 
     // Create a new MeshSandbox
     let guest_binary = simple_guest_as_string().unwrap();

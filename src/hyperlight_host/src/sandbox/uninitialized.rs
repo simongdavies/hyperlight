@@ -32,7 +32,9 @@ use crate::mem::exe::ExeInfo;
 use crate::mem::mgr::{SandboxMemoryManager, STACK_COOKIE_LEN};
 use crate::mem::shared_mem::ExclusiveSharedMemory;
 use crate::sandbox::SandboxConfiguration;
-use crate::sandbox_state::sandbox::EvolvableSandbox;
+use crate::sandbox_state::sandbox::{
+    EvolvableSandbox, UninitializedSandbox as UninitializedSandboxTrait,
+};
 use crate::sandbox_state::transition::Noop;
 use crate::{log_build_details, log_then_return, new_error, MultiUseSandbox, Result};
 
@@ -63,6 +65,83 @@ impl crate::sandbox_state::sandbox::UninitializedSandbox for UninitializedSandbo
     #[instrument(skip_all, parent = Span::current(), level = "Trace")]
     fn get_uninitialized_sandbox_mut(&mut self) -> &mut crate::sandbox::UninitializedSandbox {
         self
+    }
+
+    // fn register_host_function(&mut self,
+    //     host_function_definition: hyperlight_common::flatbuffer_wrappers::host_function_definition::HostFunctionDefinition,
+    //     host_function: crate::func::HyperlightFunction,
+    // )-> Result<()> {
+    //     let sb= self.get_uninitialized_sandbox_mut();
+    //     sb.host_funcs
+    //     .try_lock()
+    //     .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?
+    //     .register_host_function(
+    //         sb.mgr.as_mut(),
+    //         &host_function_definition,
+    //         host_function)
+    // }
+
+    // fn register_host_function_with_syscalls(
+    //     &mut self,
+    //     host_function_definition: hyperlight_common::flatbuffer_wrappers::host_function_definition::HostFunctionDefinition,
+    //     host_function: crate::func::HyperlightFunction,
+    //     syscalls: Vec<super::ExtraAllowedSyscall>,
+    // )-> Result<()> {
+    //     #[cfg(all(feature = "seccomp", target_os = "linux"))]
+    //     {
+    //     let sb= self.get_uninitialized_sandbox_mut();
+    //     sb.host_funcs
+    //     .try_lock()
+    //     .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?
+    //     .register_host_function_with_syscalls(
+    //         sb.mgr.as_mut(),
+    //         &host_function_definition,
+    //         host_function,
+    //         syscalls)?;
+    //     }
+    //     Ok(())
+    //}
+}
+
+impl crate::sandbox_state::sandbox::HostFunctionRegistry for UninitializedSandbox {
+    fn register_host_function(
+        &mut self,
+        host_function_definition: hyperlight_common::flatbuffer_wrappers::host_function_definition::HostFunctionDefinition,
+        host_function: crate::func::HyperlightFunction,
+    ) -> Result<()> {
+        let sb = self.get_uninitialized_sandbox_mut();
+        sb.host_funcs
+            .try_lock()
+            .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?
+            .register_host_function(sb.mgr.as_mut(), &host_function_definition, host_function)
+    }
+
+    fn register_host_function_with_syscalls(
+        &mut self,
+        host_function_definition:  hyperlight_common::flatbuffer_wrappers::host_function_definition::HostFunctionDefinition,
+        host_function: crate::func::HyperlightFunction,
+        syscalls: Vec<super::ExtraAllowedSyscall>,
+    ) -> Result<()> {
+        #[cfg(not(all(feature = "seccomp", target_os = "linux")))]
+        {
+            let _ = host_function_definition;
+            let _ = host_function;
+            let _ = syscalls;
+        }
+        #[cfg(all(feature = "seccomp", target_os = "linux"))]
+        {
+            let sb = self.get_uninitialized_sandbox_mut();
+            sb.host_funcs
+                .try_lock()
+                .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?
+                .register_host_function_with_syscalls(
+                    sb.mgr.as_mut(),
+                    &host_function_definition,
+                    host_function,
+                    syscalls,
+                )?;
+        }
+        Ok(())
     }
 }
 
@@ -122,7 +201,7 @@ impl UninitializedSandbox {
         guest_binary: GuestBinary,
         cfg: Option<SandboxConfiguration>,
         sandbox_run_options: Option<SandboxRunOptions>,
-        host_print_writer: Option<&dyn HostFunction1<String, i32>>,
+        host_print_writer: Option<&dyn HostFunction1<String, i32, UninitializedSandbox>>,
     ) -> Result<Self> {
         log_build_details();
 
