@@ -1,29 +1,31 @@
-use std::env;
+
 use hyperlight_testing::simple_guest_as_string;
 use hyperlight_host::{func::{ParameterValue, ReturnType, ReturnValue}, sandbox::MeshSandbox};
+use clap::{builder::{ ValueParser}, Arg, Command};
 
 fn main() {
-    // Collect the command line arguments
-    let args: Vec<String> = env::args().collect();
+    // Use clap to parse command line arguments
+    let matches = Command::new("Mesh Example").ignore_errors(true)
+    .arg(
+        Arg::new("in_process")
+        .value_parser(ValueParser::bool())
+                .short('i')
+                .default_value("false")
+                .help("Run in process"),
+        )
+        .get_matches();
 
-    // Check if the correct number of arguments is provided
-    if args.len() != 2 {
-        eprintln!("Usage: {} <run_in_process>", args[0]);
-        std::process::exit(1);
-    }
-
-    // Parse the argument as a boolean
-    let run_in_process: bool = match args[1].parse() {
-        Ok(val) => val,
-        Err(_) => {
-            eprintln!("Invalid argument: {}. Expected a boolean value (true/false).", args[1]);
-            eprintln!("Running out of process by default.");
-            false
+    // Get the value of the --in-process argument
+    let run_in_process = match matches.get_one::<bool>("in_process") {
+        Some(value) => value.clone(),
+        None => {
+            eprintln!("Invalid value for --in-process argument");
+            return;
         }
     };
 
     // Create a new MeshSandbox
-    let guest_binary =  simple_guest_as_string().unwrap();
+    let guest_binary = simple_guest_as_string().unwrap();
     let sandbox = MeshSandbox::new(guest_binary, run_in_process).unwrap();
     let function_name = "Echo".to_string();
     let function_return_type = ReturnType::String;

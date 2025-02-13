@@ -48,12 +48,12 @@ strum = { version = "0.27", features = ["derive"] }
 tempfile = { version = "3.16", optional = true }
 serde_yaml = "0.9"
 anyhow = "1.0"
-mesh = { git = "https://github.com/microsoft/openvmm"}
-mesh_process = { git = "https://github.com/microsoft/openvmm" }
-mesh_worker = { git ="https://github.com/microsoft/openvmm" }
-mesh_channel = { git ="https://github.com/microsoft/openvmm" }
+mesh ={ git = "https://github.com/simongdavies/openvmm", branch = "fix-mesh-segv" }
+mesh_process ={ git = "https://github.com/simongdavies/openvmm", branch = "fix-mesh-segv" }
+mesh_worker = { git = "https://github.com/simongdavies/openvmm", branch = "fix-mesh-segv" }
+mesh_channel = { git = "https://github.com/simongdavies/openvmm", branch = "fix-mesh-segv" }
 futures = "0.3"
-pal_async= { git ="https://github.com/microsoft/openvmm" }
+pal_async= { git = "https://github.com/simongdavies/openvmm", branch = "fix-mesh-segv" }
 futures-concurrency = "7.2.1"
 uuid = { version = "1.13.1", features = ["v4"] }
 tokio = { version = "1.0", features = ["full"] }
@@ -111,6 +111,7 @@ opentelemetry_sdk = { version = "0.27.1", features = ["rt-tokio"] }
 tokio = { version = "1.43.0", features = ["full"] }
 criterion = "0.5.1"
 tracing-chrome = "0.7.2"
+clap = "4.5"
 
 [target.'cfg(windows)'.dev-dependencies]
 windows = { version = "0.59", features = [

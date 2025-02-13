@@ -656,7 +656,7 @@ dependencies = [
 [[package]]
 name = "debug_ptr"
 version = "0.0.0"
-source = "git+https://github.com/microsoft/openvmm#4d02dd47886a5ae1fb82cec386d08732c8ea37ad"
+source = "git+https://github.com/simongdavies/openvmm?branch=fix-mesh-segv#88d32b54f110d0de34414c1b1acd64dd213656e6"
 
 [[package]]
 name = "diatomic-waker"
@@ -1284,6 +1284,7 @@ dependencies = [
  "built",
  "cfg-if",
  "cfg_aliases",
+ "clap",
  "criterion",
  "crossbeam",
  "crossbeam-channel",
@@ -1569,7 +1570,7 @@ dependencies = [
 [[package]]
 name = "inspect"
 version = "0.0.0"
-source = "git+https://github.com/microsoft/openvmm#4d02dd47886a5ae1fb82cec386d08732c8ea37ad"
+source = "git+https://github.com/simongdavies/openvmm?branch=fix-mesh-segv#88d32b54f110d0de34414c1b1acd64dd213656e6"
 dependencies = [
  "bitfield-struct",
  "inspect_derive",
@@ -1580,7 +1581,7 @@ dependencies = [
 [[package]]
 name = "inspect_derive"
 version = "0.0.0"
-source = "git+https://github.com/microsoft/openvmm#4d02dd47886a5ae1fb82cec386d08732c8ea37ad"
+source = "git+https://github.com/simongdavies/openvmm?branch=fix-mesh-segv#88d32b54f110d0de34414c1b1acd64dd213656e6"
 dependencies = [
  "heck 0.4.1",
  "proc-macro2",
@@ -1591,7 +1592,7 @@ dependencies = [
 [[package]]
 name = "inspect_rlimit"
 version = "0.0.0"
-source = "git+https://github.com/microsoft/openvmm#4d02dd47886a5ae1fb82cec386d08732c8ea37ad"
+source = "git+https://github.com/simongdavies/openvmm?branch=fix-mesh-segv#88d32b54f110d0de34414c1b1acd64dd213656e6"
 dependencies = [
  "cfg-if",
  "inspect",
@@ -1602,7 +1603,7 @@ dependencies = [
 [[package]]
 name = "inspect_task"
 version = "0.0.0"
-source = "git+https://github.com/microsoft/openvmm#4d02dd47886a5ae1fb82cec386d08732c8ea37ad"
+source = "git+https://github.com/simongdavies/openvmm?branch=fix-mesh-segv#88d32b54f110d0de34414c1b1acd64dd213656e6"
 dependencies = [
  "inspect",
  "pal_async",
@@ -1811,7 +1812,7 @@ checksum = "643cb0b8d4fcc284004d5fd0d67ccf61dfffadb7f75e1e71bc420f4688a3a704"
 [[package]]
 name = "loan_cell"
 version = "0.0.0"
-source = "git+https://github.com/microsoft/openvmm#4d02dd47886a5ae1fb82cec386d08732c8ea37ad"
+source = "git+https://github.com/simongdavies/openvmm?branch=fix-mesh-segv#88d32b54f110d0de34414c1b1acd64dd213656e6"
 
 [[package]]
 name = "lock_api"
@@ -1875,7 +1876,7 @@ checksum = "78ca9ab1a0babb1e7d5695e3530886289c18cf2f87ec19a575a0abdce112e3a3"
 [[package]]
 name = "mesh"
 version = "0.0.0"
-source = "git+https://github.com/microsoft/openvmm#4d02dd47886a5ae1fb82cec386d08732c8ea37ad"
+source = "git+https://github.com/simongdavies/openvmm?branch=fix-mesh-segv#88d32b54f110d0de34414c1b1acd64dd213656e6"
 dependencies = [
  "mesh_channel",
  "mesh_derive",
@@ -1886,7 +1887,7 @@ dependencies = [
 [[package]]
 name = "mesh_channel"
 version = "0.0.0"
-source = "git+https://github.com/microsoft/openvmm#4d02dd47886a5ae1fb82cec386d08732c8ea37ad"
+source = "git+https://github.com/simongdavies/openvmm?branch=fix-mesh-segv#88d32b54f110d0de34414c1b1acd64dd213656e6"
 dependencies = [
  "futures-core",
  "futures-io",
@@ -1901,7 +1902,7 @@ dependencies = [
 [[package]]
 name = "mesh_channel_core"
 version = "0.0.0"
-source = "git+https://github.com/microsoft/openvmm#4d02dd47886a5ae1fb82cec386d08732c8ea37ad"
+source = "git+https://github.com/simongdavies/openvmm?branch=fix-mesh-segv#88d32b54f110d0de34414c1b1acd64dd213656e6"
 dependencies = [
  "futures-core",
  "mesh_node",
@@ -1914,7 +1915,7 @@ dependencies = [
 [[package]]
 name = "mesh_derive"
 version = "0.0.0"
-source = "git+https://github.com/microsoft/openvmm#4d02dd47886a5ae1fb82cec386d08732c8ea37ad"
+source = "git+https://github.com/simongdavies/openvmm?branch=fix-mesh-segv#88d32b54f110d0de34414c1b1acd64dd213656e6"
 dependencies = [
  "heck 0.4.1",
  "proc-macro2",
@@ -1925,7 +1926,7 @@ dependencies = [
 [[package]]
 name = "mesh_node"
 version = "0.0.0"
-source = "git+https://github.com/microsoft/openvmm#4d02dd47886a5ae1fb82cec386d08732c8ea37ad"
+source = "git+https://github.com/simongdavies/openvmm?branch=fix-mesh-segv#88d32b54f110d0de34414c1b1acd64dd213656e6"
 dependencies = [
  "futures-channel",
  "getrandom 0.2.15",
@@ -1942,7 +1943,7 @@ dependencies = [
 [[package]]
 name = "mesh_process"
 version = "0.0.0"
-source = "git+https://github.com/microsoft/openvmm#4d02dd47886a5ae1fb82cec386d08732c8ea37ad"
+source = "git+https://github.com/simongdavies/openvmm?branch=fix-mesh-segv#88d32b54f110d0de34414c1b1acd64dd213656e6"
 dependencies = [
  "anyhow",
  "base64 0.21.7",
@@ -1964,7 +1965,7 @@ dependencies = [
 [[package]]
 name = "mesh_protobuf"
 version = "0.0.0"
-source = "git+https://github.com/microsoft/openvmm#4d02dd47886a5ae1fb82cec386d08732c8ea37ad"
+source = "git+https://github.com/simongdavies/openvmm?branch=fix-mesh-segv#88d32b54f110d0de34414c1b1acd64dd213656e6"
 dependencies = [
  "fs-err",
  "heck 0.4.1",
@@ -1976,7 +1977,7 @@ dependencies = [
 [[package]]
 name = "mesh_remote"
 version = "0.0.0"
-source = "git+https://github.com/microsoft/openvmm#4d02dd47886a5ae1fb82cec386d08732c8ea37ad"
+source = "git+https://github.com/simongdavies/openvmm?branch=fix-mesh-segv#88d32b54f110d0de34414c1b1acd64dd213656e6"
 dependencies = [
  "futures",
  "futures-concurrency",
@@ -2001,7 +2002,7 @@ dependencies = [
 [[package]]
 name = "mesh_worker"
 version = "0.0.0"
-source = "git+https://github.com/microsoft/openvmm#4d02dd47886a5ae1fb82cec386d08732c8ea37ad"
+source = "git+https://github.com/simongdavies/openvmm?branch=fix-mesh-segv#88d32b54f110d0de34414c1b1acd64dd213656e6"
 dependencies = [
  "anyhow",
  "futures",
@@ -2176,7 +2177,7 @@ checksum = "b410bbe7e14ab526a0e86877eb47c6996a2bd7746f027ba551028c925390e4e9"
 [[package]]
 name = "open_enum"
 version = "0.0.0"
-source = "git+https://github.com/microsoft/openvmm#4d02dd47886a5ae1fb82cec386d08732c8ea37ad"
+source = "git+https://github.com/simongdavies/openvmm?branch=fix-mesh-segv#88d32b54f110d0de34414c1b1acd64dd213656e6"
 
 [[package]]
 name = "opentelemetry"
@@ -2275,7 +2276,7 @@ dependencies = [
 [[package]]
 name = "pal"
 version = "0.0.0"
-source = "git+https://github.com/microsoft/openvmm#4d02dd47886a5ae1fb82cec386d08732c8ea37ad"
+source = "git+https://github.com/simongdavies/openvmm?branch=fix-mesh-segv#88d32b54f110d0de34414c1b1acd64dd213656e6"
 dependencies = [
  "caps",
  "fs-err",
@@ -2297,7 +2298,7 @@ dependencies = [
 [[package]]
 name = "pal_async"
 version = "0.0.0"
-source = "git+https://github.com/microsoft/openvmm#4d02dd47886a5ae1fb82cec386d08732c8ea37ad"
+source = "git+https://github.com/simongdavies/openvmm?branch=fix-mesh-segv#88d32b54f110d0de34414c1b1acd64dd213656e6"
 dependencies = [
  "async-channel",
  "async-task",
@@ -2324,7 +2325,7 @@ dependencies = [
 [[package]]
 name = "pal_async_test"
 version = "0.0.0"
-source = "git+https://github.com/microsoft/openvmm#4d02dd47886a5ae1fb82cec386d08732c8ea37ad"
+source = "git+https://github.com/simongdavies/openvmm?branch=fix-mesh-segv#88d32b54f110d0de34414c1b1acd64dd213656e6"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2334,7 +2335,7 @@ dependencies = [
 [[package]]
 name = "pal_event"
 version = "0.0.0"
-source = "git+https://github.com/microsoft/openvmm#4d02dd47886a5ae1fb82cec386d08732c8ea37ad"
+source = "git+https://github.com/simongdavies/openvmm?branch=fix-mesh-segv#88d32b54f110d0de34414c1b1acd64dd213656e6"
 dependencies = [
  "getrandom 0.2.15",
  "libc",
@@ -3516,7 +3517,7 @@ dependencies = [
 [[package]]
 name = "tracing_helpers"
 version = "0.0.0"
-source = "git+https://github.com/microsoft/openvmm#4d02dd47886a5ae1fb82cec386d08732c8ea37ad"
+source = "git+https://github.com/simongdavies/openvmm?branch=fix-mesh-segv#88d32b54f110d0de34414c1b1acd64dd213656e6"
 dependencies = [
  "anyhow",
  "tracing",
@@ -3569,7 +3570,7 @@ checksum = "40789245bbff5f31eb773c9ac4ee5c4e15eab9640d975e124d6ce4c34a6410d7"
 [[package]]
 name = "unix_socket"
 version = "0.0.0"
-source = "git+https://github.com/microsoft/openvmm#4d02dd47886a5ae1fb82cec386d08732c8ea37ad"
+source = "git+https://github.com/simongdavies/openvmm?branch=fix-mesh-segv#88d32b54f110d0de34414c1b1acd64dd213656e6"
 dependencies = [
  "getrandom 0.2.15",
  "mesh_protobuf",
@@ -3777,7 +3778,7 @@ checksum = "7219d36b6eac893fa81e84ebe06485e7dcbb616177469b142df14f1f4deb1311"
 [[package]]
 name = "win_import_lib"
 version = "0.0.0"
-source = "git+https://github.com/microsoft/openvmm#4d02dd47886a5ae1fb82cec386d08732c8ea37ad"
+source = "git+https://github.com/simongdavies/openvmm?branch=fix-mesh-segv#88d32b54f110d0de34414c1b1acd64dd213656e6"
 dependencies = [
  "anyhow",
  "cc",
