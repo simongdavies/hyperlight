@@ -104,13 +104,13 @@ fn guest_call_benchmark(c: &mut Criterion) {
 fn sandbox_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("sandboxes");
 
-    // Benchmarks the time to create a new uninintialized sandbox.
+    // Benchmarks the time to create a new uninitialized sandbox.
     // Does **not** include the time to drop the sandbox.
     group.bench_function("create_uninitialized_sandbox", |b| {
         b.iter_with_large_drop(create_uninit_sandbox);
     });
 
-    // Benchmarks the time to create a new uninintialized sandbox and drop it.
+    // Benchmarks the time to create a new uninitialized sandbox and drop it.
     group.bench_function("create_uninitialized_sandbox_and_drop", |b| {
         b.iter(create_uninit_sandbox);
     });
