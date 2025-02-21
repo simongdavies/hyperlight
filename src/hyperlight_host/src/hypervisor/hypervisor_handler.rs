@@ -35,8 +35,12 @@ use vmm_sys_util::signal::SIGRTMIN;
 #[cfg(target_os = "windows")]
 use windows::Win32::System::Hypervisor::{WHvCancelRunVirtualProcessor, WHV_PARTITION_HANDLE};
 
+#[cfg(gdb)]
+use super::gdb::create_gdb_thread;
 #[cfg(feature = "function_call_metrics")]
 use crate::histogram_vec_observe;
+#[cfg(gdb)]
+use crate::hypervisor::handlers::DbgMemAccessHandlerWrapper;
 use crate::hypervisor::handlers::{MemAccessHandlerWrapper, OutBHandlerWrapper};
 #[cfg(target_os = "windows")]
 use crate::hypervisor::wrappers::HandleWrapper;
@@ -46,6 +50,8 @@ use crate::mem::mgr::SandboxMemoryManager;
 use crate::mem::ptr::{GuestPtr, RawPtr};
 use crate::mem::ptr_offset::Offset;
 use crate::mem::shared_mem::{GuestSharedMemory, HostSharedMemory, SharedMemory};
+#[cfg(gdb)]
+use crate::sandbox::config::DebugInfo;
 use crate::sandbox::hypervisor::{get_available_hypervisor, HypervisorType};
 #[cfg(feature = "function_call_metrics")]
 use crate::sandbox::metrics::SandboxMetric::GuestFunctionCallDurationMicroseconds;
@@ -185,6 +191,8 @@ pub(crate) struct HvHandlerConfig {
     pub(crate) outb_handler: OutBHandlerWrapper,
     pub(crate) mem_access_handler: MemAccessHandlerWrapper,
     pub(crate) max_wait_for_cancellation: Duration,
+    #[cfg(gdb)]
+    pub(crate) dbg_mem_access_handler: DbgMemAccessHandlerWrapper,
 }
 
 impl HypervisorHandler {
@@ -232,6 +240,7 @@ impl HypervisorHandler {
     pub(crate) fn start_hypervisor_handler(
         &mut self,
         sandbox_memory_manager: SandboxMemoryManager<GuestSharedMemory>,
+        #[cfg(gdb)] debug_info: Option<DebugInfo>,
     ) -> Result<()> {
         let configuration = self.configuration.clone();
         #[cfg(target_os = "windows")]
@@ -292,6 +301,8 @@ impl HypervisorHandler {
                                     hv = Some(set_up_hypervisor_partition(
                                         execution_variables.shm.try_lock().unwrap().deref_mut().as_mut().unwrap(),
                                         configuration.outb_handler.clone(),
+                                        #[cfg(gdb)]
+                                        &debug_info,
                                     )?);
                                 }
                                 let hv = hv.as_mut().unwrap();
@@ -346,6 +357,8 @@ impl HypervisorHandler {
                                     configuration.outb_handler.clone(),
                                     configuration.mem_access_handler.clone(),
                                     Some(hv_handler_clone.clone()),
+                                    #[cfg(gdb)]
+                                    configuration.dbg_mem_access_handler.clone(),
                                 );
                                 drop(mem_lock_guard);
                                 drop(evar_lock_guard);
@@ -431,6 +444,8 @@ impl HypervisorHandler {
                                             configuration.outb_handler.clone(),
                                             configuration.mem_access_handler.clone(),
                                             Some(hv_handler_clone.clone()),
+                                            #[cfg(gdb)]
+                                            configuration.dbg_mem_access_handler.clone(),
                                         );
                                         histogram_vec_observe!(
                                             &GuestFunctionCallDurationMicroseconds,
@@ -446,6 +461,8 @@ impl HypervisorHandler {
                                         configuration.outb_handler.clone(),
                                         configuration.mem_access_handler.clone(),
                                         Some(hv_handler_clone.clone()),
+                                        #[cfg(gdb)]
+                                        configuration.dbg_mem_access_handler.clone(),
                                     )
                                 };
                                 drop(mem_lock_guard);
@@ -597,11 +614,19 @@ impl HypervisorHandler {
     /// and still have to receive after sorting that out without sending
     /// an extra message.
     pub(crate) fn try_receive_handler_msg(&self) -> Result<()> {
-        match self
+        // When gdb debugging is enabled, we don't want to timeout on receiving messages
+        // from the handler thread, as the thread may be paused by gdb.
+        // In this case, we will wait indefinitely for a message from the handler thread.
+        // Note: This applies to all the running sandboxes, not just the one being debugged.
+        #[cfg(gdb)]
+        let response = self.communication_channels.from_handler_rx.recv();
+        #[cfg(not(gdb))]
+        let response = self
             .communication_channels
             .from_handler_rx
-            .recv_timeout(self.execution_variables.get_timeout()?)
-        {
+            .recv_timeout(self.execution_variables.get_timeout()?);
+
+        match response {
             Ok(msg) => match msg {
                 HandlerMsg::Error(e) => Err(e),
                 HandlerMsg::FinishedHypervisorHandlerAction => Ok(()),
@@ -823,6 +848,7 @@ fn set_up_hypervisor_partition(
     mgr: &mut SandboxMemoryManager<GuestSharedMemory>,
     #[allow(unused_variables)] // parameter only used for in-process mode
     outb_handler: OutBHandlerWrapper,
+    #[cfg(gdb)] debug_info: &Option<DebugInfo>,
 ) -> Result<Box<dyn Hypervisor>> {
     let mem_size = u64::try_from(mgr.shared_mem.mem_size())?;
     let mut regions = mgr.layout.get_memory_regions(&mgr.shared_mem)?;
@@ -882,6 +908,26 @@ fn set_up_hypervisor_partition(
             }
         }
     } else {
+        // Create gdb thread if gdb is enabled and the configuration is provided
+        // This is only done when the hypervisor is not in-process
+        #[cfg(gdb)]
+        let gdb_conn = if let Some(DebugInfo { port }) = debug_info {
+            let gdb_conn = create_gdb_thread(*port, unsafe { pthread_self() });
+
+            // in case the gdb thread creation fails, we still want to continue
+            // without gdb
+            match gdb_conn {
+                Ok(gdb_conn) => Some(gdb_conn),
+                Err(e) => {
+                    log::error!("Could not create gdb connection: {:#}", e);
+
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         match *get_available_hypervisor() {
             #[cfg(mshv)]
             Some(HypervisorType::Mshv) => {
@@ -901,6 +947,8 @@ fn set_up_hypervisor_partition(
                     pml4_ptr.absolute()?,
                     entrypoint_ptr.absolute()?,
                     rsp_ptr.absolute()?,
+                    #[cfg(gdb)]
+                    gdb_conn,
                 )?;
                 Ok(Box::new(hv))
             }
