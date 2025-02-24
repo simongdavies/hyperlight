@@ -134,6 +134,7 @@ fn sandbox_benchmark(c: &mut Criterion) {
 
     // Benchmarks the time to create a new sandbox, create a new call context, and drop the call context.
     group.bench_function("create_sandbox_and_call_context_and_drop", |b| {
+        let _ = env_logger::builder().parse_filters("debug").try_init();
         b.iter(|| create_multiuse_sandbox().new_call_context());
     });
 
