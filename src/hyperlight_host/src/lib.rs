@@ -86,6 +86,7 @@ pub(crate) mod signal_handlers;
 #[cfg(test)]
 pub(crate) mod testing;
 
+#[cfg(feature = "mesh")]
 #[deny(missing_docs, unused_mut)]
 /// Module to handle the hosting of Sandboxes in a mesh
 pub(crate) mod mesh;

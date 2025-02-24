@@ -102,7 +102,7 @@ macro_rules! host_function {
                     Ok(result.get_hyperlight_value())
                 });
 
-                if let Some(extra_allowed_syscalls) = extra_allowed_syscalls {
+                if let Some(_extra_allowed_syscalls) = extra_allowed_syscalls {
                     if cfg!(all(feature = "seccomp", target_os = "linux")) {
                         // Register with extra allowed syscalls
                         #[cfg(all(feature = "seccomp", target_os = "linux"))]
@@ -110,7 +110,7 @@ macro_rules! host_function {
                             host_function_registry.register_host_function_with_syscalls(
                                     HostFunctionDefinition::new(name.to_string(), None, R::get_hyperlight_type()),
                                     HyperlightFunction::new(func),
-                                    extra_allowed_syscalls,
+                                    _extra_allowed_syscalls,
                             )?;
                         }
                     } else {
@@ -222,7 +222,7 @@ macro_rules! host_function {
 
                 let parameter_types = Some(vec![$($P::get_hyperlight_type()),*]);
 
-                if let Some(extra_allowed_syscalls) = extra_allowed_syscalls {
+                if let Some(_extra_allowed_syscalls) = extra_allowed_syscalls {
                     if cfg!(all(feature = "seccomp", target_os = "linux")) {
                         // Register with extra allowed syscalls
                         #[cfg(all(feature = "seccomp", target_os = "linux"))]
@@ -230,7 +230,7 @@ macro_rules! host_function {
                             host_function_registry.register_host_function_with_syscalls(
                                 HostFunctionDefinition::new(name.to_string(), parameter_types, R::get_hyperlight_type()),
                                 HyperlightFunction::new(func),
-                                extra_allowed_syscalls,
+                                _extra_allowed_syscalls,
                             )?;
                         }
                     } else {

@@ -19,6 +19,7 @@ use alloc::vec::Vec;
 
 use anyhow::{anyhow, bail, Error, Result};
 use flatbuffers::size_prefixed_root;
+#[cfg(feature = "mesh")]
 use mesh::MeshPayload;
 #[cfg(feature = "tracing")]
 use tracing::{instrument, Span};
@@ -33,7 +34,9 @@ use crate::flatbuffers::hyperlight::generated::{
 };
 
 /// Supported parameter types with values for function calling.
-#[derive(Debug, Clone, PartialEq, MeshPayload)]
+#[cfg_attr(feature = "mesh", derive(Debug, Clone, PartialEq, MeshPayload))]
+#[cfg_attr(not(feature = "mesh"), derive(Debug, Clone, PartialEq))]
+#[repr(C)]
 pub enum ParameterValue {
     /// i32
     Int(i32),
@@ -56,7 +59,8 @@ pub enum ParameterValue {
 }
 
 /// Supported parameter types for function calling.
-#[derive(Debug, Clone, PartialEq, Eq, MeshPayload)]
+#[cfg_attr(feature = "mesh", derive(Debug, Clone, PartialEq, Eq, MeshPayload))]
+#[cfg_attr(not(feature = "mesh"), derive(Debug, Clone, PartialEq, Eq))]
 #[repr(C)]
 pub enum ParameterType {
     /// i32
@@ -80,7 +84,8 @@ pub enum ParameterType {
 }
 
 /// Supported return types with values from function calling.
-#[derive(Debug, Clone, PartialEq, MeshPayload)]
+#[cfg_attr(feature = "mesh", derive(Debug, Clone, PartialEq, MeshPayload))]
+#[cfg_attr(not(feature = "mesh"), derive(Debug, Clone, PartialEq))]
 pub enum ReturnValue {
     /// i32
     Int(i32),
@@ -105,7 +110,14 @@ pub enum ReturnValue {
 }
 
 /// Supported return types from function calling.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Default, MeshPayload)]
+#[cfg_attr(
+    feature = "mesh",
+    derive(Debug, Default, Copy, Clone, PartialEq, Eq, MeshPayload)
+)]
+#[cfg_attr(
+    not(feature = "mesh"),
+    derive(Debug, Default, Copy, Clone, PartialEq, Eq)
+)]
 #[repr(C)]
 pub enum ReturnType {
     /// i32

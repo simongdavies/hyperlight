@@ -1,10 +1,18 @@
-use futures::executor::block_on;
+use std::sync::Arc;
+
 use mesh::MeshPayload;
 use mesh_process::{try_run_mesh_host, Mesh, ProcessConfig};
 use mesh_worker::{RegisteredWorkers, WorkerHost, WorkerHostRunner};
-use tokio::task::JoinHandle;
+use once_cell::sync::Lazy;
+use tokio::runtime::Runtime;
 
 use crate::Result;
+
+static RUNTIME: Lazy<Arc<Runtime>> = Lazy::new(|| Arc::new(Runtime::new().unwrap()));
+
+pub(crate) fn get_runtime() -> Arc<Runtime> {
+    RUNTIME.clone()
+}
 
 /// The initial message to send when launching a mesh child process.
 #[derive(MeshPayload)]
@@ -22,8 +30,6 @@ pub(crate) fn run_mesh_host(name: &str) -> Result<()> {
 pub(crate) struct SandboxMesh {
     mesh: Option<Mesh>,
     local_host: WorkerHost,
-    rt: Option<tokio::runtime::Runtime>,
-    _task: JoinHandle<()>,
 }
 
 impl SandboxMesh {
@@ -33,21 +39,16 @@ impl SandboxMesh {
         } else {
             Some(Mesh::new(mesh_name.into())?)
         };
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .build()?;
+
         let (local_host, runner) = mesh_worker::worker_host();
-        let task = rt.spawn(runner.run(RegisteredWorkers));
-        Ok(Self {
-            mesh,
-            local_host,
-            _task: task,
-            rt: Some(rt),
-        })
+        let _task = get_runtime().spawn(runner.run(RegisteredWorkers));
+        Ok(Self { mesh, local_host })
     }
 
-    pub async fn create_worker_host(&self, name: impl Into<String>) -> anyhow::Result<WorkerHost> {
+    pub async fn create_sandbox_worker_host(
+        &self,
+        name: impl Into<String>,
+    ) -> anyhow::Result<WorkerHost> {
         let host = if let Some(mesh) = &self.mesh {
             //TODO: Work out how to constrain the process that is crate
             let (host, runner) = mesh_worker::worker_host();
@@ -65,10 +66,7 @@ impl SandboxMesh {
 
     pub fn shutdown(&mut self) {
         if let Some(mesh) = self.mesh.take() {
-            block_on(mesh.shutdown());
-        }
-        if let Some(runtime) = self.rt.take() {
-            runtime.shutdown_background();
+            get_runtime().block_on(mesh.shutdown());
         }
     }
 }

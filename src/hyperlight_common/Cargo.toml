@@ -20,11 +20,11 @@ anyhow = { version = "1.0.95", default-features = false }
 log = "0.4.25"
 tracing = { version = "0.1.41", optional = true }
 strum = {version = "0.27",  default-features = false, features = ["derive"]}
-mesh = { git = "https://github.com/simongdavies/openvmm", branch = "fix-mesh-segv" }
-
+mesh = { git = "https://github.com/simongdavies/openvmm", branch = "fix-mesh-segv", optional = true}
 
 [features]
 default = ["tracing"]
+mesh = ["dep:mesh"]
 
 [dev-dependencies]
 hyperlight-testing = { workspace = true }

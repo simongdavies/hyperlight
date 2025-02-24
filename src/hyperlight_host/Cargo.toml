@@ -38,7 +38,7 @@ once_cell = { version = "1.20.3" }
 tracing = { version = "0.1.41", features = ["log"] }
 tracing-log = "0.2.0"
 tracing-core = "0.1.33"
-hyperlight-common = { workspace = true, default-features = true }
+hyperlight-common = { workspace = true, default-features = false, optional = true, features = ["tracing"] }
 vmm-sys-util = "0.12.1"
 crossbeam = "0.8.0"
 crossbeam-channel = "0.5.14"
@@ -48,15 +48,16 @@ strum = { version = "0.27", features = ["derive"] }
 tempfile = { version = "3.16", optional = true }
 serde_yaml = "0.9"
 anyhow = "1.0"
-mesh ={ git = "https://github.com/simongdavies/openvmm", branch = "fix-mesh-segv" }
-mesh_process ={ git = "https://github.com/simongdavies/openvmm", branch = "fix-mesh-segv" }
-mesh_worker = { git = "https://github.com/simongdavies/openvmm", branch = "fix-mesh-segv" }
-mesh_channel = { git = "https://github.com/simongdavies/openvmm", branch = "fix-mesh-segv" }
-futures = "0.3"
-pal_async= { git = "https://github.com/simongdavies/openvmm", branch = "fix-mesh-segv" }
-futures-concurrency = "7.2.1"
-uuid = { version = "1.13.1", features = ["v4"] }
-tokio = { version = "1.0", features = ["full"] }
+mesh ={ git = "https://github.com/simongdavies/openvmm", branch = "fix-mesh-segv", optional = true }
+mesh_process ={ git = "https://github.com/simongdavies/openvmm", branch = "fix-mesh-segv", optional = true }
+mesh_worker = { git = "https://github.com/simongdavies/openvmm", branch = "fix-mesh-segv", optional = true }
+mesh_channel = { git = "https://github.com/simongdavies/openvmm", branch = "fix-mesh-segv", optional = true }
+mesh_protobuf =  { git = "https://github.com/simongdavies/openvmm", branch = "fix-mesh-segv", optional = true }
+futures = { version = "0.3", optional = true }
+pal_async= { git = "https://github.com/simongdavies/openvmm", branch = "fix-mesh-segv", optional = true }
+futures-concurrency = { version = "7.2", optional = true }
+uuid = { version = "1.13", features = ["v4"], optional = true }
+tokio = { version = "1.43", features = ["full"], optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.59", features = [
@@ -127,7 +128,7 @@ cfg_aliases = "0.2.1"
 built = { version = "0.7.6", features = ["chrono", "git2"] }
 
 [features]
-default = ["kvm", "mshv2", "seccomp"]
+default = ["kvm", "mshv2", "seccomp", "dep:hyperlight-common"]
 seccomp = ["dep:seccompiler"]
 function_call_metrics = []
 executable_heap = []
@@ -138,7 +139,13 @@ kvm = ["dep:kvm-bindings", "dep:kvm-ioctls"]
 mshv2 = ["dep:mshv-bindings2", "dep:mshv-ioctls2"]
 mshv3 = ["dep:mshv-bindings3", "dep:mshv-ioctls3"]
 inprocess = []
+mesh = ["dep:mesh", "dep:mesh_process", "dep:mesh_worker", "dep:mesh_channel", "dep:mesh_protobuf", "dep:futures", "dep:pal_async", "dep:futures-concurrency", "dep:uuid", "dep:tokio", "dep:hyperlight-common", "hyperlight-common/mesh"]
 
 [[bench]]
 name = "benchmarks"
 harness = false
+
+[[example]]
+name = "mesh"
+path = "examples/mesh/main.rs"
+required-features = ["mesh"]

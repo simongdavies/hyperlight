@@ -5,10 +5,11 @@ use hyperlight_common::flatbuffer_wrappers::function_types::{
 };
 use mesh::rpc::RpcSend;
 use mesh_worker::WorkerHandle;
-use uuid::Uuid;
 
-use crate::mesh::sandbox_mesh::{run_mesh_host, SandboxMesh};
-use crate::mesh::sandbox_worker::{self, GuestFunctionCall, SandboxWorkerRpc, SANDBOX_WORKER_ID};
+use super::mesh_sandbox_builder::HostFunction;
+use crate::mesh::host_functions::{HostFunctionCall, HostFunctionWorkerRpc};
+use crate::mesh::sandbox_mesh::{get_runtime, SandboxMesh};
+use crate::mesh::sandbox_worker::{GuestFunctionCall, SandboxWorkerRpc};
 use crate::Result;
 
 /// A sandbox that is created and managed in a mesh
@@ -21,25 +22,21 @@ pub struct MeshSandbox {
 
 impl MeshSandbox {
     /// Create a new MeshSandbox
-    pub fn new(guest_binary: String, single_process: bool) -> Result<MeshSandbox> {
-        let mesh_name = format!("sandbox_{}", Uuid::new_v4());
-        run_mesh_host(mesh_name.as_str())?;
-        let sandbox_mesh = SandboxMesh::new(single_process, &mesh_name)?;
-        let (sandbox_rpc_tx, sandbox_worker) =
-            futures::executor::block_on(async { Self::run_sandbox_worker(&sandbox_mesh).await })?;
-
-        // Send the create sandbox rpc
-
-        futures::executor::block_on(
-            sandbox_rpc_tx.call_failable(SandboxWorkerRpc::CreateSandbox, guest_binary),
-        )?;
-
-        Ok(MeshSandbox {
+    pub(super) fn new(
+        mesh_name: String,
+        sandbox_worker: WorkerHandle,
+        sandbox_rpc_tx: Arc<mesh::Sender<SandboxWorkerRpc>>,
+        sandbox_mesh: SandboxMesh,
+        host_funcs: Option<Vec<HostFunction>>,
+        host_function_rpc_rx: mesh::Receiver<HostFunctionWorkerRpc>,
+    ) -> MeshSandbox {
+        Self::process_host_function_calls(host_function_rpc_rx, host_funcs);
+        MeshSandbox {
             mesh_name,
             sandbox_worker,
             sandbox_rpc_tx,
             sandbox_mesh,
-        })
+        }
     }
 
     /// Call a function in the sandbox
@@ -50,33 +47,62 @@ impl MeshSandbox {
         function_args: Option<Vec<ParameterValue>>,
     ) -> Result<ReturnValue> {
         let call = GuestFunctionCall::new(function_name, function_return_type, function_args);
-        let result = futures::executor::block_on(
+        let result = get_runtime().block_on(
             self.sandbox_rpc_tx
                 .call_failable(SandboxWorkerRpc::CallGuestFunction, call),
         )?;
         Ok(result)
     }
 
+    fn process_host_function_calls(
+        mut host_function_rpc_rx: mesh::Receiver<HostFunctionWorkerRpc>,
+        host_funcs: Option<Vec<HostFunction>>,
+    ) {
+        if let Some(host_funcs) = host_funcs {
+            get_runtime().spawn(async move {
+                loop {
+                    match host_function_rpc_rx.recv().await {
+                        Ok(HostFunctionWorkerRpc::CallHostFunction(failable_rpc)) => {
+                            failable_rpc.handle_failable_sync(|input| -> Result<ReturnValue> {
+                                let HostFunctionCall {
+                                    function_name,
+                                    function_return_type: _,
+                                    function_args,
+                                } = input;
+                                let host_function = host_funcs
+                                    .iter()
+                                    .find(|host_function| {
+                                        host_function.definition().function_name == function_name
+                                    })
+                                    .ok_or_else(|| anyhow::anyhow!("Host function not found"))?;
+                                let args = function_args.unwrap_or_default();
+                                let function = host_function.function();
+                                function.call(args)
+                            });
+                        }
+                        Err(e) => {
+                            match e {
+                                mesh::RecvError::Closed => {
+                                    break;
+                                }
+                                mesh::RecvError::Error(e) => {
+                                    //TODO: Handle error
+                                    eprintln!(
+                                        "Error Receiving Host Function Call Message: {:?}",
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    }
+
     /// Get the name of the mesh for this sandbox
     pub fn mesh_name(&self) -> &str {
         self.mesh_name.as_str()
-    }
-
-    async fn run_sandbox_worker(
-        sandbox_mesh: &SandboxMesh,
-    ) -> anyhow::Result<(Arc<mesh::Sender<SandboxWorkerRpc>>, WorkerHandle)> {
-        let (sandbox_rpc_tx, sandbox_rpc_rx) = mesh::channel();
-        let sandbox_rpc_tx = Arc::new(sandbox_rpc_tx);
-        let sandbox_worker = {
-            let sandbox_host = sandbox_mesh.create_worker_host("sandboxworkerhost").await?;
-            let sandbox_worker_parameters = sandbox_worker::SandboxWorkerParameters {
-                rpc: sandbox_rpc_rx,
-            };
-            sandbox_host
-                .launch_worker(SANDBOX_WORKER_ID, sandbox_worker_parameters)
-                .await?
-        };
-        Ok((sandbox_rpc_tx, sandbox_worker))
     }
 }
 
@@ -87,32 +113,31 @@ impl Drop for MeshSandbox {
     }
 }
 
-// impl UninitializedSandbox for MeshSandbox {
-
-// }
-
 #[cfg(test)]
 mod test {
+    use std::sync::{Arc, Mutex};
+
     use hyperlight_common::flatbuffer_wrappers::function_types::{
         ParameterValue, ReturnType, ReturnValue,
     };
-    use hyperlight_testing::simple_guest_as_string;
+    use hyperlight_testing::{callback_guest_as_string, simple_guest_as_string};
 
-    use super::*;
+    use crate::func::HostFunction2;
+    use crate::sandbox::MeshSandboxBuilder;
 
     #[test]
     fn test_mesh_sandbox_creation() {
         let guest_binary = simple_guest_as_string().unwrap();
-        let single_process = true;
-        let result = MeshSandbox::new(guest_binary, single_process);
+        let builder = MeshSandboxBuilder::new(guest_binary).set_single_process(true);
+        let result = builder.build();
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_call_function_with_args() {
         let guest_binary = simple_guest_as_string().unwrap();
-        let single_process = true;
-        let sandbox = MeshSandbox::new(guest_binary, single_process).unwrap();
+        let builder = MeshSandboxBuilder::new(guest_binary).set_single_process(true);
+        let sandbox = builder.build().unwrap();
         let function_name = "Echo".to_string();
         let function_return_type = ReturnType::String;
         let function_args = Some(vec![ParameterValue::String("Hello, World!".to_string())]);
@@ -128,8 +153,48 @@ mod test {
     #[test]
     fn test_mesh_name() {
         let guest_binary = simple_guest_as_string().unwrap();
-        let single_process = true;
-        let sandbox = MeshSandbox::new(guest_binary, single_process).unwrap();
+        let builder = MeshSandboxBuilder::new(guest_binary).set_single_process(true);
+        let sandbox = builder.build().unwrap();
         assert!(sandbox.mesh_name().starts_with("sandbox_"));
+    }
+
+    #[test]
+    fn test_with_heap_size() {
+        let guest_binary = simple_guest_as_string().unwrap();
+        let builder = MeshSandboxBuilder::new(guest_binary)
+            .set_single_process(true)
+            .set_heap_size(1024 * 1024);
+        let result = builder.build();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_with_stack_size() {
+        let guest_binary = simple_guest_as_string().unwrap();
+        let builder = MeshSandboxBuilder::new(guest_binary)
+            .set_single_process(true)
+            .set_stack_size(128 * 1024);
+        let result = builder.build();
+        assert!(result.is_ok());
+    }
+    #[test]
+    fn test_calling_host_function() {
+        let guest_binary = callback_guest_as_string().unwrap();
+        let mut builder = MeshSandboxBuilder::new(guest_binary).set_single_process(true);
+        // Create a host function
+        let host_function = Arc::new(Mutex::new(|a: i32, b: i32| Ok(a + b)));
+        host_function.register(&mut builder, "Add").unwrap();
+        let sandbox = builder.build().unwrap();
+        let function_name = "AddUsingHost".to_string();
+        let function_return_type = ReturnType::Int;
+        let function_args = Some(vec![ParameterValue::Int(5), ParameterValue::Int(10)]);
+        let result = sandbox.call_function(function_name, function_return_type, function_args);
+        print!("Result: {:?}", result);
+        assert!(result.is_ok());
+        if let ReturnValue::Int(value) = result.unwrap() {
+            assert_eq!(value, 15);
+        } else {
+            panic!("Unexpected return value type");
+        }
     }
 }

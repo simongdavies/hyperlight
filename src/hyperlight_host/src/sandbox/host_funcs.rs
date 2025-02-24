@@ -169,7 +169,10 @@ fn call_host_func_impl(
             .get(name)
             .ok_or_else(|| HostFunctionNotFound(name.to_string()))?;
 
-        let func = func_with_syscalls.0.clone();
+        let call = || {
+            let func: HyperlightFunction = func_with_syscalls.0.clone();
+            func.call(args)
+        };
 
         #[cfg(all(feature = "seccomp", target_os = "linux"))]
         {
@@ -184,7 +187,7 @@ fn call_host_func_impl(
         #[cfg(feature = "function_call_metrics")]
         {
             let start = std::time::Instant::now();
-            let result = func.call(args.clone());
+            let result = call();
             crate::histogram_vec_observe!(
                 &crate::sandbox::metrics::SandboxMetric::HostFunctionCallsDurationMicroseconds,
                 &[name],
@@ -194,7 +197,7 @@ fn call_host_func_impl(
         }
 
         #[cfg(not(feature = "function_call_metrics"))]
-        func.call(args)
+        call()
     }
 
     cfg_if::cfg_if! {

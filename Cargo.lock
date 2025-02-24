@@ -1305,6 +1305,7 @@ dependencies = [
  "mesh",
  "mesh_channel",
  "mesh_process",
+ "mesh_protobuf",
  "mesh_worker",
  "mshv-bindings 0.2.1",
  "mshv-bindings 0.3.2",

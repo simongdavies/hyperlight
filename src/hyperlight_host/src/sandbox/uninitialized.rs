@@ -66,41 +66,6 @@ impl crate::sandbox_state::sandbox::UninitializedSandbox for UninitializedSandbo
     fn get_uninitialized_sandbox_mut(&mut self) -> &mut crate::sandbox::UninitializedSandbox {
         self
     }
-
-    // fn register_host_function(&mut self,
-    //     host_function_definition: hyperlight_common::flatbuffer_wrappers::host_function_definition::HostFunctionDefinition,
-    //     host_function: crate::func::HyperlightFunction,
-    // )-> Result<()> {
-    //     let sb= self.get_uninitialized_sandbox_mut();
-    //     sb.host_funcs
-    //     .try_lock()
-    //     .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?
-    //     .register_host_function(
-    //         sb.mgr.as_mut(),
-    //         &host_function_definition,
-    //         host_function)
-    // }
-
-    // fn register_host_function_with_syscalls(
-    //     &mut self,
-    //     host_function_definition: hyperlight_common::flatbuffer_wrappers::host_function_definition::HostFunctionDefinition,
-    //     host_function: crate::func::HyperlightFunction,
-    //     syscalls: Vec<super::ExtraAllowedSyscall>,
-    // )-> Result<()> {
-    //     #[cfg(all(feature = "seccomp", target_os = "linux"))]
-    //     {
-    //     let sb= self.get_uninitialized_sandbox_mut();
-    //     sb.host_funcs
-    //     .try_lock()
-    //     .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?
-    //     .register_host_function_with_syscalls(
-    //         sb.mgr.as_mut(),
-    //         &host_function_definition,
-    //         host_function,
-    //         syscalls)?;
-    //     }
-    //     Ok(())
-    //}
 }
 
 impl crate::sandbox_state::sandbox::HostFunctionRegistry for UninitializedSandbox {

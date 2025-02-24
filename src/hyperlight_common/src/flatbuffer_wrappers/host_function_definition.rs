@@ -19,6 +19,8 @@ use alloc::vec::Vec;
 
 use anyhow::{anyhow, Error, Result};
 use flatbuffers::{FlatBufferBuilder, WIPOffset};
+#[cfg(feature = "mesh")]
+use mesh::MeshPayload;
 #[cfg(feature = "tracing")]
 use tracing::{instrument, Span};
 
@@ -29,7 +31,14 @@ use crate::flatbuffers::hyperlight::generated::{
 };
 
 /// The definition of a function exposed from the host to the guest
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "mesh",
+    derive(Debug, Default, Clone, PartialEq, Eq, MeshPayload)
+)]
+#[cfg_attr(
+    not(feature = "mesh"),
+    derive(Debug, Default, Clone, PartialEq, Eq)
+)]
 pub struct HostFunctionDefinition {
     /// The function name
     pub function_name: String,

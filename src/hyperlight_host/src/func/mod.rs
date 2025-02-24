@@ -53,10 +53,15 @@ pub use ret_type::SupportedReturnType;
 use tracing::{instrument, Span};
 
 type HLFunc = Arc<Mutex<Box<dyn FnMut(Vec<ParameterValue>) -> Result<ReturnValue> + Send>>>;
-
 /// Generic HyperlightFunction
 #[derive(Clone)]
 pub struct HyperlightFunction(HLFunc);
+
+impl Default for HyperlightFunction {
+    fn default() -> Self {
+        Self(Arc::new(Mutex::new(Box::new(|_| Ok(ReturnValue::Void)))))
+    }
+}
 
 impl HyperlightFunction {
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]

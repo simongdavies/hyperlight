@@ -1,8 +1,10 @@
+use std::sync::{Arc, Mutex};
+
 use clap::builder::ValueParser;
 use clap::{Arg, Command};
-use hyperlight_host::func::{ParameterValue, ReturnType, ReturnValue};
-use hyperlight_host::sandbox::MeshSandbox;
-use hyperlight_testing::simple_guest_as_string;
+use hyperlight_host::func::{HostFunction2, ParameterValue, ReturnType, ReturnValue};
+use hyperlight_host::sandbox::MeshSandboxBuilder;
+use hyperlight_testing::{callback_guest_as_string, simple_guest_as_string};
 
 fn main() {
     // Use clap to parse command line arguments
@@ -30,7 +32,13 @@ fn main() {
 
     // Create a new MeshSandbox
     let guest_binary = simple_guest_as_string().unwrap();
-    let sandbox = MeshSandbox::new(guest_binary, run_in_process).unwrap();
+    let builder = MeshSandboxBuilder::new(guest_binary).set_single_process(run_in_process);
+    let sandbox = builder.build().unwrap();
+
+    // Call a function in the guest
+
+    println!("Calling function in guest");
+
     let function_name = "Echo".to_string();
     let function_return_type = ReturnType::String;
     let function_args = Some(vec![ParameterValue::String("Hello, World!".to_string())]);
@@ -39,6 +47,29 @@ fn main() {
     if let ReturnValue::String(value) = result.unwrap() {
         assert_eq!(value, "Hello, World!");
         println!("{}", value);
+    } else {
+        panic!("Unexpected return value type");
+    }
+
+    // Call a function on the guest that calls a host function
+
+    let guest_binary = callback_guest_as_string().unwrap();
+    let mut builder = MeshSandboxBuilder::new(guest_binary).set_single_process(true);
+    // Create a host function
+    let host_function = Arc::new(Mutex::new(|a: i32, b: i32| Ok(a + b)));
+    host_function.register(&mut builder, "Add").unwrap();
+    let sandbox = builder.build().unwrap();
+    let function_name = "AddUsingHost".to_string();
+    let function_return_type = ReturnType::Int;
+    let function_args = Some(vec![ParameterValue::Int(5), ParameterValue::Int(10)]);
+
+    println!("Calling function in guest that calls host function");
+
+    let result = sandbox.call_function(function_name, function_return_type, function_args);
+    println!("Result: {:?}", result);
+    assert!(result.is_ok());
+    if let ReturnValue::Int(value) = result.unwrap() {
+        assert_eq!(value, 15);
     } else {
         panic!("Unexpected return value type");
     }

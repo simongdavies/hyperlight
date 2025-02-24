@@ -102,6 +102,26 @@ fn guest_function3(function_call: &FunctionCall) -> Result<Vec<u8>> {
     }
 }
 
+fn add_using_host(function_call: &FunctionCall) -> Result<Vec<u8>> {
+    let a = if let ParameterValue::Int(a) = &function_call.parameters.as_ref().unwrap()[0] {
+        *a
+    } else {
+        return Err(HyperlightGuestError::new(
+            ErrorCode::GuestFunctionParameterTypeMismatch,
+            "Invalid parameters 0 passed to add_using_host".to_string(),
+        ));
+    };
+    let b = if let ParameterValue::Int(b) = &function_call.parameters.as_ref().unwrap()[1] {
+        *b
+    } else {
+        return Err(HyperlightGuestError::new(
+            ErrorCode::GuestFunctionParameterTypeMismatch,
+            "Invalid parameter 1 passed to add_using_host".to_string(),
+        ));
+    };
+    call_host_add(a, b)
+}
+
 fn guest_function4() -> Result<Vec<u8>> {
     call_host_function(
         "HostMethod4",
@@ -156,6 +176,18 @@ fn call_error_method(function_call: &FunctionCall) -> Result<Vec<u8>> {
             "Invalid parameters passed to call_error_method".to_string(),
         ));
     }
+}
+
+fn call_host_add(a: i32, b: i32) -> Result<Vec<u8>> {
+    call_host_function(
+        "Add",
+        Some(Vec::from(&[ParameterValue::Int(a), ParameterValue::Int(b)])),
+        ReturnType::Int,
+    )?;
+
+    let result = get_host_value_return_as_int()?;
+
+    Ok(get_flatbuffer_result_from_int(result))
 }
 
 fn call_host_spin() -> Result<Vec<u8>> {
@@ -240,6 +272,14 @@ pub extern "C" fn hyperlight_main() {
         call_host_spin as i64,
     );
     register_function(call_host_spin_def);
+
+    let add_using_host_def = GuestFunctionDefinition::new(
+        "AddUsingHost".to_string(),
+        Vec::from(&[ParameterType::Int, ParameterType::Int]),
+        ReturnType::Int,
+        add_using_host as i64,
+    );
+    register_function(add_using_host_def);
 }
 
 #[no_mangle]
