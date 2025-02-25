@@ -112,7 +112,9 @@ impl HypervLinuxDriver {
             // create_vm_with_args() with an empty arguments structure
             // here, because otherwise the partition is set up with a SynIC.
 
+            log::debug!("Creating VM with args");
             let vm_fd = mshv.create_vm_with_args(&pr)?;
+            log::debug!("Setting partition property");
             let features: hv_partition_synthetic_processor_features = Default::default();
             vm_fd.hvcall_set_partition_property(
                 hv_partition_property_code_HV_PARTITION_PROPERTY_SYNTHETIC_PROC_FEATURES,
@@ -122,14 +124,19 @@ impl HypervLinuxDriver {
             vm_fd
         };
 
+        log::debug!("Creating VCPU");
         let mut vcpu_fd = vm_fd.create_vcpu(0)?;
 
         mem_regions.iter().try_for_each(|region| {
             let mshv_region = region.to_owned().into();
+            log::debug!("Mapping user memory for region: {:?}", mshv_region);
             vm_fd.map_user_memory(mshv_region)
         })?;
 
+        log::debug!("Setting up initial sregs");
         Self::setup_initial_sregs(&mut vcpu_fd, pml4_ptr.absolute()?)?;
+
+        log::debug!("Setting up initial registers");
 
         Ok(Self {
             _mshv: mshv,
@@ -163,7 +170,9 @@ impl HypervLinuxDriver {
             },
             ..Default::default()
         };
+        log::debug!("Setting up initial sregs: {:?}", sregs);
         vcpu.set_sregs(&sregs)?;
+        log::debug!("Setting up initial sregs complete");
         Ok(())
     }
 }
