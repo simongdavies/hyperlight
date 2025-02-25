@@ -120,6 +120,7 @@ impl HypervLinuxDriver {
                 hv_partition_property_code_HV_PARTITION_PROPERTY_SYNTHETIC_PROC_FEATURES,
                 unsafe { features.as_uint64[0] },
             )?;
+            log::debug!("Initializing VM");
             vm_fd.initialize()?;
             vm_fd
         };
