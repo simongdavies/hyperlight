@@ -87,6 +87,10 @@ impl HypervisorHandler {
     pub(crate) fn set_run_cancelled(&self, run_cancelled: bool) {
         self.execution_variables.run_cancelled.store(run_cancelled);
     }
+
+    pub(crate) fn get_id(&self) -> String {
+        self.id.clone()
+    }
 }
 
 // Note: `join_handle` and `running` have to be `Arc` because we need
@@ -948,12 +952,16 @@ fn set_up_hypervisor_partition(
         match *get_available_hypervisor() {
             #[cfg(mshv)]
             Some(HypervisorType::Mshv) => {
+                log::debug!("Creating mshv hypervisor driver");
                 let hv = crate::hypervisor::hyperv_linux::HypervLinuxDriver::new(
                     regions,
                     entrypoint_ptr,
                     rsp_ptr,
                     pml4_ptr,
-                )?;
+                )
+                .inspect_err(|e| {
+                    log::debug!("Failed to create mshv hypervisor driver: {:#}", e);
+                })?;
                 Ok(Box::new(hv))
             }
 

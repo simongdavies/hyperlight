@@ -146,9 +146,15 @@ fn hv_init(
 
     hv_handler
         .execute_hypervisor_handler_action(HypervisorHandlerAction::Initialise)
-        .map_err(|exec_e| match hv_handler.kill_hypervisor_handler_thread() {
-            Ok(_) => exec_e,
-            Err(kill_e) => new_error!("{}", format!("{}, {}", exec_e, kill_e)),
+        .map_err(|exec_e| {
+            log::debug!(
+                "error executing hypervisor handler action: {exec_e} id: {}",
+                hv_handler.get_id()
+            );
+            match hv_handler.kill_hypervisor_handler_thread() {
+                Ok(_) => exec_e,
+                Err(kill_e) => new_error!("{}", format!("{}, {}", exec_e, kill_e)),
+            }
         })?;
 
     Ok(hv_handler)
