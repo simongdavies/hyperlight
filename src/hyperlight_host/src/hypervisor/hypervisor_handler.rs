@@ -647,7 +647,9 @@ impl HypervisorHandler {
                         // If the thread has finished, we try to join it and return the error if it has one
                         let res = handle.join();
                         if res.as_ref().is_ok_and(|inner_res| inner_res.is_err()) {
-                            return Err(res.unwrap().unwrap_err());
+                            let err = res.unwrap().unwrap_err();
+                            log::debug!("Handler thread finished with error: {:?} before sending message", err);
+                            return Err(err);
                         }
                         Err(HyperlightError::HypervisorHandlerMessageReceiveTimedout())
                     }
