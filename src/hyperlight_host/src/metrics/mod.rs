@@ -17,13 +17,14 @@ limitations under the License.
 use std::collections::HashMap;
 use std::sync::Once;
 
+use hyperlight_error::error::HyperlightError::{Error, MetricNotFound};
+use hyperlight_error::{log_then_return, new_error};
 use log::error;
 use once_cell::sync::OnceCell;
 use prometheus::{default_registry, histogram_opts, opts, HistogramOpts, Opts, Registry};
 use strum::{IntoEnumIterator, VariantNames};
 
-use crate::error::HyperlightError::{Error, MetricNotFound};
-use crate::{log_then_return, new_error, Result};
+use crate::Result;
 mod int_gauge_vec;
 /// An Integer Gauge Metric for Hyperlight
 ///

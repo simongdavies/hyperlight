@@ -1261,6 +1261,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyperlight-error"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cfg_aliases",
+ "flatbuffers",
+ "goblin",
+ "hyperlight-common",
+ "kvm-bindings",
+ "kvm-ioctls",
+ "mesh",
+ "mshv-bindings 0.2.1",
+ "mshv-bindings 0.3.2",
+ "mshv-ioctls 0.2.1",
+ "mshv-ioctls 0.3.2",
+ "prometheus",
+ "seccompiler",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror 2.0.11",
+ "vmm-sys-util",
+]
+
+[[package]]
 name = "hyperlight-guest"
 version = "0.1.0"
 dependencies = [
@@ -1296,6 +1321,7 @@ dependencies = [
  "futures-concurrency",
  "goblin",
  "hyperlight-common",
+ "hyperlight-error",
  "hyperlight-testing",
  "kvm-bindings",
  "kvm-ioctls",

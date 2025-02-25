@@ -17,10 +17,11 @@ limitations under the License.
 use std::fs;
 use std::path::PathBuf;
 
+use hyperlight_error::new_error;
 use hyperlight_testing::rust_guest_as_pathbuf;
 
 use crate::mem::exe::ExeInfo;
-use crate::{new_error, Result};
+use crate::Result;
 pub(crate) mod log_values;
 
 /// Get an `ExeInfo` representing `simpleguest.exe`

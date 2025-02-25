@@ -35,21 +35,20 @@ use crossbeam_channel::{RecvError, SendError};
 use flatbuffers::InvalidFlatbuffer;
 use hyperlight_common::flatbuffer_wrappers::function_types::{ParameterValue, ReturnValue};
 use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
-#[cfg(feature = "mesh")]
+#[cfg(target_os = "windows")]
+use hyperlight_common::wrappers::HandleWrapper;
 use mesh::error::RemoteError;
 use serde::{Deserialize, Serialize};
 use serde_yaml;
 use thiserror::Error;
 
-#[cfg(target_os = "windows")]
-use crate::hypervisor::wrappers::HandleWrapper;
-use crate::mem::memory_region::MemoryRegionFlags;
-use crate::mem::ptr::RawPtr;
-
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
-pub(crate) struct HyperlightHostError {
-    pub(crate) message: String,
-    pub(crate) source: String,
+/// An error returned by the host
+pub struct HyperlightHostError {
+    /// The error message
+    pub message: String,
+    /// The source of the error
+    pub source: String,
 }
 
 /// The error type for Hyperlight operations
@@ -82,7 +81,7 @@ pub enum HyperlightError {
 
     /// A disallowed syscall was caught
     #[error("Seccomp filter trapped on disallowed syscall (check STDERR for offending syscall)")]
-    #[cfg(all(feature = "seccomp", target_os = "linux"))]
+    //#[cfg(all(feature = "seccomp", target_os = "linux"))]
     DisallowedSyscall,
 
     /// A generic error with a message
@@ -188,7 +187,7 @@ pub enum HyperlightError {
 
     /// Memory Access Violation at the given address. The access type and memory region flags are provided.
     #[error("Memory Access Violation at address {0:#x} of type {1}, but memory is marked as {2}")]
-    MemoryAccessViolation(u64, MemoryRegionFlags, MemoryRegionFlags),
+    MemoryAccessViolation(u64, String, String),
 
     /// Memory Allocation Failed.
     #[error("Memory Allocation Failed with OS Error {0:?}.")]
@@ -245,7 +244,7 @@ pub enum HyperlightError {
 
     /// Raw pointer is less than base address
     #[error("Raw pointer ({0:?}) was less than the base address ({1})")]
-    RawPointerLessThanBaseAddress(RawPtr, u64),
+    RawPointerLessThanBaseAddress(u64, u64),
 
     /// RefCell borrow failed
     #[error("RefCell borrow failed")]
@@ -255,7 +254,6 @@ pub enum HyperlightError {
     #[error("RefCell mut borrow failed")]
     RefCellMutBorrowFailed(#[from] BorrowMutError),
 
-    #[cfg(feature = "mesh")]
     /// Error from a mesh RPC call
     #[error("RPC Error {0:?}")]
     RpcCallError(#[from] mesh::rpc::RpcError<RemoteError>),
@@ -270,12 +268,12 @@ pub enum HyperlightError {
 
     /// a backend error occurred with seccomp filters
     #[error("Backend Error with Seccomp Filter {0:?}")]
-    #[cfg(all(feature = "seccomp", target_os = "linux"))]
+    #[cfg(target_os = "linux")]
     SeccompFilterBackendError(#[from] seccompiler::BackendError),
 
     /// an error occurred with seccomp filters
     #[error("Error with Seccomp Filter {0:?}")]
-    #[cfg(all(feature = "seccomp", target_os = "linux"))]
+    #[cfg(target_os = "linux")]
     SeccompFilterError(#[from] seccompiler::Error),
 
     /// SystemTimeError

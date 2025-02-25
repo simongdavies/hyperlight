@@ -18,7 +18,6 @@ limitations under the License.
 
 extern crate alloc;
 
-pub mod flatbuffer_wrappers;
 /// cbindgen:ignore
 /// FlatBuffers-related utilities and (mostly) generated code
 #[allow(
@@ -31,3 +30,12 @@ pub mod flatbuffer_wrappers;
 mod flatbuffers;
 /// cbindgen:ignore
 pub mod mem;
+
+#[deny(dead_code, missing_docs, unused_mut)]
+/// wrappers
+pub mod wrappers;
+
+pub use wrappers::flatbuffer_wrappers;
+#[cfg(all(target_os = "windows", feature = "std"))]
+/// Re-export the `windows_wrappers` module
+pub use wrappers::windows_wrappers;

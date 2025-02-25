@@ -18,13 +18,12 @@ use core::f64;
 use std::sync::{Arc, Mutex};
 
 use common::new_uninit;
+use hyperlight_error::{new_error, HyperlightError};
 use hyperlight_host::func::{HostFunction1, ParameterValue, ReturnType, ReturnValue};
 use hyperlight_host::sandbox::SandboxConfiguration;
 use hyperlight_host::sandbox_state::sandbox::EvolvableSandbox;
 use hyperlight_host::sandbox_state::transition::Noop;
-use hyperlight_host::{
-    new_error, GuestBinary, HyperlightError, MultiUseSandbox, Result, UninitializedSandbox,
-};
+use hyperlight_host::{GuestBinary, MultiUseSandbox, Result, UninitializedSandbox};
 use hyperlight_testing::simple_guest_as_string;
 #[cfg(target_os = "windows")]
 use serial_test::serial; // using LoadLibrary requires serial tests

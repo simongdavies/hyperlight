@@ -14,15 +14,23 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+/// Function call wrappers
 pub mod function_call;
+/// Function type wrappers
 pub mod function_types;
+/// Guest error wrappers
 pub mod guest_error;
 /// cbindgen:ignore
+/// Guest log data wrappers
 pub mod guest_log_data;
 /// cbindgen:ignore
+/// Guest log level wrappers
 pub mod guest_log_level;
 /// cbindgen:ignore
+/// Host function definition wrappers
 pub mod host_function_definition;
 /// cbindgen:ignore
+/// Host function details wrappers
 pub mod host_function_details;
+/// utility wrappers
 pub mod util;

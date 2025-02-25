@@ -1,0 +1,48 @@
+[package]
+name = "hyperlight-error"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = """
+Hyperlight's components common to host and guest.
+"""
+
+[lints]
+workspace = true
+
+[dependencies]
+vmm-sys-util = "0.12.1"
+thiserror = "2.0.11"
+prometheus = "0.13.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+flatbuffers = "25.2.10"
+serde_yaml = "0.9"
+anyhow = "1.0"
+mesh = { git = "https://github.com/simongdavies/openvmm", branch = "fix-mesh-segv"}
+goblin = { version = "0.9" }
+hyperlight-common = { path = "../hyperlight_common" }
+
+
+[target.'cfg(unix)'.dependencies]
+seccompiler = { version = "0.4.0" }
+kvm-bindings = { version = "0.11", features = ["fam-wrappers"], optional = true }
+kvm-ioctls = { version = "0.20", optional = true }
+mshv-bindings2 = { package="mshv-bindings", version = "=0.2.1", optional = true }
+mshv-ioctls2 = { package="mshv-ioctls",  version = "=0.2.1", optional = true}
+mshv-bindings3 = { package="mshv-bindings", version = "0.3.2", optional = true }
+mshv-ioctls3 = { package="mshv-ioctls",  version = "0.3.2", optional = true}
+
+[build-dependencies]
+anyhow = "1.0"
+cfg_aliases = "0.2"
+
+[features]
+default = ["kvm", "mshv2"]
+kvm = ["dep:kvm-bindings", "dep:kvm-ioctls"]
+mshv2 = ["dep:mshv-bindings2", "dep:mshv-ioctls2"]
+mshv3 = ["dep:mshv-bindings3", "dep:mshv-ioctls3"]

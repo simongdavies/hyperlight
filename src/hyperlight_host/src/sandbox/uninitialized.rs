@@ -20,13 +20,14 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use hyperlight_error::error::HyperlightError::GuestBinaryShouldBeAFile;
+use hyperlight_error::{log_then_return, new_error};
 use tracing::{instrument, Span};
 
 use super::host_funcs::{default_writer_func, HostFuncsWrapper};
 use super::mem_mgr::MemMgrWrapper;
 use super::run_options::SandboxRunOptions;
 use super::uninitialized_evolve::evolve_impl_multi_use;
-use crate::error::HyperlightError::GuestBinaryShouldBeAFile;
 use crate::func::host_functions::HostFunction1;
 use crate::mem::exe::ExeInfo;
 use crate::mem::mgr::{SandboxMemoryManager, STACK_COOKIE_LEN};
@@ -36,7 +37,7 @@ use crate::sandbox_state::sandbox::{
     EvolvableSandbox, UninitializedSandbox as UninitializedSandboxTrait,
 };
 use crate::sandbox_state::transition::Noop;
-use crate::{log_build_details, log_then_return, new_error, MultiUseSandbox, Result};
+use crate::{log_build_details, MultiUseSandbox, Result};
 
 /// A preliminary `Sandbox`, not yet ready to execute guest code.
 ///
@@ -369,6 +370,7 @@ mod tests {
 
     use crossbeam_queue::ArrayQueue;
     use hyperlight_common::flatbuffer_wrappers::function_types::{ParameterValue, ReturnValue};
+    use hyperlight_error::new_error;
     use hyperlight_testing::logger::{Logger as TestLogger, LOGGER as TEST_LOGGER};
     use hyperlight_testing::tracing_subscriber::TracingSubscriber as TestSubcriber;
     use hyperlight_testing::{simple_guest_as_string, simple_guest_exe_as_string};
@@ -386,7 +388,7 @@ mod tests {
     use crate::sandbox_state::sandbox::EvolvableSandbox;
     use crate::sandbox_state::transition::Noop;
     use crate::testing::log_values::{test_value_as_str, try_to_strings};
-    use crate::{new_error, MultiUseSandbox, Result, SandboxRunOptions, UninitializedSandbox};
+    use crate::{MultiUseSandbox, Result, SandboxRunOptions, UninitializedSandbox};
 
     #[test]
     fn test_in_process() {

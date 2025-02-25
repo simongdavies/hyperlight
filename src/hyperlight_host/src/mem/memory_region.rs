@@ -60,6 +60,29 @@ bitflags! {
     }
 }
 
+impl From<MemoryRegionFlags> for String {
+    fn from(flags: MemoryRegionFlags) -> Self {
+        let mut parts = Vec::new();
+        if flags.contains(MemoryRegionFlags::READ) {
+            parts.push("READ");
+        }
+        if flags.contains(MemoryRegionFlags::WRITE) {
+            parts.push("WRITE");
+        }
+        if flags.contains(MemoryRegionFlags::EXECUTE) {
+            parts.push("EXECUTE");
+        }
+        if flags.contains(MemoryRegionFlags::STACK_GUARD) {
+            parts.push("STACK_GUARD");
+        }
+        if parts.is_empty() {
+            "NONE".to_string()
+        } else {
+            parts.join(" | ")
+        }
+    }
+}
+
 impl std::fmt::Display for MemoryRegionFlags {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.is_empty() {
@@ -90,14 +113,14 @@ impl std::fmt::Display for MemoryRegionFlags {
 
 #[cfg(target_os = "windows")]
 impl TryFrom<WHV_MEMORY_ACCESS_TYPE> for MemoryRegionFlags {
-    type Error = crate::HyperlightError;
+    type Error = hyperlight_error::HyperlightError;
 
     fn try_from(flags: WHV_MEMORY_ACCESS_TYPE) -> crate::Result<Self> {
         match flags {
             Hypervisor::WHvMemoryAccessRead => Ok(MemoryRegionFlags::READ),
             Hypervisor::WHvMemoryAccessWrite => Ok(MemoryRegionFlags::WRITE),
             Hypervisor::WHvMemoryAccessExecute => Ok(MemoryRegionFlags::EXECUTE),
-            _ => Err(crate::HyperlightError::Error(
+            _ => Err(hyperlight_error::HyperlightError::Error(
                 "unknown memory access type".to_string(),
             )),
         }
@@ -106,7 +129,7 @@ impl TryFrom<WHV_MEMORY_ACCESS_TYPE> for MemoryRegionFlags {
 
 #[cfg(mshv)]
 impl TryFrom<hv_x64_memory_intercept_message> for MemoryRegionFlags {
-    type Error = crate::HyperlightError;
+    type Error = hyperlight_error::HyperlightError;
 
     fn try_from(msg: hv_x64_memory_intercept_message) -> crate::Result<Self> {
         let access_type = msg.header.intercept_access_type;
@@ -114,7 +137,7 @@ impl TryFrom<hv_x64_memory_intercept_message> for MemoryRegionFlags {
             0 => Ok(MemoryRegionFlags::READ),
             1 => Ok(MemoryRegionFlags::WRITE),
             2 => Ok(MemoryRegionFlags::EXECUTE),
-            _ => Err(crate::HyperlightError::Error(
+            _ => Err(hyperlight_error::HyperlightError::Error(
                 "unknown memory access type".to_string(),
             )),
         }

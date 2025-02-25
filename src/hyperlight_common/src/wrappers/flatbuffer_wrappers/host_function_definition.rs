@@ -35,10 +35,7 @@ use crate::flatbuffers::hyperlight::generated::{
     feature = "mesh",
     derive(Debug, Default, Clone, PartialEq, Eq, MeshPayload)
 )]
-#[cfg_attr(
-    not(feature = "mesh"),
-    derive(Debug, Default, Clone, PartialEq, Eq)
-)]
+#[cfg_attr(not(feature = "mesh"), derive(Debug, Default, Clone, PartialEq, Eq))]
 pub struct HostFunctionDefinition {
     /// The function name
     pub function_name: String,

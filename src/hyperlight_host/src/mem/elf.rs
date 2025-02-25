@@ -20,8 +20,9 @@ use goblin::elf::reloc::{R_AARCH64_NONE, R_AARCH64_RELATIVE};
 use goblin::elf::reloc::{R_X86_64_NONE, R_X86_64_RELATIVE};
 use goblin::elf::{Elf, ProgramHeaders, Reloc};
 use goblin::elf64::program_header::PT_LOAD;
+use hyperlight_error::{log_then_return, new_error};
 
-use crate::{log_then_return, new_error, Result};
+use crate::Result;
 
 pub(crate) struct ElfInfo {
     payload: Vec<u8>,

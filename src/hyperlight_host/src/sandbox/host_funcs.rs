@@ -19,6 +19,8 @@ use std::io::{IsTerminal, Write};
 use hyperlight_common::flatbuffer_wrappers::function_types::{ParameterValue, ReturnValue};
 use hyperlight_common::flatbuffer_wrappers::host_function_definition::HostFunctionDefinition;
 use hyperlight_common::flatbuffer_wrappers::host_function_details::HostFunctionDetails;
+use hyperlight_error::new_error;
+use hyperlight_error::HyperlightError::HostFunctionNotFound;
 use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
 use tracing::{instrument, Span};
 
@@ -26,8 +28,7 @@ use super::{ExtraAllowedSyscall, FunctionsMap};
 use crate::func::HyperlightFunction;
 use crate::mem::mgr::SandboxMemoryManager;
 use crate::mem::shared_mem::ExclusiveSharedMemory;
-use crate::HyperlightError::HostFunctionNotFound;
-use crate::{new_error, Result};
+use crate::Result;
 
 #[derive(Default, Clone)]
 /// A Wrapper around details of functions exposed by the Host
@@ -221,11 +222,11 @@ fn call_host_func_impl(
                     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| call_func(&host_funcs_cloned, &name_cloned, args_cloned))) {
                         Ok(val) => val,
                         Err(err) => {
-                            if let Some(crate::HyperlightError::DisallowedSyscall) = err.downcast_ref::<crate::HyperlightError>() {
-                                return Err(crate::HyperlightError::DisallowedSyscall)
+                            if let Some(hyperlight_error::HyperlightError::DisallowedSyscall) = err.downcast_ref::<hyperlight_error::HyperlightError>() {
+                                return Err(hyperlight_error::HyperlightError::DisallowedSyscall)
                             }
 
-                            crate::log_then_return!("Host function {} panicked", name_cloned);
+                            hyperlight_error::log_then_return!("Host function {} panicked", name_cloned);
                         }
                     }
                 })?;

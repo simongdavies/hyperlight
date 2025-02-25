@@ -48,7 +48,6 @@ pub(crate) mod uninitialized_evolve;
 /// Metric definitions for Sandbox module.
 pub(crate) mod metrics;
 
-
 #[cfg(feature = "mesh")]
 /// functionality to create and run sandboxes in a mesh
 pub(crate) mod mesh_sandbox;
@@ -171,12 +170,13 @@ mod tests {
     use std::thread;
 
     use crossbeam_queue::ArrayQueue;
+    use hyperlight_error::new_error;
     use hyperlight_testing::simple_guest_as_string;
 
     use crate::sandbox::uninitialized::GuestBinary;
     use crate::sandbox_state::sandbox::EvolvableSandbox;
     use crate::sandbox_state::transition::Noop;
-    use crate::{new_error, MultiUseSandbox, UninitializedSandbox};
+    use crate::{MultiUseSandbox, UninitializedSandbox};
 
     #[test]
     // TODO: add support for testing on WHP

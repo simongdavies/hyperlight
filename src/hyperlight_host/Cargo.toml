@@ -38,7 +38,7 @@ once_cell = { version = "1.20.3" }
 tracing = { version = "0.1.41", features = ["log"] }
 tracing-log = "0.2.0"
 tracing-core = "0.1.33"
-hyperlight-common = { workspace = true, default-features = false, optional = true, features = ["tracing"] }
+hyperlight-common = { workspace = true}
 vmm-sys-util = "0.12.1"
 crossbeam = "0.8.0"
 crossbeam-channel = "0.5.14"
@@ -58,6 +58,7 @@ pal_async= { git = "https://github.com/simongdavies/openvmm", branch = "fix-mesh
 futures-concurrency = { version = "7.2", optional = true }
 uuid = { version = "1.13", features = ["v4"], optional = true }
 tokio = { version = "1.43", features = ["full"], optional = true }
+hyperlight-error = { workspace = true, default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.59", features = [
@@ -128,7 +129,7 @@ cfg_aliases = "0.2.1"
 built = { version = "0.7.6", features = ["chrono", "git2"] }
 
 [features]
-default = ["kvm", "mshv2", "seccomp", "dep:hyperlight-common"]
+default = ["kvm", "mshv2", "seccomp"]
 seccomp = ["dep:seccompiler"]
 function_call_metrics = []
 executable_heap = []
@@ -136,10 +137,10 @@ executable_heap = []
 print_debug = []
 crashdump = ["dep:tempfile"] # Dumps the VM state to a file on unexpected errors or crashes. The path of the file will be printed on stdout and logged. This feature can only be used in debug builds.
 kvm = ["dep:kvm-bindings", "dep:kvm-ioctls"]
-mshv2 = ["dep:mshv-bindings2", "dep:mshv-ioctls2"]
-mshv3 = ["dep:mshv-bindings3", "dep:mshv-ioctls3"]
+mshv2 = ["dep:mshv-bindings2", "dep:mshv-ioctls2", "hyperlight-error/mshv2"]
+mshv3 = ["dep:mshv-bindings3", "dep:mshv-ioctls3", "hyperlight-error/mshv3"]
 inprocess = []
-mesh = ["dep:mesh", "dep:mesh_process", "dep:mesh_worker", "dep:mesh_channel", "dep:mesh_protobuf", "dep:futures", "dep:pal_async", "dep:futures-concurrency", "dep:uuid", "dep:tokio", "dep:hyperlight-common", "hyperlight-common/mesh"]
+mesh = ["dep:mesh", "dep:mesh_process", "dep:mesh_worker", "dep:mesh_channel", "dep:mesh_protobuf", "dep:futures", "dep:pal_async", "dep:futures-concurrency", "dep:uuid", "dep:tokio"]
 
 [[bench]]
 name = "benchmarks"

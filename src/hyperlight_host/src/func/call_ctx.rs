@@ -107,11 +107,12 @@ mod tests {
     use hyperlight_common::flatbuffer_wrappers::function_types::{
         ParameterValue, ReturnType, ReturnValue,
     };
+    use hyperlight_error::HyperlightError;
     use hyperlight_testing::simple_guest_as_string;
 
     use crate::sandbox_state::sandbox::EvolvableSandbox;
     use crate::sandbox_state::transition::Noop;
-    use crate::{GuestBinary, HyperlightError, MultiUseSandbox, Result, UninitializedSandbox};
+    use crate::{GuestBinary, MultiUseSandbox, Result, UninitializedSandbox};
 
     fn new_uninit() -> Result<UninitializedSandbox> {
         let path = simple_guest_as_string().map_err(|e| {

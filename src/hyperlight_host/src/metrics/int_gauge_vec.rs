@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+use hyperlight_error::{new_error, HyperlightError};
 use prometheus::core::{AtomicI64, GenericGaugeVec};
 use prometheus::register_int_gauge_vec_with_registry;
 use tracing::{instrument, Span};
@@ -22,7 +23,7 @@ use super::{
     get_metric_opts, get_metrics_registry, GetHyperlightMetric, HyperlightMetric,
     HyperlightMetricOps,
 };
-use crate::{new_error, HyperlightError, Result};
+use crate::Result;
 
 /// A list of gauges, each backed by an `AtomicI64`
 #[derive(Debug)]

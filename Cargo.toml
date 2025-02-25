@@ -12,6 +12,7 @@ members = [
     "src/hyperlight_guest_capi",
     "src/hyperlight_testing",
     "src/hyperlight_host/fuzz",
+    "src/hyperlight_error",
 ]
 # Because hyperlight-guest has custom linker flags,
 # we exclude it from the default-members list
@@ -38,6 +39,7 @@ hyperlight-common = { path = "src/hyperlight_common", version = "0.1.0", default
 hyperlight-host = { path = "src/hyperlight_host", version = "0.1.0", default-features = false }
 hyperlight-guest = { path = "src/hyperlight_guest", version = "0.1.0", default-features = false }
 hyperlight-testing = { path = "src/hyperlight_testing", default-features = false }
+hyperlight-error = { path = "src/hyperlight_error", default-features = false }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

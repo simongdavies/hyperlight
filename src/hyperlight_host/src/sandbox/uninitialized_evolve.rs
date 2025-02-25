@@ -17,6 +17,7 @@ limitations under the License.
 use core::time::Duration;
 use std::sync::{Arc, Mutex};
 
+use hyperlight_error::new_error;
 use rand::Rng;
 use tracing::{instrument, Span};
 
@@ -31,7 +32,7 @@ use crate::sandbox::mem_access::mem_access_handler_wrapper;
 use crate::sandbox::outb::outb_handler_wrapper;
 use crate::sandbox::{HostSharedMemory, MemMgrWrapper};
 use crate::sandbox_state::sandbox::Sandbox;
-use crate::{new_error, MultiUseSandbox, Result, UninitializedSandbox};
+use crate::{MultiUseSandbox, Result, UninitializedSandbox};
 
 /// The implementation for evolving `UninitializedSandbox`es to
 /// `Sandbox`es.

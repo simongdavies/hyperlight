@@ -22,6 +22,11 @@ use std::ptr::null_mut;
 use std::sync::{Arc, RwLock};
 
 use hyperlight_common::mem::PAGE_SIZE_USIZE;
+#[cfg(target_os = "windows")]
+use hyperlight_error::HyperlightError::MemoryAllocationFailed;
+#[cfg(target_os = "windows")]
+use hyperlight_error::HyperlightError::{MemoryRequestTooBig, WindowsAPIError};
+use hyperlight_error::{log_then_return, new_error};
 use tracing::{instrument, Span};
 #[cfg(target_os = "windows")]
 use windows::core::PCSTR;
@@ -37,11 +42,7 @@ use windows::Win32::System::Memory::{
     MEMORY_MAPPED_VIEW_ADDRESS, PAGE_EXECUTE_READWRITE, PAGE_NOACCESS, PAGE_PROTECTION_FLAGS,
 };
 
-#[cfg(target_os = "windows")]
-use crate::HyperlightError::MemoryAllocationFailed;
-#[cfg(target_os = "windows")]
-use crate::HyperlightError::{MemoryRequestTooBig, WindowsAPIError};
-use crate::{log_then_return, new_error, Result};
+use crate::Result;
 
 /// Makes sure that the given `offset` and `size` are within the bounds of the memory with size `mem_size`.
 macro_rules! bounds_check {
@@ -313,12 +314,11 @@ impl ExclusiveSharedMemory {
     #[cfg(target_os = "linux")]
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub fn new(min_size_bytes: usize) -> Result<Self> {
+        use hyperlight_error::HyperlightError::{MemoryRequestTooBig, MmapFailed, MprotectFailed};
         use libc::{
             c_int, mmap, mprotect, off_t, size_t, MAP_ANONYMOUS, MAP_FAILED, MAP_NORESERVE,
             MAP_SHARED, PROT_NONE, PROT_READ, PROT_WRITE,
         };
-
-        use crate::error::HyperlightError::{MemoryRequestTooBig, MmapFailed, MprotectFailed};
 
         if min_size_bytes == 0 {
             return Err(new_error!("Cannot create shared memory with size 0"));

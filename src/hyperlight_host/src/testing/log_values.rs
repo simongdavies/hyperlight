@@ -14,9 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+use hyperlight_error::new_error;
 use serde_json::{Map, Value};
 
-use crate::{new_error, Result};
+use crate::Result;
 
 /// Call `check_value_as_str` and panic if it returned an `Err`. Otherwise,
 /// do nothing.

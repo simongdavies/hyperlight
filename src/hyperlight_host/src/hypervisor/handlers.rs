@@ -16,9 +16,10 @@ limitations under the License.
 
 use std::sync::{Arc, Mutex};
 
+use hyperlight_error::new_error;
 use tracing::{instrument, Span};
 
-use crate::{new_error, Result};
+use crate::Result;
 
 /// The trait representing custom logic to handle the case when
 /// a Hypervisor's virtual CPU (vCPU) informs Hyperlight the guest

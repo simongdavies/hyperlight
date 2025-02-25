@@ -26,6 +26,11 @@ use std::time::Duration;
 #[cfg(target_os = "linux")]
 use crossbeam::atomic::AtomicCell;
 use crossbeam_channel::{Receiver, Sender};
+use hyperlight_error::HyperlightError::{
+    GuestExecutionHungOnHostFunctionCall,
+    HypervisorHandlerExecutionCancelAttemptOnFinishedExecution, NoHypervisorFound,
+};
+use hyperlight_error::{log_then_return, new_error, HyperlightError};
 #[cfg(target_os = "linux")]
 use libc::{pthread_kill, pthread_self, ESRCH};
 use log::{error, info};
@@ -51,11 +56,7 @@ use crate::sandbox::hypervisor::{get_available_hypervisor, HypervisorType};
 use crate::sandbox::metrics::SandboxMetric::GuestFunctionCallDurationMicroseconds;
 #[cfg(target_os = "linux")]
 use crate::signal_handlers::setup_signal_handlers;
-use crate::HyperlightError::{
-    GuestExecutionHungOnHostFunctionCall,
-    HypervisorHandlerExecutionCancelAttemptOnFinishedExecution, NoHypervisorFound,
-};
-use crate::{log_then_return, new_error, HyperlightError, Result};
+use crate::Result;
 
 type HypervisorHandlerTx = Sender<HypervisorHandlerAction>;
 type HypervisorHandlerRx = Receiver<HypervisorHandlerAction>;
@@ -935,6 +936,8 @@ mod tests {
     use std::thread;
 
     use hyperlight_common::flatbuffer_wrappers::function_types::{ParameterValue, ReturnType};
+    use hyperlight_error::HyperlightError;
+    use hyperlight_error::HyperlightError::HypervisorHandlerExecutionCancelAttemptOnFinishedExecution;
     use hyperlight_testing::simple_guest_as_string;
 
     #[cfg(target_os = "windows")]
@@ -942,10 +945,8 @@ mod tests {
     use crate::sandbox::WrapperGetter;
     use crate::sandbox_state::sandbox::EvolvableSandbox;
     use crate::sandbox_state::transition::Noop;
-    use crate::HyperlightError::HypervisorHandlerExecutionCancelAttemptOnFinishedExecution;
     use crate::{
-        is_hypervisor_present, GuestBinary, HyperlightError, MultiUseSandbox, Result,
-        UninitializedSandbox,
+        is_hypervisor_present, GuestBinary, MultiUseSandbox, Result, UninitializedSandbox,
     };
 
     fn create_multi_use_sandbox() -> MultiUseSandbox {

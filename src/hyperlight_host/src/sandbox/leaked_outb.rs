@@ -33,7 +33,7 @@ extern "win64" fn call_outb(ptr: *mut Arc<Mutex<dyn OutBHandlerCaller>>, port: u
     let outb_handlercaller = unsafe { Box::from_raw(ptr) };
     let res = outb_handlercaller
         .try_lock()
-        .map_err(|_| crate::new_error!("Error locking"))
+        .map_err(|_| hyperlight_error::new_error!("Error locking"))
         .unwrap()
         .call(port, data);
     // TODO, handle the case correctly when res is an error
@@ -112,7 +112,7 @@ impl LeakedOutBWrapper<'_> {
         let ptr = self
             .hdl_ptr
             .try_lock()
-            .map_err(|_| crate::new_error!("Error locking"))?;
+            .map_err(|_| hyperlight_error::new_error!("Error locking"))?;
         Ok(ptr.as_mut_ptr() as u64)
     }
 

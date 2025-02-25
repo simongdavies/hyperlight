@@ -26,6 +26,7 @@ extern crate mshv_ioctls3 as mshv_ioctls;
 
 use std::fmt::{Debug, Formatter};
 
+use hyperlight_error::{log_then_return, new_error};
 use log::error;
 #[cfg(mshv2)]
 use mshv_bindings::hv_message;
@@ -53,7 +54,7 @@ use crate::hypervisor::hypervisor_handler::HypervisorHandler;
 use crate::hypervisor::HyperlightExit;
 use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags};
 use crate::mem::ptr::{GuestPtr, RawPtr};
-use crate::{log_then_return, new_error, Result};
+use crate::Result;
 
 /// Determine whether the HyperV for Linux hypervisor API is present
 /// and functional.

@@ -57,7 +57,7 @@ fn syscalls_allowlist() -> Result<Vec<(i64, Vec<SeccompRule>)>> {
         // `sched_yield` is needed for many synchronization primitives that may be invoked
         // on the host function worker thread
         (libc::SYS_sched_yield, vec![]),
-        #[cfg(feature="mesh")]
+        #[cfg(feature = "mesh")]
         // Mesh needs getrandom
         (libc::SYS_getrandom, vec![]),
     ])

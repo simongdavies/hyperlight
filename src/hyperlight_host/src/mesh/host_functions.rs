@@ -4,6 +4,7 @@ use hyperlight_common::flatbuffer_wrappers::function_types::{
     ParameterType, ParameterValue, ReturnType, ReturnValue,
 };
 use hyperlight_common::flatbuffer_wrappers::host_function_definition::HostFunctionDefinition;
+use hyperlight_error::new_error;
 use mesh::rpc::FailableRpc;
 use mesh::MeshPayload;
 
@@ -11,7 +12,7 @@ use crate::func::HyperlightFunction;
 #[cfg(all(feature = "seccomp", target_os = "linux"))]
 use crate::sandbox::ExtraAllowedSyscall;
 use crate::sandbox_state::sandbox::HostFunctionRegistry;
-use crate::{new_error, Result};
+use crate::Result;
 
 #[derive(MeshPayload)]
 pub(crate) struct HostFunctionWorkerParameters {

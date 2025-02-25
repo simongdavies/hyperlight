@@ -16,11 +16,11 @@ limitations under the License.
 
 use std::ops::Add;
 
+use hyperlight_error::HyperlightError::{self, CheckedAddOverflow, RawPointerLessThanBaseAddress};
 use tracing::{instrument, Span};
 
 use super::ptr_addr_space::{AddressSpace, GuestAddressSpace};
 use super::ptr_offset::Offset;
-use crate::error::HyperlightError::{self, CheckedAddOverflow, RawPointerLessThanBaseAddress};
 use crate::Result;
 
 /// A representation of a raw pointer inside a given address space.
@@ -165,7 +165,7 @@ impl<T: AddressSpace> Ptr<T> {
         let offset = raw_ptr
             .0
             .checked_sub(addr_space.base())
-            .ok_or_else(|| RawPointerLessThanBaseAddress(raw_ptr, addr_space.base()))?;
+            .ok_or_else(|| RawPointerLessThanBaseAddress(raw_ptr.into(), addr_space.base()))?;
         Ok(Self {
             addr_space,
             offset: Offset::from(offset),

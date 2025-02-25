@@ -34,10 +34,10 @@ pub(crate) fn setup_signal_handlers() -> crate::Result<()> {
         // Set a custom panic hook that checks for "DisallowedSyscall"
         std::panic::set_hook(Box::new(move |panic_info| {
             // Check if the panic payload matches "DisallowedSyscall"
-            if let Some(crate::HyperlightError::DisallowedSyscall) = panic_info
+            if let Some(hyperlight_error::HyperlightError::DisallowedSyscall) = panic_info
                 .payload()
-                .downcast_ref::<crate::HyperlightError>(
-            ) {
+                .downcast_ref::<hyperlight_error::HyperlightError>()
+            {
                 // Do nothing to avoid superfluous syscalls
                 return;
             }

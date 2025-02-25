@@ -102,7 +102,7 @@ pub(super) extern "C" fn handle_sigsys(
 }
 
 extern "C-unwind" fn after_syscall_violation() {
-    std::panic::panic_any(crate::HyperlightError::DisallowedSyscall);
+    std::panic::panic_any(hyperlight_error::HyperlightError::DisallowedSyscall);
 }
 
 fn raw_format(prefix: &[u8], raw: usize) -> [u8; 64] {

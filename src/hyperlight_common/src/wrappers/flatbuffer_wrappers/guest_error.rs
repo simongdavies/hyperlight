@@ -32,21 +32,37 @@ use crate::flatbuffers::hyperlight::generated::{
 #[repr(C)]
 /// `ErrorCode` represents an error that occurred in the Hyperlight Guest.
 pub enum ErrorCode {
+    /// No error occurred.
     NoError = 0,
+    /// An unsupported parameter type was encountered.
     UnsupportedParameterType = 2,
+    /// The guest function name was not provided.
     GuestFunctionNameNotProvided = 3,
+    /// The guest function was not found.
     GuestFunctionNotFound = 4,
+    /// The guest function was provided with an incorrect number of parameters.
     GuestFunctionIncorrecNoOfParameters = 5,
+    /// The dispatch function pointer was not set.
     GispatchFunctionPointerNotSet = 6,
+    /// An error occurred while writing to the output buffer.
     OutbError = 7,
+    /// An unknown error occurred.
     UnknownError = 8,
+    /// A stack overflow occurred.
     StackOverflow = 9,
+    /// A check in the guest function failed.
     GsCheckFailed = 10,
+    /// Too many guest functions were registered.
     TooManyGuestFunctions = 11,
+    /// An error occurred in the dlmalloc library.
     FailureInDlmalloc = 12,
+    /// Memory allocation failed.
     MallocFailed = 13,
+    /// The guest function parameter type mismatched.
     GuestFunctionParameterTypeMismatch = 14,
+    /// An error occurred in the guest.
     GuestError = 15,
+    /// The array length parameter is missing.
     ArrayLengthParamIsMissing = 16,
 }
 
@@ -189,6 +205,7 @@ pub struct GuestError {
 
 impl GuestError {
     #[cfg_attr(feature = "tracing", instrument(skip_all, parent = Span::current(), level= "Trace"))]
+    /// Creates a new `GuestError` with the given error code and message.
     pub fn new(code: ErrorCode, message: String) -> Self {
         Self { code, message }
     }

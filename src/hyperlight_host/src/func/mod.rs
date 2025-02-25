@@ -13,8 +13,9 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
+use hyperlight_error::new_error;
 
-use crate::{new_error, Result};
+use crate::Result;
 /// Context structures used to allow the user to call one or more guest
 /// functions on the same Hyperlight sandbox instance, all from within the
 /// same state and mutual exclusion context.

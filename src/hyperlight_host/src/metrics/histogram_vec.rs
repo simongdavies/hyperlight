@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+use hyperlight_error::{new_error, HyperlightError};
 use prometheus::{register_histogram_vec_with_registry, HistogramVec as PHistogramVec};
 use tracing::{instrument, Span};
 
@@ -21,7 +22,7 @@ use super::{
     get_histogram_opts, get_metrics_registry, GetHyperlightMetric, HyperlightMetric,
     HyperlightMetricOps,
 };
-use crate::{new_error, HyperlightError, Result};
+use crate::Result;
 
 /// A named bundle of histograms
 #[derive(Debug)]

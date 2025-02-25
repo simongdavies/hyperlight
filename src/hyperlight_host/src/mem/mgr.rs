@@ -26,6 +26,12 @@ use hyperlight_common::flatbuffer_wrappers::function_types::ReturnValue;
 use hyperlight_common::flatbuffer_wrappers::guest_error::{ErrorCode, GuestError};
 use hyperlight_common::flatbuffer_wrappers::guest_log_data::GuestLogData;
 use hyperlight_common::flatbuffer_wrappers::host_function_details::HostFunctionDetails;
+use hyperlight_error::error::HyperlightHostError;
+use hyperlight_error::HyperlightError::{
+    ExceptionDataLengthIncorrect, ExceptionMessageTooBig, JsonConversionFailure, NoMemorySnapshot,
+    UTF8SliceConversionFailure,
+};
+use hyperlight_error::{log_then_return, new_error, HyperlightError};
 use serde_json::from_str;
 use tracing::{instrument, Span};
 
@@ -38,13 +44,8 @@ use super::ptr::{GuestPtr, RawPtr};
 use super::ptr_offset::Offset;
 use super::shared_mem::{ExclusiveSharedMemory, GuestSharedMemory, HostSharedMemory, SharedMemory};
 use super::shared_mem_snapshot::SharedMemorySnapshot;
-use crate::error::HyperlightError::{
-    ExceptionDataLengthIncorrect, ExceptionMessageTooBig, JsonConversionFailure, NoMemorySnapshot,
-    UTF8SliceConversionFailure,
-};
-use crate::error::HyperlightHostError;
 use crate::sandbox::SandboxConfiguration;
-use crate::{log_then_return, new_error, HyperlightError, Result};
+use crate::Result;
 
 /// Paging Flags
 ///
@@ -806,13 +807,13 @@ impl SandboxMemoryManager<HostSharedMemory> {
 
 #[cfg(test)]
 mod tests {
+    use hyperlight_error::error::HyperlightHostError;
     use hyperlight_testing::rust_guest_as_pathbuf;
     use serde_json::to_string;
     #[cfg(all(target_os = "windows", inprocess))]
     use serial_test::serial;
 
     use super::SandboxMemoryManager;
-    use crate::error::HyperlightHostError;
     use crate::mem::exe::ExeInfo;
     use crate::mem::layout::SandboxMemoryLayout;
     use crate::mem::ptr::RawPtr;

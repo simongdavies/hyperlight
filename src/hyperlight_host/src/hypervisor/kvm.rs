@@ -17,6 +17,7 @@ limitations under the License.
 use std::convert::TryFrom;
 use std::fmt::Debug;
 
+use hyperlight_error::{log_then_return, new_error};
 use kvm_bindings::{kvm_fpu, kvm_regs, kvm_userspace_memory_region, KVM_MEM_READONLY};
 use kvm_ioctls::Cap::UserMemory;
 use kvm_ioctls::{Kvm, VcpuExit, VcpuFd, VmFd};
@@ -31,8 +32,7 @@ use super::{
 use crate::hypervisor::hypervisor_handler::HypervisorHandler;
 use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags};
 use crate::mem::ptr::{GuestPtr, RawPtr};
-use crate::{log_then_return, new_error, Result};
-
+use crate::Result;
 /// Return `true` if the KVM API is available, version 12, and has UserMemory capability, or `false` otherwise
 #[instrument(skip_all, parent = Span::current(), level = "Trace")]
 pub(crate) fn is_hypervisor_present() -> bool {

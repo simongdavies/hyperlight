@@ -182,7 +182,7 @@ impl SandboxWorker {
                                                         call,
                                                     ))
                                                     .map_err(|e| {
-                                                        crate::new_error!(
+                                                        hyperlight_error::new_error!(
                                                             "Error calling host function: {:?}",
                                                             e
                                                         )

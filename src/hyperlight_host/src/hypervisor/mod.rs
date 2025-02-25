@@ -14,12 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+use hyperlight_error::HyperlightError::ExecutionCanceledByHost;
+use hyperlight_error::{log_then_return, new_error, HyperlightError};
 use tracing::{instrument, Span};
 
-use crate::error::HyperlightError::ExecutionCanceledByHost;
 use crate::hypervisor::metrics::HypervisorMetric::NumberOfCancelledGuestExecutions;
 use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags};
-use crate::{int_counter_inc, log_then_return, new_error, HyperlightError, Result};
+use crate::{int_counter_inc, Result};
 
 /// Util for handling x87 fpu state
 #[cfg(any(kvm, mshv, target_os = "windows"))]
@@ -34,6 +35,8 @@ pub mod hyperv_linux;
 pub(crate) mod hyperv_windows;
 pub(crate) mod hypervisor_handler;
 
+#[cfg(crashdump)]
+pub(crate) mod crashdump;
 /// Driver for running in process instead of using hypervisor
 #[cfg(inprocess)]
 pub mod inprocess;
@@ -51,12 +54,6 @@ pub(crate) mod surrogate_process_manager;
 /// WindowsHypervisorPlatform utilities
 #[cfg(target_os = "windows")]
 pub(crate) mod windows_hypervisor_platform;
-/// Safe wrappers around windows types like `PSTR`
-#[cfg(target_os = "windows")]
-pub(crate) mod wrappers;
-
-#[cfg(crashdump)]
-pub(crate) mod crashdump;
 
 use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
@@ -232,8 +229,8 @@ impl VirtualCPU {
                     }
                     log_then_return!(HyperlightError::MemoryAccessViolation(
                         addr,
-                        tried,
-                        region_permission
+                        tried.into(),
+                        region_permission.into()
                     ));
                 }
                 Ok(HyperlightExit::Cancelled()) => {
@@ -275,6 +272,7 @@ pub(crate) mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
+    use hyperlight_error::new_error;
     use hyperlight_testing::dummy_guest_as_string;
 
     use super::handlers::{MemAccessHandlerWrapper, OutBHandlerWrapper};
@@ -284,7 +282,7 @@ pub(crate) mod tests {
     use crate::mem::ptr::RawPtr;
     use crate::sandbox::uninitialized::GuestBinary;
     use crate::sandbox::{SandboxConfiguration, UninitializedSandbox};
-    use crate::{new_error, Result};
+    use crate::Result;
 
     pub(crate) fn test_initialise(
         outb_hdl: OutBHandlerWrapper,

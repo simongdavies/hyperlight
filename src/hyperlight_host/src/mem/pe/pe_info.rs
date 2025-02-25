@@ -20,10 +20,11 @@ use std::{iter, mem};
 use goblin::pe::optional_header::OptionalHeader;
 use goblin::pe::section_table::SectionTable;
 use goblin::pe::PE;
+use hyperlight_error::log_then_return;
 use tracing::{instrument, Span};
 
 use crate::mem::pe::base_relocations;
-use crate::{log_then_return, Result};
+use crate::Result;
 
 const IMAGE_REL_BASED_DIR64: u8 = 10;
 const IMAGE_REL_BASED_ABSOLUTE: u8 = 0;
@@ -337,10 +338,11 @@ pub(crate) struct RelocationPatch {
 
 #[cfg(test)]
 mod tests {
+    use hyperlight_error::new_error;
     use hyperlight_testing::{callback_guest_exe_as_string, simple_guest_exe_as_string};
 
     use crate::mem::exe::ExeInfo;
-    use crate::{new_error, Result};
+    use crate::Result;
 
     #[allow(dead_code)]
     struct PEFileTest {

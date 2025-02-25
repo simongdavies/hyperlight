@@ -16,13 +16,14 @@ limitations under the License.
 
 use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
 use hyperlight_common::mem::PAGE_SIZE;
+use hyperlight_error::HyperlightError;
 use hyperlight_host::func::{ParameterValue, ReturnType, ReturnValue};
 #[cfg(not(feature = "executable_heap"))]
 use hyperlight_host::mem::memory_region::MemoryRegionFlags;
 use hyperlight_host::sandbox::SandboxConfiguration;
 use hyperlight_host::sandbox_state::sandbox::EvolvableSandbox;
 use hyperlight_host::sandbox_state::transition::Noop;
-use hyperlight_host::{GuestBinary, HyperlightError, MultiUseSandbox, UninitializedSandbox};
+use hyperlight_host::{GuestBinary, MultiUseSandbox, UninitializedSandbox};
 use hyperlight_testing::{c_simple_guest_as_string, simple_guest_as_string};
 
 pub mod common; // pub to disable dead_code warning
@@ -417,12 +418,13 @@ fn execute_on_heap() {
 
     #[cfg(not(feature = "executable_heap"))]
     {
+        let flag_string: String = MemoryRegionFlags::EXECUTE.into();
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
             matches!(
                 err,
-                HyperlightError::MemoryAccessViolation(_, MemoryRegionFlags::EXECUTE, _)
+                HyperlightError::MemoryAccessViolation(_,ref v, _) if *v == flag_string.clone()
             ) || matches!(err, HyperlightError::Error(ref s) if s.starts_with("Unexpected VM Exit"))
                 || matches!(err, HyperlightError::Error(ref s) if s.starts_with("unknown Hyper-V run message type")) // Because the memory is set as NX in the guest PTE we get a generic error, once we handle the exception correctly in the guest we can make this more specific
         );

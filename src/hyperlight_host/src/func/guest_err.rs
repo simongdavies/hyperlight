@@ -14,15 +14,16 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-use hyperlight_common::flatbuffer_wrappers::guest_error::{
+use hyperlight_common::wrappers::flatbuffer_wrappers::guest_error::{
     ErrorCode, GuestError as GuestErrorStruct,
 };
+use hyperlight_error::log_then_return;
+use hyperlight_error::HyperlightError::{GuestError, OutBHandlingError, StackOverflow};
 
-use crate::error::HyperlightError::{GuestError, OutBHandlingError, StackOverflow};
 use crate::mem::shared_mem::HostSharedMemory;
 use crate::sandbox::mem_mgr::MemMgrWrapper;
 use crate::sandbox::metrics::SandboxMetric::GuestErrorCount;
-use crate::{int_counter_vec_inc, log_then_return, Result};
+use crate::{int_counter_vec_inc, Result};
 /// Check for a guest error and return an `Err` if one was found,
 /// and `Ok` if one was not found.
 pub(crate) fn check_for_guest_error(mgr: &MemMgrWrapper<HostSharedMemory>) -> Result<()> {

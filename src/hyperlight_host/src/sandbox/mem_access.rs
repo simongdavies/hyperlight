@@ -16,15 +16,16 @@ limitations under the License.
 
 use std::sync::{Arc, Mutex};
 
+use hyperlight_error::error::HyperlightError::StackOverflow;
+use hyperlight_error::log_then_return;
 use tracing::{instrument, Span};
 
 use super::mem_mgr::MemMgrWrapper;
-use crate::error::HyperlightError::StackOverflow;
 use crate::hypervisor::handlers::{
     MemAccessHandler, MemAccessHandlerFunction, MemAccessHandlerWrapper,
 };
 use crate::mem::shared_mem::HostSharedMemory;
-use crate::{log_then_return, Result};
+use crate::Result;
 
 #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
 pub(super) fn handle_mem_access_impl(wrapper: &MemMgrWrapper<HostSharedMemory>) -> Result<()> {

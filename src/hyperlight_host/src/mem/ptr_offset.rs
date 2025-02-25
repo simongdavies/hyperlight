@@ -18,9 +18,9 @@ use std::cmp::{Eq, Ord, Ordering, PartialEq, PartialOrd};
 use std::convert::From;
 use std::ops::{Add, Sub};
 
+use hyperlight_error::HyperlightError;
 use tracing::{instrument, Span};
 
-use crate::error::HyperlightError;
 use crate::Result;
 
 /// An offset into a given address space.

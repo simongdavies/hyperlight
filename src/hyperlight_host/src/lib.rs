@@ -25,9 +25,6 @@ use log::info;
 pub(crate) mod built_info {
     include!(concat!(env!("OUT_DIR"), "/built.rs"));
 }
-/// Dealing with errors, including errors across VM boundaries
-#[deny(dead_code, missing_docs, unused_mut)]
-pub mod error;
 /// Wrappers for host and guest functions.
 #[deny(dead_code, missing_docs, unused_mut)]
 pub mod func;
@@ -91,8 +88,6 @@ pub(crate) mod testing;
 /// Module to handle the hosting of Sandboxes in a mesh
 pub(crate) mod mesh;
 
-/// The re-export for the `HyperlightError` type
-pub use error::HyperlightError;
 /// The re-export for the set_registry function
 pub use metrics::set_metrics_registry;
 /// The re-export for the `is_hypervisor_present` type
@@ -113,37 +108,7 @@ pub use sandbox::UninitializedSandbox;
 pub use crate::func::call_ctx::MultiUseGuestCallContext;
 
 /// The universal `Result` type used throughout the Hyperlight codebase.
-pub type Result<T> = core::result::Result<T, error::HyperlightError>;
-
-// Logs an error then returns with it , more or less equivalent to the bail! macro in anyhow
-// but for HyperlightError instead of anyhow::Error
-#[macro_export]
-macro_rules! log_then_return {
-    ($msg:literal $(,)?) => {{
-        let __args = std::format_args!($msg);
-        let __err_msg = match __args.as_str() {
-            Some(msg) => String::from(msg),
-            None => std::format!($msg),
-        };
-        let __err = $crate::HyperlightError::Error(__err_msg);
-        log::error!("{}", __err);
-        return Err(__err);
-    }};
-    ($err:expr $(,)?) => {
-        log::error!("{}", $err);
-        return Err($err);
-    };
-    ($err:stmt $(,)?) => {
-        log::error!("{}", $err);
-        return Err($err);
-    };
-    ($fmtstr:expr, $($arg:tt)*) => {
-           let __err_msg = std::format!($fmtstr, $($arg)*);
-           let __err = $crate::error::HyperlightError::Error(__err_msg);
-           log::error!("{}", __err);
-           return Err(__err);
-    };
-}
+pub type Result<T> = core::result::Result<T, hyperlight_error::HyperlightError>;
 
 // same as log::debug!, but will additionally print to stdout if the print_debug feature is enabled
 #[macro_export]

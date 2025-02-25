@@ -17,6 +17,8 @@ use std::fmt::Debug;
 use std::mem::{offset_of, size_of};
 
 use hyperlight_common::mem::{GuestStackData, HyperlightPEB, RunMode, PAGE_SIZE_USIZE};
+use hyperlight_error::HyperlightError::{GuestOffsetIsInvalid, MemoryRequestTooBig};
+use hyperlight_error::{log_then_return, new_error};
 use paste::paste;
 use rand::{rng, RngCore};
 use tracing::{instrument, Span};
@@ -28,9 +30,8 @@ use super::memory_region::MemoryRegionType::{
 use super::memory_region::{MemoryRegion, MemoryRegionFlags, MemoryRegionVecBuilder};
 use super::mgr::AMOUNT_OF_MEMORY_PER_PT;
 use super::shared_mem::{ExclusiveSharedMemory, GuestSharedMemory, SharedMemory};
-use crate::error::HyperlightError::{GuestOffsetIsInvalid, MemoryRequestTooBig};
 use crate::sandbox::SandboxConfiguration;
-use crate::{log_then_return, new_error, Result};
+use crate::Result;
 
 // +-------------------------------------------+
 // |             Boot Stack (4KiB)             |

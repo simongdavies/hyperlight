@@ -1,9 +1,10 @@
 use std::io::Write;
 
+use hyperlight_error::new_error;
 use tempfile::NamedTempFile;
 
 use super::Hypervisor;
-use crate::{new_error, Result};
+use crate::Result;
 
 /// Dump registers + memory regions + raw memory to a tempfile
 #[cfg(crashdump)]
