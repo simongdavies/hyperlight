@@ -56,8 +56,11 @@ pub struct MultiUseSandbox {
 // `create_1000_sandboxes`.
 impl Drop for MultiUseSandbox {
     fn drop(&mut self) {
+        log::debug!("Killing hypervisor handler thread in multiusesandbox drop");
         match self.hv_handler.kill_hypervisor_handler_thread() {
-            Ok(_) => {}
+            Ok(_) => {
+                log::debug!("Killed hypervisor handler thread in multiusesandbox drop");
+            }
             Err(e) => {
                 log::error!("[POTENTIAL THREAD LEAK] Potentially failed to kill hypervisor handler thread when dropping MultiUseSandbox: {:?}", e);
             }
@@ -152,7 +155,10 @@ impl MultiUseSandbox {
     /// ```
     #[instrument(skip_all, parent = Span::current())]
     pub fn new_call_context(self) -> MultiUseGuestCallContext {
-        MultiUseGuestCallContext::start(self)
+        log::debug!("Creating new MultiUseGuestCallContext");
+        let c = MultiUseGuestCallContext::start(self);
+        log::debug!("Created new MultiUseGuestCallContext");
+        c
     }
 
     /// Call a guest function by name, with the given return type and arguments.

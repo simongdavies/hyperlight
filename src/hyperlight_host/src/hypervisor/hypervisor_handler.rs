@@ -73,6 +73,7 @@ pub(crate) struct HypervisorHandler {
     communication_channels: HvHandlerCommChannels,
     configuration: HvHandlerConfig,
     execution_variables: HvHandlerExecVars,
+    id: String,
 }
 
 impl HypervisorHandler {
@@ -226,6 +227,7 @@ impl HypervisorHandler {
             communication_channels,
             configuration,
             execution_variables,
+            id: uuid::Uuid::new_v4().to_string(),
         }
     }
 
@@ -289,6 +291,8 @@ impl HypervisorHandler {
         #[cfg(target_os = "linux")]
         setup_signal_handlers()?;
 
+        let id = self.id.clone();
+
         let join_handle = {
             thread::Builder::new()
                 .name("Hypervisor Handler".to_string())
@@ -324,7 +328,7 @@ impl HypervisorHandler {
                                 #[cfg(target_os = "linux")]
                                 execution_variables.run_cancelled.store(false);
 
-                                log::info!("Initialising Hypervisor Handler");
+                                log::info!("Initialising Hypervisor Handler id: {}", id);
 
                                 let mut evar_lock_guard =
                                     execution_variables.shm.try_lock().map_err(|e| {
@@ -367,7 +371,7 @@ impl HypervisorHandler {
 
                                 match res {
                                     Ok(_) => {
-                                        log::info!("Initialised Hypervisor Handler");
+                                        log::info!("Initialised Hypervisor Handler id: {}", id);
                                         from_handler_tx
                                             .send(HandlerMsg::FinishedHypervisorHandlerAction)
                                             .map_err(|_| {
@@ -376,8 +380,8 @@ impl HypervisorHandler {
                                     }
                                     Err(e) => {
                                         log::info!(
-                                            "Error initialising Hypervisor Handler: {:?}",
-                                            e
+                                            "Error initialising Hypervisor Handler: {:?} id: {}",
+                                            e, id
                                         );
                                         from_handler_tx.send(HandlerMsg::Error(e)).map_err(|_| {
                                             HyperlightError::HypervisorHandlerCommunicationFailure()
@@ -394,7 +398,7 @@ impl HypervisorHandler {
                                 #[cfg(target_os = "linux")]
                                 execution_variables.run_cancelled.store(false);
 
-                                info!("Dispatching call from host: {}", function_name);
+                                info!("Dispatching call from host: {} id: {}", function_name, id);
 
                                 let dispatch_function_addr = configuration
                                     .dispatch_function_addr
@@ -473,8 +477,10 @@ impl HypervisorHandler {
                                 match res {
                                     Ok(_) => {
                                         log::info!(
-                                            "Finished dispatching call from host: {}",
-                                            function_name
+                                            "Finished dispatching call from host: {} id: {}",
+                                            function_name,
+                                            id
+
                                         );
                                         from_handler_tx
                                             .send(HandlerMsg::FinishedHypervisorHandlerAction)
@@ -484,9 +490,10 @@ impl HypervisorHandler {
                                     }
                                     Err(e) => {
                                         log::info!(
-                                            "Error dispatching call from host: {}: {:?}",
+                                            "Error dispatching call from host: {}: {:?} id: {}",
                                             function_name,
-                                            e
+                                            e,
+                                            id
                                         );
                                         from_handler_tx.send(HandlerMsg::Error(e)).map_err(|_| {
                                             HyperlightError::HypervisorHandlerCommunicationFailure()
@@ -495,21 +502,22 @@ impl HypervisorHandler {
                                 }
                             }
                             HypervisorHandlerAction::TerminateHandlerThread => {
-                                info!("Terminating Hypervisor Handler Thread");
+                                info!("Terminating Hypervisor Handler Thread id: {}", id);
                                 break;
                             }
                         }
                     }
-
                     // If we make it here, it means the main thread issued a `TerminateHandlerThread` action,
                     // and we are now exiting the handler thread.
                     {
+                        log::info!("Handler thread sending exit message, id: {}", id);
                         from_handler_tx
                             .send(HandlerMsg::FinishedHypervisorHandlerAction)
                             .map_err(|_| {
                                 HyperlightError::HypervisorHandlerCommunicationFailure()
-                            })?;
+                            }).inspect_err(|e| log::error!("Failed to send finish message on termination: {:?} id :{}", e, id))?;
                     }
+                    log::info!("Handler thread exiting, id: {}", id);   
 
                     Ok(())
                 })
@@ -561,7 +569,7 @@ impl HypervisorHandler {
     /// Tries to kill the Hypervisor Handler Thread.
     #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
     pub(crate) fn kill_hypervisor_handler_thread(&mut self) -> Result<()> {
-        log::debug!("Killing Hypervisor Handler Thread");
+        log::debug!("Killing Hypervisor Handler Thread Id {:?}", self.id);
         self.execute_hypervisor_handler_action(HypervisorHandlerAction::TerminateHandlerThread)?;
 
         self.try_join_hypervisor_handler_thread()
@@ -576,8 +584,9 @@ impl HypervisorHandler {
         hypervisor_handler_action: HypervisorHandlerAction,
     ) -> Result<()> {
         log::debug!(
-            "Sending Hypervisor Handler Action: {:?}",
-            hypervisor_handler_action
+            "Sending Hypervisor Handler Action: {:?} id: {}",
+            hypervisor_handler_action,
+            self.id
         );
 
         match hypervisor_handler_action {
@@ -600,7 +609,7 @@ impl HypervisorHandler {
             .send(hypervisor_handler_action)
             .map_err(|_| HyperlightError::HypervisorHandlerCommunicationFailure())?;
 
-        log::debug!("Waiting for Hypervisor Handler Response");
+        log::debug!("Waiting for Hypervisor Handler Response id: {}", self.id);
 
         self.try_receive_handler_msg()
     }
@@ -626,6 +635,8 @@ impl HypervisorHandler {
             .from_handler_rx
             .recv_timeout(self.execution_variables.get_timeout()?);
 
+        let id = self.id.clone();
+
         match response {
             Ok(msg) => match msg {
                 HandlerMsg::Error(e) => Err(e),
@@ -649,8 +660,9 @@ impl HypervisorHandler {
                         if res.as_ref().is_ok_and(|inner_res| inner_res.is_err()) {
                             let err = res.unwrap().unwrap_err();
                             log::debug!(
-                                "Handler thread finished with error: {:?} before sending message",
-                                err
+                                "Handler thread finished with error: {:?} before sending message id: {}",
+                                err,
+                                id,
                             );
                             return Err(err);
                         }
@@ -729,7 +741,7 @@ impl HypervisorHandler {
         // Re-initialise the vCPU.
         // This is 100% needed because, otherwise, all it takes to cause a DoS is for a
         // function to timeout as the vCPU will be in a bad state without re-init.
-        log::debug!("Re-initialising vCPU");
+        log::debug!("Re-initialising vCPU id {}", self.id);
         self.execute_hypervisor_handler_action(HypervisorHandlerAction::Initialise)?;
 
         res
