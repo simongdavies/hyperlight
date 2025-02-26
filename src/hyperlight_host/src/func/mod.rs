@@ -14,7 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 use hyperlight_error::new_error;
-
+#[cfg(feature = "mesh")]
+use mesh_protobuf::encoding::IgnoreField;
 use crate::Result;
 /// Context structures used to allow the user to call one or more guest
 /// functions on the same Hyperlight sandbox instance, all from within the
@@ -63,10 +64,15 @@ impl Default for HyperlightFunction {
         Self(Arc::new(Mutex::new(Box::new(|_| Ok(ReturnValue::Void)))))
     }
 }
+#[cfg(feature = "mesh")]
+impl mesh_protobuf::DefaultEncoding for HyperlightFunction {
+    type Encoding = IgnoreField;
+}
 
 impl HyperlightFunction {
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
-    pub(crate) fn new<F>(f: F) -> Self
+    /// Create a new HyperlightFunction
+    pub fn new<F>(f: F) -> Self
     where
         F: FnMut(Vec<ParameterValue>) -> Result<ReturnValue> + Send + 'static,
     {
@@ -74,7 +80,8 @@ impl HyperlightFunction {
     }
 
     #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
-    pub(crate) fn call(&self, args: Vec<ParameterValue>) -> Result<ReturnValue> {
+    /// Call the function with the given arguments
+    pub fn call(&self, args: Vec<ParameterValue>) -> Result<ReturnValue> {
         let mut f = self
             .0
             .try_lock()

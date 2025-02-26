@@ -145,8 +145,3 @@ mesh = ["dep:mesh", "dep:mesh_process", "dep:mesh_worker", "dep:mesh_channel", "
 [[bench]]
 name = "benchmarks"
 harness = false
-
-[[example]]
-name = "mesh"
-path = "examples/mesh/main.rs"
-required-features = ["mesh"]

@@ -83,11 +83,6 @@ pub(crate) mod signal_handlers;
 #[cfg(test)]
 pub(crate) mod testing;
 
-#[cfg(feature = "mesh")]
-#[deny(missing_docs, unused_mut)]
-/// Module to handle the hosting of Sandboxes in a mesh
-pub(crate) mod mesh;
-
 /// The re-export for the set_registry function
 pub use metrics::set_metrics_registry;
 /// The re-export for the `is_hypervisor_present` type

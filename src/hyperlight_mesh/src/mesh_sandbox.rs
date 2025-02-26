@@ -7,10 +7,10 @@ use mesh::rpc::RpcSend;
 use mesh_worker::WorkerHandle;
 
 use super::mesh_sandbox_builder::HostFunction;
-use crate::mesh::host_functions::{HostFunctionCall, HostFunctionWorkerRpc};
-use crate::mesh::sandbox_mesh::{get_runtime, SandboxMesh};
-use crate::mesh::sandbox_worker::{GuestFunctionCall, SandboxWorkerRpc};
-use crate::Result;
+use super::host_functions::{HostFunctionCall, HostFunctionWorkerRpc};
+use super::sandbox_mesh::{get_runtime, SandboxMesh};
+use super::sandbox_worker::{GuestFunctionCall, SandboxWorkerRpc};
+use hyperlight_host::Result;
 
 /// A sandbox that is created and managed in a mesh
 pub struct MeshSandbox {

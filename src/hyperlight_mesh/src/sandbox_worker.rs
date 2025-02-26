@@ -13,12 +13,12 @@ use mesh_worker::{Worker, WorkerId, WorkerRpc};
 
 use super::host_functions::{HostFunctionCall, HostFunctionWorkerRpc, RegisterHostFunctionHandler};
 use super::sandbox_mesh::get_runtime;
-use crate::mesh::host_functions::HostFunctionWorkerHandler;
-use crate::sandbox::mesh_sandbox_builder::MeshSandboxConfiguration;
-use crate::sandbox::SandboxConfiguration;
-use crate::sandbox_state::sandbox::EvolvableSandbox;
-use crate::sandbox_state::transition::Noop;
-use crate::{GuestBinary, MultiUseSandbox, SandboxRunOptions, UninitializedSandbox};
+use crate::host_functions::HostFunctionWorkerHandler;
+use super::mesh_sandbox_builder::MeshSandboxConfiguration;
+use hyperlight_host::sandbox::SandboxConfiguration;
+use hyperlight_host::sandbox_state::sandbox::EvolvableSandbox;
+use hyperlight_host::sandbox_state::transition::Noop;
+use hyperlight_host::{GuestBinary, MultiUseSandbox, SandboxRunOptions, UninitializedSandbox};
 
 pub(crate) const SANDBOX_WORKER_ID: WorkerId<SandboxWorkerParameters> =
     WorkerId::new("SandboxWorker");

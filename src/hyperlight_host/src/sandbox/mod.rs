@@ -48,26 +48,13 @@ pub(crate) mod uninitialized_evolve;
 /// Metric definitions for Sandbox module.
 pub(crate) mod metrics;
 
-#[cfg(feature = "mesh")]
-/// functionality to create and run sandboxes in a mesh
-pub(crate) mod mesh_sandbox;
-
-#[cfg(feature = "mesh")]
-/// builder for creating a MeshSandbox
-pub(crate) mod mesh_sandbox_builder;
-
 use std::collections::HashMap;
 
 /// Re-export for `SandboxConfiguration` type
 pub use config::SandboxConfiguration;
 /// Re-export for the `MultiUseSandbox` type
 pub use initialized_multi_use::MultiUseSandbox;
-#[cfg(feature = "mesh")]
-/// Re-export for `MeshSandbox` type
-pub use mesh_sandbox::MeshSandbox;
-#[cfg(feature = "mesh")]
-/// Re-export for `MeshSandboxBuilder` type
-pub use mesh_sandbox_builder::MeshSandboxBuilder;
+
 /// Re-export for `SandboxRunOptions` type
 pub use run_options::SandboxRunOptions;
 use tracing::{instrument, Span};

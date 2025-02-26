@@ -6,7 +6,7 @@ use mesh_worker::{RegisteredWorkers, WorkerHost, WorkerHostRunner};
 use once_cell::sync::Lazy;
 use tokio::runtime::Runtime;
 
-use crate::Result;
+use hyperlight_host::Result;
 
 static RUNTIME: Lazy<Arc<Runtime>> = Lazy::new(|| Arc::new(Runtime::new().unwrap()));
 

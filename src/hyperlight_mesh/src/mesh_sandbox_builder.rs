@@ -2,17 +2,17 @@ use std::sync::Arc;
 
 use mesh::rpc::RpcSend;
 use mesh::MeshPayload;
-use mesh_protobuf::encoding::IgnoreField;
 use mesh_worker::WorkerHandle;
 use uuid::Uuid;
 
 use super::MeshSandbox;
-use crate::func::HyperlightFunction;
-use crate::mesh::host_functions::HostFunctionWorkerRpc;
-use crate::mesh::sandbox_mesh::{get_runtime, run_mesh_host, SandboxMesh};
-use crate::mesh::sandbox_worker::{self, SandboxWorkerRpc, SANDBOX_WORKER_ID};
-use crate::sandbox_state::sandbox::HostFunctionRegistry;
-use crate::Result;
+use hyperlight_host::func::HyperlightFunction;
+use super::host_functions::HostFunctionWorkerRpc;
+use super::sandbox_mesh::{get_runtime, run_mesh_host, SandboxMesh};
+use super::sandbox_worker::{self, SandboxWorkerRpc, SANDBOX_WORKER_ID};
+use hyperlight_host::sandbox_state::sandbox::HostFunctionRegistry;
+use hyperlight_host::Result;
+use hyperlight_host::sandbox::ExtraAllowedSyscall;
 
 /// A builder for creating a MeshSandbox
 pub struct MeshSandboxBuilder {
@@ -20,16 +20,12 @@ pub struct MeshSandboxBuilder {
     mesh_sandbox_configuration: MeshSandboxConfiguration,
 }
 
-impl mesh_protobuf::DefaultEncoding for HyperlightFunction {
-    type Encoding = IgnoreField;
-}
-
 #[derive(Clone, MeshPayload)]
 pub(crate) struct HostFunction {
     host_function_definition:
-        hyperlight_common::flatbuffer_wrappers::host_function_definition::HostFunctionDefinition,
+        hyperlight_common::wrappers::flatbuffer_wrappers::host_function_definition::HostFunctionDefinition,
     host_function: HyperlightFunction,
-    syscalls: Option<Vec<super::ExtraAllowedSyscall>>,
+    syscalls: Option<Vec<ExtraAllowedSyscall>>,
 }
 
 impl HostFunction {
@@ -44,7 +40,7 @@ impl HostFunction {
         self.host_function.clone()
     }
 
-    pub(crate) fn syscalls(&self) -> Option<&Vec<super::ExtraAllowedSyscall>> {
+    pub(crate) fn syscalls(&self) -> Option<&Vec<ExtraAllowedSyscall>> {
         self.syscalls.as_ref()
     }
 }
@@ -175,8 +171,8 @@ impl MeshSandboxBuilder {
     fn register_host_function(
         &mut self,
         host_function_definition: hyperlight_common::flatbuffer_wrappers::host_function_definition::HostFunctionDefinition,
-        host_function: crate::func::HyperlightFunction,
-        syscalls: Option<Vec<super::ExtraAllowedSyscall>>,
+        host_function: HyperlightFunction,
+        syscalls: Option<Vec<ExtraAllowedSyscall>>,
     ) -> Result<()> {
         let host_function = HostFunction {
             host_function_definition,
@@ -195,7 +191,7 @@ impl HostFunctionRegistry for MeshSandboxBuilder {
     fn register_host_function(
         &mut self,
         host_function_definition: hyperlight_common::flatbuffer_wrappers::host_function_definition::HostFunctionDefinition,
-        host_function: crate::func::HyperlightFunction,
+        host_function: HyperlightFunction,
     ) -> Result<()> {
         self.register_host_function(host_function_definition, host_function, None)?;
         Ok(())
@@ -204,8 +200,8 @@ impl HostFunctionRegistry for MeshSandboxBuilder {
     fn register_host_function_with_syscalls(
         &mut self,
         host_function_definition: hyperlight_common::flatbuffer_wrappers::host_function_definition::HostFunctionDefinition,
-        host_function: crate::func::HyperlightFunction,
-        syscalls: Vec<super::ExtraAllowedSyscall>,
+        host_function: HyperlightFunction,
+        syscalls: Vec<ExtraAllowedSyscall>,
     ) -> Result<()> {
         self.register_host_function(host_function_definition, host_function, Some(syscalls))?;
         Ok(())

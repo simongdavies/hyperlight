@@ -1381,6 +1381,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyperlight-mesh"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "futures",
+ "futures-concurrency",
+ "hyperlight-common",
+ "hyperlight-error",
+ "hyperlight-host",
+ "hyperlight-testing",
+ "mesh",
+ "mesh_channel",
+ "mesh_process",
+ "mesh_protobuf",
+ "mesh_worker",
+ "once_cell",
+ "pal_async",
+ "seccompiler",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "hyperlight-testing"
 version = "0.0.0"
 dependencies = [

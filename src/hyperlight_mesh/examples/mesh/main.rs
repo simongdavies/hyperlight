@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use clap::builder::ValueParser;
 use clap::{Arg, Command};
 use hyperlight_host::func::{HostFunction2, ParameterValue, ReturnType, ReturnValue};
-use hyperlight_host::sandbox::MeshSandboxBuilder;
+use hyperlight_mesh::MeshSandboxBuilder;
 use hyperlight_testing::{callback_guest_as_string, simple_guest_as_string};
 
 fn main() {
