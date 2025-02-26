@@ -51,9 +51,16 @@ fn main() {
         panic!("Unexpected return value type");
     }
 
+    #[cfg(target_os="windows")]
+    // Need to drop the sandbox in Windows so we drop the SurrogateProcess as we only have one configured in mesh.
+    if run_in_process {
+        drop(sandbox);
+    }
+
     // Call a function on the guest that calls a host function
 
     let guest_binary = callback_guest_as_string().unwrap();
+    // TODO: for now we can only run in process when calling a host function
     let mut builder = MeshSandboxBuilder::new(guest_binary).set_single_process(true);
     // Create a host function
     let host_function = Arc::new(Mutex::new(|a: i32, b: i32| Ok(a + b)));

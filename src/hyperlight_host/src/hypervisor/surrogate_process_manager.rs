@@ -62,7 +62,11 @@ pub(crate) const SURROGATE_PROCESS_BINARY_NAME: &str = "hyperlight_surrogate.exe
 
 /// The maximum number of surrogate processes that can be created.
 /// (This is a factor of limitations in the `WHvMapGpaRange2` API which only allows 512 different process handles).
+#[cfg(not(feature = "mesh"))]
 const NUMBER_OF_SURROGATE_PROCESSES: usize = 512;
+// TODO: this is only appropriate for running mesh out of proc
+#[cfg(feature = "mesh")]
+const NUMBER_OF_SURROGATE_PROCESSES: usize = 1;
 
 /// `SurrogateProcessManager` manages hyperlight_surrogate processes. These
 /// processes are required to allow multiple WHP Partitions to be created in a
