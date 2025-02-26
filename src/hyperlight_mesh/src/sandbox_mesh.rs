@@ -1,12 +1,11 @@
 use std::sync::Arc;
 
+use hyperlight_host::Result;
 use mesh::MeshPayload;
 use mesh_process::{try_run_mesh_host, Mesh, ProcessConfig};
 use mesh_worker::{RegisteredWorkers, WorkerHost, WorkerHostRunner};
 use once_cell::sync::Lazy;
 use tokio::runtime::Runtime;
-
-use hyperlight_host::Result;
 
 static RUNTIME: Lazy<Arc<Runtime>> = Lazy::new(|| Arc::new(Runtime::new().unwrap()));
 
@@ -20,7 +19,7 @@ pub(crate) struct SandboxMeshHostParameters {
     runner: WorkerHostRunner,
 }
 
-pub(crate) fn run_mesh_host(name: &str) -> Result<()> {
+pub fn run_mesh_host(name: &str) -> Result<()> {
     try_run_mesh_host(name, |params: SandboxMeshHostParameters| async {
         params.runner.run(RegisteredWorkers).await;
         Ok(())

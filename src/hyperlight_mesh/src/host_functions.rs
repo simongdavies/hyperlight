@@ -5,14 +5,13 @@ use hyperlight_common::flatbuffer_wrappers::function_types::{
 };
 use hyperlight_common::flatbuffer_wrappers::host_function_definition::HostFunctionDefinition;
 use hyperlight_error::new_error;
-use mesh::rpc::FailableRpc;
-use mesh::MeshPayload;
-
 use hyperlight_host::func::HyperlightFunction;
 #[cfg(all(feature = "seccomp", target_os = "linux"))]
 use hyperlight_host::sandbox::ExtraAllowedSyscall;
 use hyperlight_host::sandbox_state::sandbox::HostFunctionRegistry;
 use hyperlight_host::Result;
+use mesh::rpc::FailableRpc;
+use mesh::MeshPayload;
 
 #[derive(MeshPayload)]
 pub(crate) struct HostFunctionWorkerParameters {
@@ -45,8 +44,9 @@ pub(crate) enum HostFunctionWorkerRpc {
     CallHostFunction(FailableRpc<HostFunctionCall, ReturnValue>),
 }
 
-pub(super) type HostFunctionWorkerHandler =
-    Arc<Mutex<dyn Fn(Vec<ParameterValue>) -> hyperlight_host::Result<ReturnValue> + Send + 'static>>;
+pub(super) type HostFunctionWorkerHandler = Arc<
+    Mutex<dyn Fn(Vec<ParameterValue>) -> hyperlight_host::Result<ReturnValue> + Send + 'static>,
+>;
 
 pub(super) trait RegisterHostFunctionHandler<'a, H: HostFunctionRegistry> {
     fn register(

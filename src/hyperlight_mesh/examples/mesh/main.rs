@@ -3,31 +3,33 @@ use std::sync::{Arc, Mutex};
 use clap::builder::ValueParser;
 use clap::{Arg, Command};
 use hyperlight_host::func::{HostFunction2, ParameterValue, ReturnType, ReturnValue};
-use hyperlight_mesh::MeshSandboxBuilder;
+use hyperlight_mesh::{sandbox_mesh, MeshSandboxBuilder};
 use hyperlight_testing::{callback_guest_as_string, simple_guest_as_string};
 
 fn main() {
     // Use clap to parse command line arguments
-    let matches = Command::new("Mesh Example")
+    let matches = Command::new("mesh")
         .ignore_errors(true)
         .arg(
             Arg::new("in_process")
                 .value_parser(ValueParser::bool())
                 .short('i')
-                .default_value("false")
                 .help("Run in process"),
         )
         .get_matches();
 
-    // Get the value of the --in-process argument
-    let run_in_process = match matches.get_one::<bool>("in_process") {
-        Some(value) => *value,
-        None => {
-            eprintln!("Invalid value for --in-process argument");
-            return;
-        }
-    };
+    let run_in_process = matches.get_one::<bool>("in_process");
 
+    if let None = run_in_process {
+        let mesh_name = std::env::args().nth(1).unwrap_or("".to_string());
+        sandbox_mesh::run_mesh_host(&mesh_name).unwrap();
+    }
+
+    let run_in_process = run_in_process.unwrap().to_owned();
+    create_sandboxes_and_call_functions(run_in_process);
+}
+
+fn create_sandboxes_and_call_functions(run_in_process: bool) {
     println!("Running Mesh Example In Process: {}", run_in_process);
 
     // Create a new MeshSandbox
@@ -51,7 +53,7 @@ fn main() {
         panic!("Unexpected return value type");
     }
 
-    #[cfg(target_os="windows")]
+    #[cfg(target_os = "windows")]
     // Need to drop the sandbox in Windows so we drop the SurrogateProcess as we only have one configured in mesh.
     if run_in_process {
         drop(sandbox);
@@ -61,7 +63,7 @@ fn main() {
 
     let guest_binary = callback_guest_as_string().unwrap();
     // TODO: for now we can only run in process when calling a host function
-    let mut builder = MeshSandboxBuilder::new(guest_binary).set_single_process(true);
+    let mut builder = MeshSandboxBuilder::new(guest_binary).set_single_process(run_in_process);
     // Create a host function
     let host_function = Arc::new(Mutex::new(|a: i32, b: i32| Ok(a + b)));
     host_function.register(&mut builder, "Add").unwrap();

@@ -16,6 +16,7 @@ limitations under the License.
 use hyperlight_error::new_error;
 #[cfg(feature = "mesh")]
 use mesh_protobuf::encoding::IgnoreField;
+
 use crate::Result;
 /// Context structures used to allow the user to call one or more guest
 /// functions on the same Hyperlight sandbox instance, all from within the
