@@ -20,13 +20,15 @@ fn main() {
 
     let run_in_process = matches.get_one::<bool>("in_process");
 
-    if let None = run_in_process {
-        let mesh_name = std::env::args().nth(1).unwrap_or("".to_string());
-        sandbox_mesh::run_mesh_host(&mesh_name).unwrap();
+    match run_in_process {
+        Some(val) => {
+            create_sandboxes_and_call_functions(*val);
+        }
+        None => {
+            let mesh_name = std::env::args().nth(1).unwrap_or("".to_string());
+            sandbox_mesh::run_mesh_host(&mesh_name).unwrap();
+        }
     }
-
-    let run_in_process = run_in_process.unwrap().to_owned();
-    create_sandboxes_and_call_functions(run_in_process);
 }
 
 fn create_sandboxes_and_call_functions(run_in_process: bool) {

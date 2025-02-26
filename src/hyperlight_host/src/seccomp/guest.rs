@@ -58,8 +58,9 @@ fn syscalls_allowlist() -> Result<Vec<(i64, Vec<SeccompRule>)>> {
         // on the host function worker thread
         (libc::SYS_sched_yield, vec![]),
         #[cfg(feature = "mesh")]
-        // Mesh needs getrandom
+        // Mesh needs getrandom and sendmsg syscalls
         (libc::SYS_getrandom, vec![]),
+        (libc::SYS_sendmsg, vec![]),
     ])
 }
 
