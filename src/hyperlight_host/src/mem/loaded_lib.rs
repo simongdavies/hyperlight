@@ -18,6 +18,8 @@ use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::sync::{Arc, Mutex, Weak};
 
+use hyperlight_common::windows_wrappers::HModuleWrapper;
+use hyperlight_error::log_then_return;
 use tracing::{instrument, Span};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::HMODULE;
@@ -25,8 +27,7 @@ use windows::Win32::System::LibraryLoader::LoadLibraryW;
 use windows_sys::Win32::Foundation::FreeLibrary;
 
 use super::ptr::RawPtr;
-use crate::hypervisor::wrappers::HModuleWrapper;
-use crate::{log_then_return, Result};
+use crate::Result;
 
 /// A wrapper around a binary loaded with the Windows
 /// [`LoadLibraryW`](https://microsoft.github.io/windows-docs-rs/doc/windows/Win32/System/LibraryLoader/fn.LoadLibraryW.html)

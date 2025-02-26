@@ -26,6 +26,8 @@ use std::time::Duration;
 #[cfg(target_os = "linux")]
 use crossbeam::atomic::AtomicCell;
 use crossbeam_channel::{Receiver, Sender};
+#[cfg(target_os = "windows")]
+use hyperlight_common::windows_wrappers::HandleWrapper;
 use hyperlight_error::HyperlightError::{
     GuestExecutionHungOnHostFunctionCall,
     HypervisorHandlerExecutionCancelAttemptOnFinishedExecution, NoHypervisorFound,
@@ -43,8 +45,6 @@ use windows::Win32::System::Hypervisor::{WHvCancelRunVirtualProcessor, WHV_PARTI
 #[cfg(feature = "function_call_metrics")]
 use crate::histogram_vec_observe;
 use crate::hypervisor::handlers::{MemAccessHandlerWrapper, OutBHandlerWrapper};
-#[cfg(target_os = "windows")]
-use crate::hypervisor::wrappers::HandleWrapper;
 use crate::hypervisor::Hypervisor;
 use crate::mem::layout::SandboxMemoryLayout;
 use crate::mem::mgr::SandboxMemoryManager;

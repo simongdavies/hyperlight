@@ -1253,11 +1253,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "flatbuffers",
- "hyperlight-testing",
  "log",
  "mesh",
  "strum",
  "tracing",
+ "windows 0.59.0",
 ]
 
 [[package]]
@@ -1266,6 +1266,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cfg_aliases",
+ "crossbeam-channel",
  "flatbuffers",
  "goblin",
  "hyperlight-common",
@@ -1283,6 +1284,7 @@ dependencies = [
  "serde_yaml",
  "thiserror 2.0.11",
  "vmm-sys-util",
+ "windows-result",
 ]
 
 [[package]]

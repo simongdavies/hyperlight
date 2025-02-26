@@ -22,6 +22,9 @@ use std::path::{Path, PathBuf};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use hyperlight_common::mem::PAGE_SIZE_USIZE;
+use hyperlight_common::windows_wrappers::{HandleWrapper, PSTRWrapper};
+use hyperlight_error::HyperlightError::WindowsAPIError;
+use hyperlight_error::{log_then_return, new_error};
 use rust_embed::RustEmbed;
 use tracing::{info, instrument, Span};
 use windows::core::{s, PCSTR};
@@ -41,9 +44,7 @@ use windows::Win32::System::Threading::{
 };
 
 use super::surrogate_process::SurrogateProcess;
-use super::wrappers::{HandleWrapper, PSTRWrapper};
-use crate::HyperlightError::WindowsAPIError;
-use crate::{log_then_return, new_error, Result};
+use crate::Result;
 
 // Use the rust-embed crate to embed the hyperlights_surrogate.exe
 // binary in the hyperlight-host library to make dependency management easier.

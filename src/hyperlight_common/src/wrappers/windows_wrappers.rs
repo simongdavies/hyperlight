@@ -16,7 +16,6 @@ limitations under the License.
 
 use alloc::ffi::CString;
 
-use hyperlight_error::HyperlightError;
 use tracing::{instrument, Span};
 use windows::core::PSTR;
 use windows::Win32::Foundation::{HANDLE, HMODULE};
@@ -25,10 +24,10 @@ use windows::Win32::System::Hypervisor::WHV_REGISTER_VALUE;
 /// A wrapper for `windows::core::PSTR` values that ensures memory for the
 /// underlying string is properly dropped.
 #[derive(Debug)]
-pub(super) struct PSTRWrapper(*mut i8);
+pub struct PSTRWrapper(*mut i8);
 
 impl TryFrom<&str> for PSTRWrapper {
-    type Error = HyperlightError;
+    type Error = anyhow::Error;
     #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
     fn try_from(value: &str) -> Result<Self, anyhow::Error> {
         let c_str = CString::new(value)?;
@@ -58,7 +57,7 @@ impl From<&PSTRWrapper> for PSTR {
 
 // only used on windows. mshv and kvm already has this implemented
 #[derive(Debug, Default, Copy, Clone, PartialEq)]
-pub(super) struct WHvGeneralRegisters {
+pub struct WHvGeneralRegisters {
     pub rax: u64,
     pub rbx: u64,
     pub rcx: u64,
@@ -80,7 +79,7 @@ pub(super) struct WHvGeneralRegisters {
 }
 
 #[derive(Debug, Default, Copy, Clone, PartialEq)]
-pub(super) struct WHvFPURegisters {
+pub struct WHvFPURegisters {
     pub xmm0: u128,
     pub xmm1: u128,
     pub xmm2: u128,
@@ -114,7 +113,7 @@ pub(super) struct WHvFPURegisters {
 }
 
 #[derive(Default, Copy, Clone)]
-pub(super) struct WHvSpecialRegisters {
+pub struct WHvSpecialRegisters {
     pub cr0: WHV_REGISTER_VALUE,
     pub cr2: WHV_REGISTER_VALUE,
     pub cr3: WHV_REGISTER_VALUE,
@@ -155,7 +154,7 @@ unsafe impl Sync for HandleWrapper {}
 
 /// Wrapper for HMODULE, required since HMODULE is no longer Send.
 #[derive(Debug, Copy, Clone)]
-pub(crate) struct HModuleWrapper(HMODULE);
+pub struct HModuleWrapper(HMODULE);
 
 impl From<HMODULE> for HModuleWrapper {
     fn from(value: HMODULE) -> Self {

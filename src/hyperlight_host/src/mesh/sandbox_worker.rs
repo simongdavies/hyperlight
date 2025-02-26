@@ -192,7 +192,10 @@ impl SandboxWorker {
 
                                         match host_function.syscalls() {
                                             Some(_syscalls) => {
-                                                #[cfg(feature = "seccomp")]
+                                                #[cfg(all(
+                                                    feature = "seccomp",
+                                                    target_os = "linux"
+                                                ))]
                                                 func.register_with_extra_allowed_syscalls(
                                                     &mut sandbox,
                                                     host_function_definition.function_name.as_str(),

@@ -31,7 +31,8 @@ mod flatbuffers;
 /// cbindgen:ignore
 pub mod mem;
 
-#[deny(dead_code, missing_docs, unused_mut)]
+#[deny(dead_code, unused_mut)]
+#[allow(missing_docs)]
 /// wrappers
 pub mod wrappers;
 

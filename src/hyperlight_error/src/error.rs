@@ -36,7 +36,7 @@ use flatbuffers::InvalidFlatbuffer;
 use hyperlight_common::flatbuffer_wrappers::function_types::{ParameterValue, ReturnValue};
 use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
 #[cfg(target_os = "windows")]
-use hyperlight_common::wrappers::HandleWrapper;
+use hyperlight_common::wrappers::windows_wrappers::HandleWrapper;
 use mesh::error::RemoteError;
 use serde::{Deserialize, Serialize};
 use serde_yaml;

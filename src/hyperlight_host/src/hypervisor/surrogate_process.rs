@@ -16,6 +16,7 @@ limitations under the License.
 
 use core::ffi::c_void;
 
+use hyperlight_common::windows_wrappers::HandleWrapper;
 use tracing::{instrument, Span};
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::Memory::{
@@ -23,7 +24,6 @@ use windows::Win32::System::Memory::{
 };
 
 use super::surrogate_process_manager::get_surrogate_process_manager;
-use super::wrappers::HandleWrapper;
 
 /// Contains details of a surrogate process to be used by a Sandbox for providing memory to a HyperV VM on Windows.
 /// See surrogate_process_manager for details on why this is needed.
