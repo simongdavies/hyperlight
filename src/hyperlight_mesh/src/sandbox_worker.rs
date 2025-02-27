@@ -140,6 +140,38 @@ impl SandboxWorker {
                             cfg.set_stack_size(size);
                         }
 
+                        let sender = self.host_function_rpc_tx.clone();
+                        let writer_func = move |s: String| -> hyperlight_host::Result<i32> {
+                            let args = vec![ParameterValue::String(s)];
+                            let function_name = "Writer".to_string();
+                            let function_return_type = ReturnType::Int;
+                            let function_args = Some(args);
+                            let call = HostFunctionCall::new(
+                                function_name,
+                                function_return_type,
+                                function_args,
+                            );
+                            let res =
+                                get_runtime()
+                                    .block_on(sender.call_failable(
+                                        HostFunctionWorkerRpc::CallHostFunction,
+                                        call,
+                                    ))
+                                    .map_err(|e| {
+                                        hyperlight_error::new_error!(
+                                            "Error calling host function: {:?}",
+                                            e
+                                        )
+                                    })?;
+                            // Get the return value from ReturnValue
+                            if let ReturnValue::Int(value) = res {
+                                Ok(value)
+                            } else {
+                                Err(hyperlight_error::new_error!("Unexpected return value type"))
+                            }
+                        };
+
+                        let writer = Arc::new(Mutex::new(writer_func));
                         let run_options = Some(SandboxRunOptions::RunInHypervisor);
                         let sandbox = UninitializedSandbox::new(
                             GuestBinary::FilePath(
@@ -147,86 +179,91 @@ impl SandboxWorker {
                             ),
                             Some(cfg),
                             run_options,
-                            None,
+                            Some(&writer),
                         );
 
-                        let res = match sandbox {
-                            Ok(mut sandbox) => {
-                                if let Some(host_functions) =
-                                    mesh_sandbox_configuration.host_functions()
-                                {
-                                    for host_function in host_functions {
-                                        let host_function_definition =
-                                            host_function.definition().clone();
-                                        let function_return_type =
-                                            host_function_definition.return_type;
-                                        let sender = self.host_function_rpc_tx.clone();
-                                        let function_name =
-                                            host_function_definition.function_name.clone();
+                        let res: std::result::Result<(), hyperlight_error::HyperlightError> =
+                            match sandbox {
+                                Ok(mut sandbox) => {
+                                    if let Some(host_functions) =
+                                        mesh_sandbox_configuration.host_functions()
+                                    {
+                                        for host_function in host_functions {
+                                            let host_function_definition =
+                                                host_function.definition().clone();
+                                            let function_return_type =
+                                                host_function_definition.return_type;
+                                            let sender = self.host_function_rpc_tx.clone();
+                                            let function_name =
+                                                host_function_definition.function_name.clone();
 
-                                        let func: HostFunctionWorkerHandler = Arc::new(Mutex::new(
-                                            move |args: Vec<ParameterValue>| {
-                                                let args = match args.len() {
-                                                    0 => None,
-                                                    _ => Some(args),
-                                                };
+                                            let func: HostFunctionWorkerHandler = Arc::new(
+                                                Mutex::new(move |args: Vec<ParameterValue>| {
+                                                    let args = match args.len() {
+                                                        0 => None,
+                                                        _ => Some(args),
+                                                    };
 
-                                                let call = HostFunctionCall::new(
-                                                    function_name.clone(),
-                                                    function_return_type,
-                                                    args,
-                                                );
-                                                get_runtime()
-                                                    .block_on(sender.call_failable(
-                                                        HostFunctionWorkerRpc::CallHostFunction,
-                                                        call,
-                                                    ))
-                                                    .map_err(|e| {
-                                                        hyperlight_error::new_error!(
-                                                            "Error calling host function: {:?}",
-                                                            e
-                                                        )
-                                                    })
-                                            },
-                                        ));
+                                                    let call = HostFunctionCall::new(
+                                                        function_name.clone(),
+                                                        function_return_type,
+                                                        args,
+                                                    );
+                                                    get_runtime()
+                                                        .block_on(sender.call_failable(
+                                                            HostFunctionWorkerRpc::CallHostFunction,
+                                                            call,
+                                                        ))
+                                                        .map_err(|e| {
+                                                            hyperlight_error::new_error!(
+                                                                "Error calling host function: {:?}",
+                                                                e
+                                                            )
+                                                        })
+                                                }),
+                                            );
 
-                                        match host_function.syscalls() {
-                                            Some(_syscalls) => {
-                                                #[cfg(all(
-                                                    feature = "seccomp",
-                                                    target_os = "linux"
-                                                ))]
-                                                func.register_with_extra_allowed_syscalls(
-                                                    &mut sandbox,
-                                                    host_function_definition.function_name.as_str(),
-                                                    host_function_definition.parameter_types,
-                                                    host_function_definition.return_type,
-                                                    _syscalls.clone(),
-                                                )?;
-                                            }
-                                            None => {
-                                                func.register(
-                                                    &mut sandbox,
-                                                    host_function_definition.function_name.as_str(),
-                                                    host_function_definition.parameter_types,
-                                                    host_function_definition.return_type,
-                                                )?;
+                                            match host_function.syscalls() {
+                                                Some(_syscalls) => {
+                                                    #[cfg(all(
+                                                        feature = "seccomp",
+                                                        target_os = "linux"
+                                                    ))]
+                                                    func.register_with_extra_allowed_syscalls(
+                                                        &mut sandbox,
+                                                        host_function_definition
+                                                            .function_name
+                                                            .as_str(),
+                                                        host_function_definition.parameter_types,
+                                                        host_function_definition.return_type,
+                                                        _syscalls.clone(),
+                                                    )?;
+                                                }
+                                                None => {
+                                                    func.register(
+                                                        &mut sandbox,
+                                                        host_function_definition
+                                                            .function_name
+                                                            .as_str(),
+                                                        host_function_definition.parameter_types,
+                                                        host_function_definition.return_type,
+                                                    )?;
+                                                }
                                             }
                                         }
                                     }
-                                }
 
-                                let sandbox = sandbox.evolve(Noop::default());
-                                match sandbox {
-                                    Ok(sandbox) => {
-                                        self.sandbox = Some(sandbox);
-                                        Ok(())
+                                    let sandbox = sandbox.evolve(Noop::default());
+                                    match sandbox {
+                                        Ok(sandbox) => {
+                                            self.sandbox = Some(sandbox);
+                                            Ok(())
+                                        }
+                                        Err(e) => Err(e),
                                     }
-                                    Err(e) => Err(e),
                                 }
-                            }
-                            Err(e) => Err(e),
-                        };
+                                Err(e) => Err(e),
+                            };
                         res
                     };
                     failable_rpc.complete(res.map_err(|e| RemoteError::new(e.to_string())))

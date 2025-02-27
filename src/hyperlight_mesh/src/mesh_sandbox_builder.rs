@@ -1,6 +1,7 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use hyperlight_host::func::HyperlightFunction;
+use hyperlight_host::func::{HostFunction1, HyperlightFunction};
+use hyperlight_host::sandbox::host_funcs::default_writer_func;
 use hyperlight_host::sandbox::ExtraAllowedSyscall;
 use hyperlight_host::sandbox_state::sandbox::HostFunctionRegistry;
 use hyperlight_host::Result;
@@ -18,6 +19,7 @@ use super::MeshSandbox;
 pub struct MeshSandboxBuilder {
     single_process: bool,
     mesh_sandbox_configuration: MeshSandboxConfiguration,
+    host_program_name: Option<String>,
 }
 
 #[derive(Clone, MeshPayload)]
@@ -97,6 +99,7 @@ impl MeshSandboxBuilder {
         MeshSandboxBuilder {
             single_process: true,
             mesh_sandbox_configuration,
+            host_program_name: None,
         }
     }
 
@@ -117,14 +120,40 @@ impl MeshSandboxBuilder {
         self.mesh_sandbox_configuration = self.mesh_sandbox_configuration.set_stack_size(size);
         self
     }
+    /// Set the host program name for the sandbox
+    pub fn set_host_program_name(mut self, host_program_name: Option<String>) -> Self {
+        self.host_program_name = host_program_name;
+        self
+    }
 
     /// Build the MeshSandbox
-    pub fn build(&self) -> Result<MeshSandbox> {
+    pub fn build(&mut self) -> Result<MeshSandbox> {
         let mesh_name = format!("sandbox_{}", Uuid::new_v4());
         run_mesh_host(mesh_name.as_str())?;
-        let sandbox_mesh = SandboxMesh::new(self.single_process, &mesh_name)?;
+        let sandbox_mesh =
+            SandboxMesh::new(self.single_process, &mesh_name, self.host_program_name.clone())?;
         let (sandbox_rpc_tx, sandbox_worker, host_function_rpc_rx) =
             get_runtime().block_on(async { Self::run_sandbox_workers(&sandbox_mesh).await })?;
+
+        // Register the default writer function
+
+        #[cfg(all(feature = "seccomp", target_os = "linux"))]
+        let extra_allowed_syscalls_for_writer_func = vec![
+            libc::SYS_mmap,
+            libc::SYS_brk,
+            libc::SYS_mprotect,
+            libc::SYS_close,
+        ];
+        let default_writer = Arc::new(Mutex::new(default_writer_func));
+        #[cfg(all(feature = "seccomp", target_os = "linux"))]
+        default_writer.register_with_extra_allowed_syscalls(
+            self,
+            "Writer",
+            extra_allowed_syscalls_for_writer_func,
+        )?;
+
+        #[cfg(not(all(feature = "seccomp", target_os = "linux")))]
+        default_writer.register(self, "Writer")?;
 
         // Send the create sandbox rpc
 

@@ -14,6 +14,7 @@ members = [
     "src/hyperlight_host/fuzz",
     "src/hyperlight_error",
     "src/hyperlight_mesh",
+    "src/hyperlight_mesh/mesh_host",
 ]
 # Because hyperlight-guest has custom linker flags,
 # we exclude it from the default-members list

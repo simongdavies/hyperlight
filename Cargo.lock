@@ -1392,6 +1392,7 @@ dependencies = [
  "hyperlight-error",
  "hyperlight-host",
  "hyperlight-testing",
+ "libc",
  "mesh",
  "mesh_channel",
  "mesh_process",
@@ -1974,6 +1975,13 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "mesh_host"
+version = "0.1.0"
+dependencies = [
+ "hyperlight-mesh",
 ]
 
 [[package]]

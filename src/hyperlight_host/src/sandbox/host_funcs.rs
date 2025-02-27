@@ -241,7 +241,7 @@ fn call_host_func_impl(
 
 /// The default writer function is to write to stdout with green text.
 #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
-pub(super) fn default_writer_func(s: String) -> Result<i32> {
+pub fn default_writer_func(s: String) -> Result<i32> {
     match std::io::stdout().is_terminal() {
         false => {
             print!("{}", s);
