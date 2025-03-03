@@ -122,13 +122,13 @@ mod test {
     };
     use hyperlight_testing::{callback_guest_as_string, simple_guest_as_string};
 
-    use crate::func::HostFunction2;
-    use crate::sandbox::MeshSandboxBuilder;
+    use hyperlight_host::func::HostFunction2;
+    use crate::MeshSandboxBuilder;
 
     #[test]
     fn test_mesh_sandbox_creation() {
         let guest_binary = simple_guest_as_string().unwrap();
-        let builder = MeshSandboxBuilder::new(guest_binary).set_single_process(true);
+        let mut builder = MeshSandboxBuilder::new(guest_binary).set_single_process(true);
         let result = builder.build();
         assert!(result.is_ok());
     }
@@ -136,7 +136,7 @@ mod test {
     #[test]
     fn test_call_function_with_args() {
         let guest_binary = simple_guest_as_string().unwrap();
-        let builder = MeshSandboxBuilder::new(guest_binary).set_single_process(true);
+        let mut builder = MeshSandboxBuilder::new(guest_binary).set_single_process(true);
         let sandbox = builder.build().unwrap();
         let function_name = "Echo".to_string();
         let function_return_type = ReturnType::String;
@@ -153,7 +153,7 @@ mod test {
     #[test]
     fn test_mesh_name() {
         let guest_binary = simple_guest_as_string().unwrap();
-        let builder = MeshSandboxBuilder::new(guest_binary).set_single_process(true);
+        let mut builder = MeshSandboxBuilder::new(guest_binary).set_single_process(true);
         let sandbox = builder.build().unwrap();
         assert!(sandbox.mesh_name().starts_with("sandbox_"));
     }
@@ -161,7 +161,7 @@ mod test {
     #[test]
     fn test_with_heap_size() {
         let guest_binary = simple_guest_as_string().unwrap();
-        let builder = MeshSandboxBuilder::new(guest_binary)
+        let mut builder = MeshSandboxBuilder::new(guest_binary)
             .set_single_process(true)
             .set_heap_size(1024 * 1024);
         let result = builder.build();
@@ -171,7 +171,7 @@ mod test {
     #[test]
     fn test_with_stack_size() {
         let guest_binary = simple_guest_as_string().unwrap();
-        let builder = MeshSandboxBuilder::new(guest_binary)
+        let mut builder = MeshSandboxBuilder::new(guest_binary)
             .set_single_process(true)
             .set_stack_size(128 * 1024);
         let result = builder.build();
