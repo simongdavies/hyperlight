@@ -19,7 +19,7 @@ use super::MeshSandbox;
 pub struct MeshSandboxBuilder {
     single_process: bool,
     mesh_sandbox_configuration: MeshSandboxConfiguration,
-    host_program_name: Option<String>,
+    custom_sandbox_host_program_name: Option<String>,
 }
 
 #[derive(Clone, MeshPayload)]
@@ -31,6 +31,17 @@ pub(crate) struct HostFunction {
 }
 
 impl HostFunction {
+    pub(crate) fn new(
+        host_function_definition: hyperlight_common::flatbuffer_wrappers::host_function_definition::HostFunctionDefinition,
+        host_function: HyperlightFunction,
+        syscalls: Option<Vec<ExtraAllowedSyscall>>,
+    ) -> Self {
+        Self {
+            host_function_definition,
+            host_function,
+            syscalls,
+        }
+    }
     pub(crate) fn definition(
         &self,
     ) -> &hyperlight_common::flatbuffer_wrappers::host_function_definition::HostFunctionDefinition
@@ -99,7 +110,7 @@ impl MeshSandboxBuilder {
         MeshSandboxBuilder {
             single_process: true,
             mesh_sandbox_configuration,
-            host_program_name: None,
+            custom_sandbox_host_program_name: None,
         }
     }
 
@@ -120,9 +131,9 @@ impl MeshSandboxBuilder {
         self.mesh_sandbox_configuration = self.mesh_sandbox_configuration.set_stack_size(size);
         self
     }
-    /// Set the host program name for the sandbox
-    pub fn set_host_program_name(mut self, host_program_name: Option<String>) -> Self {
-        self.host_program_name = host_program_name;
+    /// Set the custom sandbox host program name for the sandbox
+    pub fn set_custom_sandbox_host_program_name(mut self, name: Option<String>) -> Self {
+        self.custom_sandbox_host_program_name = name;
         self
     }
 
@@ -130,8 +141,11 @@ impl MeshSandboxBuilder {
     pub fn build(&mut self) -> Result<MeshSandbox> {
         let mesh_name = format!("sandbox_{}", Uuid::new_v4());
         run_mesh_host(mesh_name.as_str())?;
-        let sandbox_mesh =
-            SandboxMesh::new(self.single_process, &mesh_name, self.host_program_name.clone())?;
+        let sandbox_mesh = SandboxMesh::new(
+            self.single_process,
+            &mesh_name,
+            self.custom_sandbox_host_program_name.clone(),
+        )?;
         let (sandbox_rpc_tx, sandbox_worker, host_function_rpc_rx) =
             get_runtime().block_on(async { Self::run_sandbox_workers(&sandbox_mesh).await })?;
 

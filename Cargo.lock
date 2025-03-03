@@ -1981,6 +1981,7 @@ dependencies = [
 name = "mesh_host"
 version = "0.1.0"
 dependencies = [
+ "hyperlight-host",
  "hyperlight-mesh",
 ]
 

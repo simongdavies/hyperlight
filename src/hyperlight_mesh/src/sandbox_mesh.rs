@@ -29,11 +29,15 @@ pub fn run_mesh_host(name: &str) -> Result<()> {
 pub(crate) struct SandboxMesh {
     mesh: Option<Mesh>,
     local_host: WorkerHost,
-    mesh_program_name: Option<String>,
+    custom_sandbox_host_program_name: Option<String>,
 }
 
 impl SandboxMesh {
-    pub(crate) fn new(single_process: bool, mesh_name: impl Into<String>,mesh_program_name: Option<String>) -> Result<Self> {
+    pub(crate) fn new(
+        single_process: bool,
+        mesh_name: impl Into<String>,
+        custom_sandbox_host_program_name: Option<String>,
+    ) -> Result<Self> {
         let mesh = if single_process {
             None
         } else {
@@ -42,7 +46,11 @@ impl SandboxMesh {
 
         let (local_host, runner) = mesh_worker::worker_host();
         let _task = get_runtime().spawn(runner.run(RegisteredWorkers));
-        Ok(Self { mesh, local_host, mesh_program_name })
+        Ok(Self {
+            mesh,
+            local_host,
+            custom_sandbox_host_program_name,
+        })
     }
 
     pub async fn create_sandbox_worker_host(
@@ -52,15 +60,12 @@ impl SandboxMesh {
         let host = if let Some(mesh) = &self.mesh {
             //TODO: Work out how to constrain the process that is crate
             let (host, runner) = mesh_worker::worker_host();
-            let process_config = match &self.mesh_program_name {
-                Some(mesh_program_name) => ProcessConfig::new(name).process_name(mesh_program_name),
+            let process_config = match &self.custom_sandbox_host_program_name {
+                Some(custom_sandbox_host_program_name) => ProcessConfig::new(name).process_name(custom_sandbox_host_program_name),
                 None => ProcessConfig::new(name),
             };
-            mesh.launch_host(
-                process_config,
-                SandboxMeshHostParameters { runner },
-            )
-            .await?;
+            mesh.launch_host(process_config, SandboxMeshHostParameters { runner })
+                .await?;
             host
         } else {
             self.local_host.clone()
@@ -73,4 +78,5 @@ impl SandboxMesh {
             get_runtime().block_on(mesh.shutdown());
         }
     }
+
 }

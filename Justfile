@@ -59,6 +59,12 @@ guests: rg cg
 
 build-rust target=default-target:
     cargo build --profile={{ if target == "debug" { "dev" } else { target } }}
+    cd src/hyperlight_mesh && cargo build --profile={{ if target == "debug" { "dev" } else { target } }}
+    cd src/hyperlight_mesh/mesh_host && cargo build --profile={{ if target == "debug" { "dev" } else { target } }}
+
+build-rust-examples target=default-target: (build-rust target)
+    cargo build --profile={{ if target == "debug" { "dev" } else { target } }} --examples
+    cd src/hyperlight_mesh && cargo build --profile={{ if target == "debug" { "dev" } else { target } }} --examples
 
 build: build-rust
 

@@ -8,6 +8,9 @@ mesh_worker::register_workers! {
     SandboxWorker
 }
 
+// Function registry for custom sandbox host program
+pub mod mesh_host_function_registry;
+
 /// functionality to create and run sandboxes in a mesh
 pub(crate) mod mesh_sandbox;
 

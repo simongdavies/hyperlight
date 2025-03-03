@@ -7,7 +7,7 @@ use hyperlight_common::flatbuffer_wrappers::function_types::{
     ParameterValue, ReturnType, ReturnValue,
 };
 use hyperlight_host::sandbox::SandboxConfiguration;
-use hyperlight_host::sandbox_state::sandbox::EvolvableSandbox;
+use hyperlight_host::sandbox_state::sandbox::{EvolvableSandbox, HostFunctionRegistry};
 use hyperlight_host::sandbox_state::transition::Noop;
 use hyperlight_host::{GuestBinary, MultiUseSandbox, SandboxRunOptions, UninitializedSandbox};
 use mesh::error::RemoteError;
@@ -19,6 +19,7 @@ use super::host_functions::{HostFunctionCall, HostFunctionWorkerRpc, RegisterHos
 use super::mesh_sandbox_builder::MeshSandboxConfiguration;
 use super::sandbox_mesh::get_runtime;
 use crate::host_functions::HostFunctionWorkerHandler;
+use crate::mesh_host_function_registry;
 
 pub(crate) const SANDBOX_WORKER_ID: WorkerId<SandboxWorkerParameters> =
     WorkerId::new("SandboxWorker");
@@ -140,7 +141,7 @@ impl SandboxWorker {
                             cfg.set_stack_size(size);
                         }
 
-                        let sender = self.host_function_rpc_tx.clone();
+                        let remote_sender = self.host_function_rpc_tx.clone();
                         let writer_func = move |s: String| -> hyperlight_host::Result<i32> {
                             let args = vec![ParameterValue::String(s)];
                             let function_name = "Writer".to_string();
@@ -153,7 +154,7 @@ impl SandboxWorker {
                             );
                             let res =
                                 get_runtime()
-                                    .block_on(sender.call_failable(
+                                    .block_on(remote_sender.call_failable(
                                         HostFunctionWorkerRpc::CallHostFunction,
                                         call,
                                     ))
@@ -250,6 +251,18 @@ impl SandboxWorker {
                                                     )?;
                                                 }
                                             }
+                                        }
+                                    }
+
+                                    let host_functions =
+                                        mesh_host_function_registry::get_host_functions_mut()?;
+
+                                    if !host_functions.is_empty() {
+                                        for host_function in host_functions.iter() {
+                                            let definition = host_function.definition();
+                                            let func = host_function.function();
+                                            sandbox
+                                                .register_host_function(definition.clone(), func)?;
                                         }
                                     }
 

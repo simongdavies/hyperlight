@@ -9,3 +9,4 @@ path = "src/main.rs"
 
 [dependencies]
 hyperlight-mesh = { path = "../../hyperlight_mesh" }
+hyperlight-host = { workspace = true,  default-features = true }
