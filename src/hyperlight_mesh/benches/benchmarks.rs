@@ -14,15 +14,16 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-
 use criterion::{criterion_group, criterion_main, Criterion};
 use hyperlight_common::flatbuffer_wrappers::function_types::{ParameterValue, ReturnType};
-use hyperlight_mesh::MeshSandbox;
+use hyperlight_mesh::{MeshSandbox, MeshSandboxBuilder};
 use hyperlight_testing::{callback_guest_as_string, simple_guest_as_string};
-use hyperlight_mesh::MeshSandboxBuilder;
 
-fn create_mesh_sandbox(guest_binary: String, in_process: bool, custom_sandbox_host_program_name: Option<String>) -> MeshSandbox {
-
+fn create_mesh_sandbox(
+    guest_binary: String,
+    in_process: bool,
+    custom_sandbox_host_program_name: Option<String>,
+) -> MeshSandbox {
     let mut builder = MeshSandboxBuilder::new(guest_binary)
         .set_single_process(in_process)
         .set_custom_sandbox_host_program_name(custom_sandbox_host_program_name);
@@ -56,7 +57,6 @@ fn guest_call_benchmark(c: &mut Criterion) {
     let b = 10;
 
     let function_args = Some(vec![ParameterValue::Int(a), ParameterValue::Int(b)]);
-
 
     // Benchmarks a guest function call calling into the host.
     group.bench_function("guest_call_with_host_call_in_custom_sandbox_host", |b| {

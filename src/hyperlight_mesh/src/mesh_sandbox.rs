@@ -120,9 +120,9 @@ mod test {
     use hyperlight_common::flatbuffer_wrappers::function_types::{
         ParameterValue, ReturnType, ReturnValue,
     };
+    use hyperlight_host::func::HostFunction2;
     use hyperlight_testing::{callback_guest_as_string, simple_guest_as_string};
 
-    use hyperlight_host::func::HostFunction2;
     use crate::MeshSandboxBuilder;
 
     #[test]

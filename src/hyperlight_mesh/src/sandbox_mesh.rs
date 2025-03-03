@@ -61,7 +61,9 @@ impl SandboxMesh {
             //TODO: Work out how to constrain the process that is crate
             let (host, runner) = mesh_worker::worker_host();
             let process_config = match &self.custom_sandbox_host_program_name {
-                Some(custom_sandbox_host_program_name) => ProcessConfig::new(name).process_name(custom_sandbox_host_program_name),
+                Some(custom_sandbox_host_program_name) => {
+                    ProcessConfig::new(name).process_name(custom_sandbox_host_program_name)
+                }
                 None => ProcessConfig::new(name),
             };
             mesh.launch_host(process_config, SandboxMeshHostParameters { runner })
@@ -78,5 +80,4 @@ impl SandboxMesh {
             get_runtime().block_on(mesh.shutdown());
         }
     }
-
 }

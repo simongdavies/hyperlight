@@ -19,14 +19,15 @@ fn main() {
         .arg(
             Arg::new("custom-sandbox-host-program-name")
                 .value_parser(ValueParser::string())
-                .help("Name of the mesh")
+                .help("Name of the custom sandbox host program")
                 .short('n')
                 .long("name"),
         )
         .get_matches();
 
     let run_in_process = matches.get_one::<bool>("in_process");
-    let custom_sandbox_host_program_name = matches.get_one::<String>("custom-sandbox-host-program-name");
+    let custom_sandbox_host_program_name =
+        matches.get_one::<String>("custom-sandbox-host-program-name");
     let custom_sandbox_host_program_name = match custom_sandbox_host_program_name {
         Some(val) => {
             // val should be a valid binary, check if it exists
@@ -40,7 +41,10 @@ fn main() {
         None => None,
     };
 
-    if run_in_process.is_some() && *run_in_process.unwrap() && custom_sandbox_host_program_name.is_some() {
+    if run_in_process.is_some()
+        && *run_in_process.unwrap()
+        && custom_sandbox_host_program_name.is_some()
+    {
         eprint!("Cannot specify custom-sandbox-host-program-name when running in process");
         std::process::exit(1);
     }
@@ -58,9 +62,8 @@ fn main() {
 }
 
 fn run_hyperlight_host(run_in_process: bool, custom_sandbox_host_program_name: Option<String>) {
-
     let mut running_sandbox_in_custom_host = false;
-    if let Some(_) =  custom_sandbox_host_program_name {
+    if let Some(_) = custom_sandbox_host_program_name {
         running_sandbox_in_custom_host = true;
     }
 
@@ -86,11 +89,18 @@ fn run_hyperlight_host(run_in_process: bool, custom_sandbox_host_program_name: O
     let message = "Hello, World!";
     let function_name = "Echo";
     println!("");
-    println!("Calling function {} in guest with argument {}", function_name, message);
+    println!(
+        "Calling function {} in guest with argument {}",
+        function_name, message
+    );
 
     let function_return_type = ReturnType::String;
     let function_args = Some(vec![ParameterValue::String(message.to_string())]);
-    let result = sandbox.call_function(function_name.to_string(), function_return_type, function_args);
+    let result = sandbox.call_function(
+        function_name.to_string(),
+        function_return_type,
+        function_args,
+    );
     assert!(result.is_ok());
     if let ReturnValue::String(value) = result.unwrap() {
         assert_eq!(value, message);
@@ -102,13 +112,18 @@ fn run_hyperlight_host(run_in_process: bool, custom_sandbox_host_program_name: O
     // Call a function that prints to the host
     let message = "Hello Mesh!!!!";
     let function_name = "PrintOutput";
-    
+
     println!("");
-    println!("Calling function {} in guest that prints {} to host", function_name, message);
+    println!(
+        "Calling function {} in guest that prints {} to host",
+        function_name, message
+    );
     let res = sandbox.call_function(
         function_name.to_string(),
         ReturnType::Int,
-        Some(vec![ParameterValue::String(format!("{}\n",message).to_string())]),
+        Some(vec![ParameterValue::String(
+            format!("{}\n", message).to_string(),
+        )]),
     );
     assert!(res.is_ok());
     if let ReturnValue::Int(value) = res.unwrap() {
@@ -133,19 +148,22 @@ fn run_hyperlight_host(run_in_process: bool, custom_sandbox_host_program_name: O
 
     let guest_function_name = "AddUsingHost";
     let host_function_name = "Add";
-    
+
     println!("");
-    println!("Calling function {} in guest that calls host function {}", guest_function_name, host_function_name);
+    println!(
+        "Calling function {} in guest that calls host function {}",
+        guest_function_name, host_function_name
+    );
 
     // Host functions can run in the hyperight host, or in the case of running a custom host program for the sandbox in that program
 
     // If a custom host program name is provided, then the host function should be registered in that host program
     // otherwise, the host function should be registered in the hyperlight host (this) program
-   
+
     match custom_sandbox_host_program_name {
         Some(ref name) => {
             println!("");
-            println!("Custom Sandbox Host Program name: {:?}",name);
+            println!("Custom Sandbox Host Program name: {:?}", name);
             println!(
                 "Host Function {} is expected to be  registered in Custom Sandbox Host Program Name: {:?} and the function is expected to add 10 to the result",
                 host_function_name,
@@ -154,13 +172,17 @@ fn run_hyperlight_host(run_in_process: bool, custom_sandbox_host_program_name: O
         }
         None => {
             println!("");
-            println!("Host Function {} is being registered in Hyperlight Host", host_function_name);
+            println!(
+                "Host Function {} is being registered in Hyperlight Host",
+                host_function_name
+            );
             // Create a host function
             let host_function = Arc::new(Mutex::new(|a: i32, b: i32| Ok(a + b)));
-            host_function.register(&mut builder, host_function_name).unwrap();
+            host_function
+                .register(&mut builder, host_function_name)
+                .unwrap();
         }
     }
-
 
     let sandbox = builder.build().unwrap();
     let function_return_type = ReturnType::Int;
@@ -169,11 +191,17 @@ fn run_hyperlight_host(run_in_process: bool, custom_sandbox_host_program_name: O
 
     let function_args = Some(vec![ParameterValue::Int(a), ParameterValue::Int(b)]);
 
-    
     println!("");
-    println!("Calling guest function {} with args {} and {}",guest_function_name, a, b);
+    println!(
+        "Calling guest function {} with args {} and {}",
+        guest_function_name, a, b
+    );
 
-    let result = sandbox.call_function(guest_function_name.to_string(), function_return_type, function_args);
+    let result = sandbox.call_function(
+        guest_function_name.to_string(),
+        function_return_type,
+        function_args,
+    );
     assert!(result.is_ok());
     if let ReturnValue::Int(value) = result.unwrap() {
         println!("Return Value {}", value);
