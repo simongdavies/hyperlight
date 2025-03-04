@@ -54,9 +54,9 @@ fn main() {
             run_hyperlight_host(*val, custom_sandbox_host_program_name.cloned());
         }
         None => {
-            // If run in process flag was not received, then try and run as a mesh host using the argument passed on the command line as the mesh name
-            let mesh_name = std::env::args().nth(1).unwrap_or("".to_string());
-            sandbox_mesh::run_mesh_host(&mesh_name).unwrap();
+            // If run in process flag was not received, then this proogram was probably started as a mesh host
+            // Run the mesh host
+            sandbox_mesh::run_host().expect("Failed to run mesh host");
         }
     }
 }

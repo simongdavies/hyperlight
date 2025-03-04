@@ -19,6 +19,13 @@ pub(crate) struct SandboxMeshHostParameters {
     runner: WorkerHostRunner,
 }
 
+/// Get the mesh name from the command line and run the mesh host.
+pub fn run_host() -> Result<()> {
+    let mesh_name = std::env::args().nth(1).unwrap_or("".to_string());
+    run_mesh_host(&mesh_name)
+}
+
+/// Run the mesh host with the given name.
 pub fn run_mesh_host(name: &str) -> Result<()> {
     try_run_mesh_host(name, |params: SandboxMeshHostParameters| async {
         params.runner.run(RegisteredWorkers).await;

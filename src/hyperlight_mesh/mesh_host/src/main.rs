@@ -7,13 +7,12 @@ fn main() {
         mesh_host_function_registry::MeshHostFunctionRegistry::new();
 
     // Create and register a host function
+    // This version of add adds 10 to the result to make it easy/clear to see that this host function is being called
     let host_function = Arc::new(Mutex::new(|a: i32, b: i32| Ok(a + b + 10)));
     host_function
         .register(&mut mesh_host_function_registry, "Add")
         .unwrap();
 
-    // Join the mesh (Mesh will start this program with the name of the mesh as the first argument)
-
-    let mesh_name = std::env::args().nth(1).unwrap_or("".to_string());
-    sandbox_mesh::run_mesh_host(&mesh_name).unwrap();
+    // Run the mesh host
+    sandbox_mesh::run_host().expect("Failed to run mesh host");
 }
