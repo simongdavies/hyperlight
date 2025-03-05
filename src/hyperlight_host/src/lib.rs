@@ -17,6 +17,7 @@ limitations under the License.
 //! This crate contains an SDK that is used to execute specially-
 // compiled binaries within a very lightweight hypervisor environment.
 
+#![cfg_attr(not(any(test, debug_assertions)), warn(clippy::panic))]
 #![cfg_attr(not(any(test, debug_assertions)), warn(clippy::expect_used))]
 
 use std::sync::Once;
