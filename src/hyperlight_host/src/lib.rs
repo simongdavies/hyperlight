@@ -19,6 +19,7 @@ limitations under the License.
 
 #![cfg_attr(not(any(test, debug_assertions)), warn(clippy::panic))]
 #![cfg_attr(not(any(test, debug_assertions)), warn(clippy::expect_used))]
+#![cfg_attr(not(any(test, debug_assertions)), warn(clippy::unwrap_used))]
 
 use std::sync::Once;
 

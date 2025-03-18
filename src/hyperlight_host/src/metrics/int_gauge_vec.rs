@@ -16,7 +16,7 @@ limitations under the License.
 
 use prometheus::core::{AtomicI64, GenericGaugeVec};
 use prometheus::register_int_gauge_vec_with_registry;
-use tracing::{instrument, Span};
+use tracing::{error, instrument, Span};
 
 use super::{
     get_metric_opts, get_metrics_registry, GetHyperlightMetric, HyperlightMetric,
@@ -44,50 +44,53 @@ impl IntGaugeVec {
     /// Increments a gauge by 1
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub fn inc(&self, label_vals: &[&str]) {
-        self.gauge
-            .get_metric_with_label_values(label_vals)
-            .unwrap()
-            .inc();
+        match self.gauge.get_metric_with_label_values(label_vals) {
+            Ok(gauge) => gauge.inc(),
+            Err(e) => error!("Failed to get metric with label values: {}", e),
+        }
     }
     /// Decrements a gauge by 1
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub fn dec(&self, label_vals: &[&str]) {
-        self.gauge
-            .get_metric_with_label_values(label_vals)
-            .unwrap()
-            .dec();
+        match self.gauge.get_metric_with_label_values(label_vals) {
+            Ok(gauge) => gauge.dec(),
+            Err(e) => error!("Failed to get metric with label values: {}", e),
+        }
     }
     /// Gets the value of a gauge
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub fn get(&self, label_vals: &[&str]) -> i64 {
-        self.gauge
-            .get_metric_with_label_values(label_vals)
-            .unwrap()
-            .get()
+        match self.gauge.get_metric_with_label_values(label_vals) {
+            Ok(gauge) => gauge.get(),
+            Err(e) => {
+                error!("Failed to get metric with label values: {}", e);
+                0
+            }
+        }
     }
     /// Resets a gauge
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub fn set(&self, label_vals: &[&str], val: i64) {
-        self.gauge
-            .get_metric_with_label_values(label_vals)
-            .unwrap()
-            .set(val);
+        match self.gauge.get_metric_with_label_values(label_vals) {
+            Ok(gauge) => gauge.set(val),
+            Err(e) => error!("Failed to get metric with label values: {}", e),
+        }
     }
     /// Adds a value to a gauge
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub fn add(&self, label_vals: &[&str], val: i64) {
-        self.gauge
-            .get_metric_with_label_values(label_vals)
-            .unwrap()
-            .add(val);
+        match self.gauge.get_metric_with_label_values(label_vals) {
+            Ok(gauge) => gauge.add(val),
+            Err(e) => error!("Failed to get metric with label values: {}", e),
+        }
     }
     /// Subtracts a value from a gauge
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub fn sub(&self, label_vals: &[&str], val: i64) {
-        self.gauge
-            .get_metric_with_label_values(label_vals)
-            .unwrap()
-            .sub(val);
+        match self.gauge.get_metric_with_label_values(label_vals) {
+            Ok(gauge) => gauge.sub(val),
+            Err(e) => error!("Failed to get metric with label values: {}", e),
+        }
     }
 }
 

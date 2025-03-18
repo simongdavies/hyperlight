@@ -165,6 +165,8 @@ pub unsafe fn try_load_whv_map_gpa_range2() -> Result<WHvMapGpaRange2Func> {
         return Err(new_error!("{}", e));
     }
 
+    #[allow(clippy::unwrap_used)]
+    // We know this will succeed because we just checked for an error above
     let library = library.unwrap();
 
     let address = unsafe { GetProcAddress(library, s!("WHvMapGpaRange2")) };

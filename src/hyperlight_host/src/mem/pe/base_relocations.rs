@@ -91,6 +91,7 @@ impl<'a> Iterator for BaseRelocations<'a> {
         let word = u16::from_le_bytes(block);
 
         // Shift the word over so that we are only reading a number from the first (most significant) 4 bits
+        #[allow(clippy::unwrap_used)] // this is safe as we are only reading 4 bits from a u16
         let typ = u8::try_from(word >> 12).unwrap();
 
         // Set the first 4 bits to 0 so that we only use the lower 12 bits for the location of the RVA in the PE file

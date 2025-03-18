@@ -54,7 +54,7 @@ impl LoadedLib {
         // arc reference is dropped, but before the destructor is executed. This however
         // is ok, as it means that the old library is not going to be used anymore and
         // we can use it instead.
-        let mut lock = LOADED_LIB.lock().unwrap();
+        let mut lock = LOADED_LIB.lock()?;
         if lock.upgrade().is_some() {
             // An owning copy of the loaded library still exists somewhere,
             // we can't load a new library yet

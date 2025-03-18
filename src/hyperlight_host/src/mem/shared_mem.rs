@@ -885,7 +885,7 @@ impl HostSharedMemory {
         buffer_size: usize,
         data: &[u8],
     ) -> Result<()> {
-        let stack_pointer_rel = self.read::<u64>(buffer_start_offset).unwrap() as usize;
+        let stack_pointer_rel = self.read::<u64>(buffer_start_offset)? as usize;
         let buffer_size_u64: u64 = buffer_size.try_into()?;
 
         if stack_pointer_rel > buffer_size || stack_pointer_rel < 8 {
@@ -953,7 +953,7 @@ impl HostSharedMemory {
 
         // go back 8 bytes to get offset to element on top of stack
         let last_element_offset_rel: usize =
-            self.read::<u64>(last_element_offset_abs - 8).unwrap() as usize;
+            self.read::<u64>(last_element_offset_abs - 8)? as usize;
 
         // make it absolute
         let last_element_offset_abs = last_element_offset_rel + buffer_start_offset;

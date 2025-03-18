@@ -202,6 +202,8 @@ impl MemoryRegionVecBuilder {
             return guest_end - self.guest_base_phys_addr;
         }
 
+        #[allow(clippy::unwrap_used)]
+        // we know this is safe because we check if the regions are empty above
         let last_region = self.regions.last().unwrap();
         let new_region = MemoryRegion {
             guest_region: last_region.guest_region.end..last_region.guest_region.end + size,

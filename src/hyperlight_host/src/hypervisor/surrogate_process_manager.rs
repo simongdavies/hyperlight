@@ -267,14 +267,26 @@ impl Drop for SurrogateProcessManager {
 lazy_static::lazy_static! {
     // see the large comment inside `SurrogateProcessManager` describing
     // our reasoning behind using `lazy_static`.
-    static ref SURROGATE_PROCESSES_MANAGER: SurrogateProcessManager =
-        SurrogateProcessManager::new().unwrap();
+    static ref SURROGATE_PROCESSES_MANAGER: std::result::Result<SurrogateProcessManager, &'static str> =
+        match SurrogateProcessManager::new() {
+            Ok(manager) => Ok(manager),
+            Err(e) => {
+                error!("Failed to create SurrogateProcessManager: {:?}", e);
+                Err("Failed to create SurrogateProcessManager")
+            }
+        };
 }
 
 /// Gets the singleton SurrogateProcessManager. This should be called when a new HyperV on Windows Driver is created.
 #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
 pub(crate) fn get_surrogate_process_manager() -> Result<&'static SurrogateProcessManager> {
-    Ok(&SURROGATE_PROCESSES_MANAGER)
+    match &*SURROGATE_PROCESSES_MANAGER {
+        Ok(manager) => Ok(manager),
+        Err(e) => {
+            error!("Failed to get SurrogateProcessManager: {:?}", e);
+            Err(new_error!("Failed to get SurrogateProcessManager {}", e))
+        }
+    }
 }
 
 // Creates a job object that will terminate all the surrogate processes when the struct instance is dropped.

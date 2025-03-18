@@ -89,7 +89,7 @@ pub(crate) fn get_seccomp_filter_for_host_function_worker_thread(
         allowed_syscalls.into_iter().collect(),
         SeccompAction::Trap,  // non-match syscall will kill the offending thread
         SeccompAction::Allow, // match syscall will be allowed
-        std::env::consts::ARCH.try_into().unwrap(),
+        std::env::consts::ARCH.try_into()?,
     )
     .and_then(|filter| filter.try_into())?)
 }

@@ -246,7 +246,11 @@ impl HypervisorHandler {
         #[cfg(target_os = "windows")]
         let in_process = sandbox_memory_manager.is_in_process();
 
-        *self.execution_variables.shm.try_lock().unwrap() = Some(sandbox_memory_manager);
+        *self
+            .execution_variables
+            .shm
+            .try_lock()
+            .map_err(|e| new_error!("Failed to lock shm: {}", e))? = Some(sandbox_memory_manager);
 
         // Other than running initialization and code execution, the handler thread also handles
         // cancellation. When we need to cancel the execution there are 2 possible cases
@@ -299,13 +303,13 @@ impl HypervisorHandler {
                             HypervisorHandlerAction::Initialise => {
                                 {
                                     hv = Some(set_up_hypervisor_partition(
-                                        execution_variables.shm.try_lock().unwrap().deref_mut().as_mut().unwrap(),
+                                        execution_variables.shm.try_lock().map_err(|e| new_error!("Failed to lock shm: {}", e))?.deref_mut().as_mut().ok_or_else(|| new_error!("shm not set"))?,
                                         configuration.outb_handler.clone(),
                                         #[cfg(gdb)]
                                         &debug_info,
                                     )?);
                                 }
-                                let hv = hv.as_mut().unwrap();
+                                let hv = hv.as_mut().ok_or_else(|| new_error!("Hypervisor not set"))?;
 
                                 #[cfg(target_os = "windows")]
                                 if !in_process {
@@ -386,7 +390,7 @@ impl HypervisorHandler {
                                 }
                             }
                             HypervisorHandlerAction::DispatchCallFromHost(function_name) => {
-                                let hv = hv.as_mut().unwrap();
+                                let hv = hv.as_mut().ok_or_else(|| new_error!("Hypervisor not initialized"))?;
 
                                 // Lock to indicate an action is being performed in the hypervisor
                                 execution_variables.running.store(true, Ordering::SeqCst);
@@ -647,6 +651,8 @@ impl HypervisorHandler {
                         // If the thread has finished, we try to join it and return the error if it has one
                         let res = handle.join();
                         if res.as_ref().is_ok_and(|inner_res| inner_res.is_err()) {
+                            #[allow(clippy::unwrap_used)]
+                            // We know that the thread has finished and that the inner result is an error, so we can safely unwrap the result and the contained err
                             return Err(res.unwrap().unwrap_err());
                         }
                         Err(HyperlightError::HypervisorHandlerMessageReceiveTimedout())
@@ -757,7 +763,7 @@ impl HypervisorHandler {
             if thread_id == u64::MAX {
                 log_then_return!("Failed to get thread id to signal thread");
             }
-            let mut count: i32 = 0;
+            let mut count: u128 = 0;
             // We need to send the signal multiple times in case the thread was between checking if it
             // should be cancelled and entering the run loop
 
@@ -771,7 +777,7 @@ impl HypervisorHandler {
             while !self.execution_variables.run_cancelled.load() {
                 count += 1;
 
-                if count > number_of_iterations.try_into().unwrap() {
+                if count > number_of_iterations {
                     break;
                 }
 
@@ -797,7 +803,8 @@ impl HypervisorHandler {
                 // partition handle only set when running in-hypervisor (not in-process)
                 unsafe {
                     WHvCancelRunVirtualProcessor(
-                        self.execution_variables.get_partition_handle()?.unwrap(), // safe unwrap
+                        #[allow(clippy::unwrap_used)]
+                        self.execution_variables.get_partition_handle()?.unwrap(), // safe unwrap as we checked is some
                         0,
                         0,
                     )

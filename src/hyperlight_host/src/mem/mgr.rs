@@ -300,6 +300,7 @@ where
         if last.is_none() {
             log_then_return!(NoMemorySnapshot);
         }
+        #[allow(clippy::unwrap_used)] // We know that last is not None because we checked it above
         let snapshot = last.unwrap();
         snapshot.restore_from_snapshot(&mut self.shared_mem)
     }
