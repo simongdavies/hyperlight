@@ -76,7 +76,9 @@ where
 
         {
             let dispatch_function_addr = hshm.as_ref().get_pointer_to_dispatch_function()?;
-            assert_ne!(dispatch_function_addr, 0);
+            if dispatch_function_addr == 0 {
+                return Err(new_error!("Dispatch function address is null"));
+            }
             hv_handler.set_dispatch_function_addr(RawPtr::from(dispatch_function_addr))?;
         }
 

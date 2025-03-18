@@ -328,10 +328,13 @@ impl ExclusiveSharedMemory {
             .checked_add(2 * PAGE_SIZE_USIZE) // guard page around the memory
             .ok_or_else(|| new_error!("Memory required for sandbox exceeded usize::MAX"))?;
 
-        assert!(
-            total_size % PAGE_SIZE_USIZE == 0,
-            "shared memory must be a multiple of 4096"
-        );
+        if total_size % PAGE_SIZE_USIZE != 0 {
+            return Err(new_error!(
+                "shared memory must be a multiple of {}",
+                PAGE_SIZE_USIZE
+            ));
+        }
+
         // usize and isize are guaranteed to be the same size, and
         // isize::MAX should be positive, so this cast should be safe.
         if total_size > isize::MAX as usize {

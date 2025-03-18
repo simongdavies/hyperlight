@@ -259,6 +259,7 @@ fn get_histogram_opts(name: &str, help: &str, buckets: Vec<f64>) -> HistogramOpt
     opts.buckets(buckets)
 }
 
+#[allow(clippy::disallowed_macros)]
 /// Provides functionality to help with testing Hyperlight Metrics
 pub mod tests {
     use std::collections::HashSet;
