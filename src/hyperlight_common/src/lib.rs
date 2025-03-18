@@ -14,6 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+#![cfg_attr(not(any(test, debug_assertions)), warn(clippy::panic))]
+#![cfg_attr(not(any(test, debug_assertions)), warn(clippy::expect_used))]
+#![cfg_attr(not(any(test, debug_assertions)), warn(clippy::unwrap_used))]
 // We use Arbitrary during fuzzing, which requires std
 #![cfg_attr(not(feature = "fuzzing"), no_std)]
 
@@ -26,6 +29,7 @@ pub mod flatbuffer_wrappers;
     dead_code,
     unused_imports,
     clippy::all,
+    clippy::unwrap_used,
     unsafe_op_in_unsafe_fn,
     non_camel_case_types
 )]
