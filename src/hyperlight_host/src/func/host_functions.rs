@@ -23,6 +23,52 @@ use super::{ParameterTuple, ResultType, SupportedReturnType};
 use crate::sandbox::{ExtraAllowedSyscall, UninitializedSandbox};
 use crate::{Result, log_then_return, new_error};
 
+/// A sandbox on which (primitive) host functions can be registered
+///
+pub trait Registerable {
+    /// Register a primitive host function
+    fn register_host_function<Args: ParameterTuple, Output: SupportedReturnType>(
+        &mut self,
+        name: &str,
+        hf: impl Into<HostFunction<Output, Args>>,
+    ) -> Result<()>;
+    /// Register a primitive host function whose worker thread has
+    /// extra permissive seccomp filters installed
+    #[cfg(all(feature = "seccomp", target_os = "linux"))]
+    fn register_host_function_with_syscalls<Args: ParameterTuple, Output: SupportedReturnType>(
+        &mut self,
+        name: &str,
+        hf: impl Into<HostFunction<Output, Args>>,
+        eas: Vec<ExtraAllowedSyscall>,
+    ) -> Result<()>;
+}
+impl Registerable for UninitializedSandbox {
+    fn register_host_function<Args: ParameterTuple, Output: SupportedReturnType>(
+        &mut self,
+        name: &str,
+        hf: impl Into<HostFunction<Output, Args>>,
+    ) -> Result<()> {
+        let mut hfs = self
+            .host_funcs
+            .try_lock()
+            .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?;
+        (*hfs).register_host_function(name.to_string(), hf.into().into())
+    }
+    #[cfg(all(feature = "seccomp", target_os = "linux"))]
+    fn register_host_function_with_syscalls<Args: ParameterTuple, Output: SupportedReturnType>(
+        &mut self,
+        name: &str,
+        hf: impl Into<HostFunction<Output, Args>>,
+        eas: Vec<ExtraAllowedSyscall>,
+    ) -> Result<()> {
+        let mut hfs = self
+            .host_funcs
+            .try_lock()
+            .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?;
+        (*hfs).register_host_function_with_syscalls(name.to_string(), hf.into().into(), eas)
+    }
+}
+
 /// A representation of a host function.
 /// This is a thin wrapper around a `Fn(Args) -> Result<Output>`.
 #[derive(Clone)]

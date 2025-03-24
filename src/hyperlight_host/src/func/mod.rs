@@ -38,7 +38,7 @@ pub(crate) mod param_type;
 pub(crate) mod ret_type;
 
 /// Re-export for `HostFunction` trait
-pub use host_functions::HostFunction;
+pub use host_functions::{HostFunction, Registerable};
 /// Re-export for `ParameterValue` enum
 pub use hyperlight_common::flatbuffer_wrappers::function_types::ParameterValue;
 /// Re-export for `ReturnType` enum
