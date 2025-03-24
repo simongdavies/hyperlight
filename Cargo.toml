@@ -11,8 +11,9 @@ members = [
     "src/hyperlight_host",
     "src/hyperlight_guest_capi",
     "src/hyperlight_testing",
-    "fuzz", 
+    "fuzz",
     "src/hyperlight_guest_bin",
+    "src/hyperlight_component_util",
 ]
 # Guests have custom linker flags, so we need to exclude them from the workspace
 exclude = [
@@ -36,6 +37,7 @@ hyperlight-host = { path = "src/hyperlight_host", version = "0.5.1", default-fea
 hyperlight-guest = { path = "src/hyperlight_guest", version = "0.5.1", default-features = false }
 hyperlight-guest-bin = { path = "src/hyperlight_guest_bin", version = "0.5.1", default-features = false }
 hyperlight-testing = { path = "src/hyperlight_testing", default-features = false }
+hyperlight-component-util = { path = "src/hyperlight_component_util" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
