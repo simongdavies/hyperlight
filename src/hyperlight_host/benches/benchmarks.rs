@@ -16,7 +16,9 @@ limitations under the License.
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use hyperlight_host::GuestBinary;
-use hyperlight_host::sandbox::{MultiUseSandbox, SandboxConfiguration, UninitializedSandbox};
+use hyperlight_host::sandbox::{
+    Callable, MultiUseSandbox, SandboxConfiguration, UninitializedSandbox,
+};
 use hyperlight_host::sandbox_state::sandbox::EvolvableSandbox;
 use hyperlight_host::sandbox_state::transition::Noop;
 use hyperlight_testing::simple_guest_as_string;

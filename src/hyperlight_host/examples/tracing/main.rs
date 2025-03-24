@@ -19,6 +19,7 @@ extern crate hyperlight_host;
 use std::sync::{Arc, Barrier};
 use std::thread::{JoinHandle, spawn};
 
+use hyperlight_host::sandbox::Callable;
 use hyperlight_host::sandbox::uninitialized::UninitializedSandbox;
 use hyperlight_host::sandbox_state::sandbox::EvolvableSandbox;
 use hyperlight_host::sandbox_state::transition::Noop;

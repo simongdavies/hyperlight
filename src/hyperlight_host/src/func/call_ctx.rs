@@ -17,6 +17,7 @@ limitations under the License.
 use tracing::{Span, instrument};
 
 use super::{ParameterTuple, SupportedReturnType};
+use crate::sandbox::Callable;
 use crate::{MultiUseSandbox, Result};
 /// A context for calling guest functions.
 ///
@@ -47,35 +48,6 @@ impl MultiUseGuestCallContext {
         Self { sbox }
     }
 
-    /// Call the guest function called `func_name` with the given arguments
-    /// `args`, and expect the return value have the same type as
-    /// `func_ret_type`.
-    ///
-    /// Every call to a guest function through this method will be made with the same "context"
-    /// meaning that the guest state resulting from any previous call will be present/osbservable
-    /// by the guest function called.
-    ///
-    /// If you want  to reset state, call `finish()` on this `MultiUseGuestCallContext`
-    /// and get a new one from the resulting `MultiUseSandbox`
-    #[instrument(err(Debug),skip(self, args),parent = Span::current())]
-    pub fn call<Output: SupportedReturnType>(
-        &mut self,
-        func_name: &str,
-        args: impl ParameterTuple,
-    ) -> Result<Output> {
-        // we are guaranteed to be holding a lock now, since `self` can't
-        // exist without doing so. Since GuestCallContext is effectively
-        // !Send (and !Sync), we also don't need to worry about
-        // synchronization
-
-        let ret = self.sbox.call_guest_function_by_name_no_reset(
-            func_name,
-            Output::TYPE,
-            args.into_value(),
-        );
-        Output::from_value(ret?)
-    }
-
     /// Close out the context and get back the internally-stored
     /// `MultiUseSandbox`. Future contexts opened by the returned sandbox
     /// will have guest state restored.
@@ -100,6 +72,37 @@ impl MultiUseGuestCallContext {
     }
 }
 
+impl Callable for MultiUseGuestCallContext {
+    /// Call the guest function called `func_name` with the given arguments
+    /// `args`, and expect the return value have the same type as
+    /// `func_ret_type`.
+    ///
+    /// Every call to a guest function through this method will be made with the same "context"
+    /// meaning that the guest state resulting from any previous call will be present/osbservable
+    /// by the guest function called.
+    ///
+    /// If you want  to reset state, call `finish()` on this `MultiUseGuestCallContext`
+    /// and get a new one from the resulting `MultiUseSandbox`
+    #[instrument(err(Debug),skip(self, args),parent = Span::current())]
+    fn call<Output: SupportedReturnType>(
+        &mut self,
+        func_name: &str,
+        args: impl ParameterTuple,
+    ) -> Result<Output> {
+        // we are guaranteed to be holding a lock now, since `self` can't
+        // exist without doing so. Since GuestCallContext is effectively
+        // !Send (and !Sync), we also don't need to worry about
+        // synchronization
+
+        let ret = self.sbox.call_guest_function_by_name_no_reset(
+            func_name,
+            Output::TYPE,
+            args.into_value(),
+        );
+        Output::from_value(ret?)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc::sync_channel;
@@ -108,6 +111,7 @@ mod tests {
     use hyperlight_testing::simple_guest_as_string;
 
     use super::MultiUseGuestCallContext;
+    use crate::sandbox::Callable;
     use crate::sandbox_state::sandbox::EvolvableSandbox;
     use crate::sandbox_state::transition::Noop;
     use crate::{GuestBinary, HyperlightError, MultiUseSandbox, Result, UninitializedSandbox};

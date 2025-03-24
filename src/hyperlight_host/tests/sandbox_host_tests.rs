@@ -19,7 +19,7 @@ use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
 
 use common::new_uninit;
-use hyperlight_host::sandbox::SandboxConfiguration;
+use hyperlight_host::sandbox::{Callable, SandboxConfiguration};
 use hyperlight_host::sandbox_state::sandbox::EvolvableSandbox;
 use hyperlight_host::sandbox_state::transition::Noop;
 use hyperlight_host::{
