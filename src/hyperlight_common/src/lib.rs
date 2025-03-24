@@ -39,3 +39,6 @@ pub mod mem;
 
 /// cbindgen:ignore
 pub mod outb;
+
+/// cbindgen:ignore
+pub mod resource;

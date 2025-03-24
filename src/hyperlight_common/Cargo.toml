@@ -20,10 +20,12 @@ anyhow = { version = "1.0.98", default-features = false }
 log = "0.4.27"
 tracing = { version = "0.1.41", optional = true }
 arbitrary = {version = "1.4.1", optional = true, features = ["derive"]}
+spin = "0.9.8"
 
 [features]
 default = ["tracing"]
 fuzzing = ["dep:arbitrary"]
+std = []
 
 [dev-dependencies]
 hyperlight-testing = { workspace = true }
