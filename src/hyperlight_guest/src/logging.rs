@@ -19,6 +19,7 @@ use alloc::vec::Vec;
 
 use hyperlight_common::flatbuffer_wrappers::guest_log_data::GuestLogData;
 use hyperlight_common::flatbuffer_wrappers::guest_log_level::LogLevel;
+use log::LevelFilter;
 
 use crate::host_function_call::{outb, OutBAction};
 use crate::shared_output_data::push_shared_output_data;
@@ -57,4 +58,19 @@ pub fn log_message(
 ) {
     write_log_data(log_level, message, source, caller, source_file, line);
     outb(OutBAction::Log as u16, 0);
+}
+
+
+pub extern "C" fn set_max_log_level(level: u32) {
+    let level = match level {
+        0 => LevelFilter::Off,
+        1 => LevelFilter::Error,
+        2 => LevelFilter::Warn,
+        3 => LevelFilter::Info,
+        4 => LevelFilter::Debug,
+        5 => LevelFilter::Trace,
+        _ => LevelFilter::Off,
+    };
+
+    log::set_max_level(level);
 }

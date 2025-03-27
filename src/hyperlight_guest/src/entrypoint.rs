@@ -18,6 +18,9 @@ use core::arch::asm;
 use core::ffi::{c_char, c_void, CStr};
 use core::ptr::copy_nonoverlapping;
 
+use alloc::string::ToString;
+use alloc::vec::Vec;
+use hyperlight_common::flatbuffer_wrappers::function_types::{ParameterType, ReturnType};
 use hyperlight_common::mem::{HyperlightPEB, RunMode};
 use log::LevelFilter;
 use spin::Once;
@@ -25,9 +28,12 @@ use spin::Once;
 use crate::gdt::load_gdt;
 use crate::guest_error::reset_error;
 use crate::guest_function_call::dispatch_function;
+use crate::guest_function_definition::GuestFunctionDefinition;
+use crate::guest_function_register::register_function;
 use crate::guest_logger::init_logger;
 use crate::host_function_call::{outb, OutBAction};
 use crate::idtr::load_idt;
+use crate::logging::set_max_log_level;
 use crate::{
     __security_cookie, HEAP_ALLOCATOR, MIN_STACK_ADDRESS, OS_PAGE_SIZE, OUTB_PTR,
     OUTB_PTR_WITH_CONTEXT, P_PEB, RUNNING_MODE,
@@ -146,6 +152,16 @@ pub extern "win64" fn entrypoint(peb_address: u64, seed: u64, ops: u64, max_log_
 
             (*peb_ptr).guest_function_dispatch_ptr = dispatch_function as usize as u64;
 
+            // register a function to allow the guest log level to be set/overridden
+
+            let set_max_log_level_def = GuestFunctionDefinition::new(
+                "SetMaxLogLevel".to_string(),
+                Vec::from(&[ParameterType::UInt]),
+                ReturnType::Void,
+                set_max_log_level as usize,
+            );
+            register_function(set_max_log_level_def);
+            
             reset_error();
 
             hyperlight_main();

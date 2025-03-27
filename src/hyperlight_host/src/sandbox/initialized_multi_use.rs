@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 use hyperlight_common::flatbuffer_wrappers::function_types::{
     ParameterValue, ReturnType, ReturnValue,
 };
+use log::LevelFilter;
 use tracing::{instrument, Span};
 
 use super::host_funcs::HostFuncsWrapper;
@@ -153,6 +154,15 @@ impl MultiUseSandbox {
     #[instrument(skip_all, parent = Span::current())]
     pub fn new_call_context(self) -> MultiUseGuestCallContext {
         MultiUseGuestCallContext::start(self)
+    }
+
+    /// Set the max log level for the sandbox.
+    #[instrument(err(Debug), skip(self), parent = Span::current())]
+    pub fn set_max_log_level(&mut self, level: LevelFilter) -> Result<()> {
+        let _ = self.call_guest_function_by_name("SetMaxLogLevel", ReturnType::Void, Some(vec![
+            ParameterValue::UInt(level as u32),
+        ]))?;
+        Ok(())
     }
 
     /// Call a guest function by name, with the given return type and arguments.
