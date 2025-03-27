@@ -485,8 +485,8 @@ fn log_message() {
     log_test_messages();
     assert_eq!(5 + num_fixed_trace_log, LOGGER.num_log_calls());
     // The number of enabled calls is the number of times that the enabled function is called
-    // with a target of "hyperlight-guest"
-    // This should be the same as the number of log calls as all the log calls for the "hyperlight-guest" target should be filtered in
+    // with a target of "hyperlight_guest"
+    // This should be the same as the number of log calls as all the log calls for the "hyperlight_guest" target should be filtered in
     // the guest
     assert_eq!(LOGGER.num_log_calls(), LOGGER.num_enabled_calls());
 
