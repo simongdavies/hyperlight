@@ -14,6 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+use std::str::FromStr;
+
+use log::LevelFilter;
 use tracing::{instrument, Span};
 
 use crate::error::HyperlightError::ExecutionCanceledByHost;
@@ -191,7 +194,43 @@ pub(crate) trait Hypervisor: Debug + Sync + Send {
 
     /// Get the logging level to pass to the guest entrypoint
     fn get_max_log_level(&self) -> u32 {
-        log::max_level() as u32
+        // Check to see if the RUST_LOG environment variable is set
+        // and if so, parse it to get the log_level for hyperlight_guest
+        // if that is not set get the log level for the hyperlight_host
+
+        // This is done as the guest will produce logs based on the log level returned here
+        // producing those logs is expensive and we don't want to do it if the host is not
+        // going to process them
+
+        let val = match std::env::var("RUST_LOG") {
+            Ok(s) => s,
+            Err(_) => String::new(),
+        };
+
+        let level = if val.contains("hyperlight_guest") {
+            val.split(',')
+                .find(|s| s.contains("hyperlight_guest"))
+                .unwrap_or("")
+                .split('=')
+                .nth(1)
+                .unwrap_or("")
+        } else {
+            if val.contains("hyperlight_host") {
+                val.split(',')
+                    .find(|s| s.contains("hyperlight_host"))
+                    .unwrap_or("")
+                    .split('=')
+                    .nth(1)
+                    .unwrap_or("")
+            } else {
+                // look for a value string that does not contain "="
+                val.split(',').find(|s| !s.contains("=")).unwrap_or("")
+            }
+        };
+
+        log::info!("Determined guest log level: {}", level);
+        // Convert the log level string to a LevelFilter
+        LevelFilter::from_str(level).unwrap_or(log::max_level()) as u32
     }
 
     /// get a mutable trait object from self
