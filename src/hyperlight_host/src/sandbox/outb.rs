@@ -88,7 +88,7 @@ pub(super) fn outb_log(mgr: &mut SandboxMemoryManager<HostSharedMemory>) -> Resu
             &Record::builder()
                 .args(format_args!("{}", log_data.message))
                 .level(record_level)
-                .target("hyperlight-guest")
+                .target("hyperlight_guest")
                 .file(source_file)
                 .line(line)
                 .module_path(source)
@@ -100,7 +100,7 @@ pub(super) fn outb_log(mgr: &mut SandboxMemoryManager<HostSharedMemory>) -> Resu
             &Record::builder()
                 .args(format_args!("{}", log_data.message))
                 .level(record_level)
-                .target("hyperlight-guest")
+                .target("hyperlight_guest")
                 .file(Some(&log_data.source_file))
                 .line(Some(log_data.line))
                 .module_path(Some(&log_data.source))
@@ -442,7 +442,7 @@ mod tests {
                         test_value_as_str(metadata_values_map, "level", expected_level);
                         test_value_as_str(event_values_map, "log.file", "test source file");
                         test_value_as_str(event_values_map, "log.module_path", "test source");
-                        test_value_as_str(event_values_map, "log.target", "hyperlight-guest");
+                        test_value_as_str(event_values_map, "log.target", "hyperlight_guest");
                         count_matching_events += 1;
                     }
                     assert!(
