@@ -19,6 +19,7 @@ use std::io::{IsTerminal, Write};
 use hyperlight_common::flatbuffer_wrappers::function_types::{ParameterValue, ReturnValue};
 use hyperlight_common::flatbuffer_wrappers::host_function_definition::HostFunctionDefinition;
 use hyperlight_common::flatbuffer_wrappers::host_function_details::HostFunctionDetails;
+use log::info;
 use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
 use tracing::{instrument, Span};
 
@@ -203,6 +204,8 @@ fn call_host_func_impl(
             let host_funcs_cloned = host_funcs.clone();
             let name_cloned = name.to_string();
             let args_cloned = args.clone();
+
+            info!("Calling host function: {} in a seccomp protected thread", name.to_string());
 
             // Create a new thread when seccomp is enabled on Linux
             let join_handle = std::thread::Builder::new()
