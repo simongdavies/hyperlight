@@ -20,6 +20,7 @@ use std::fmt::{Debug, Formatter};
 use std::string::String;
 
 use hyperlight_common::mem::PAGE_SIZE_USIZE;
+use log::LevelFilter;
 use tracing::{instrument, Span};
 use windows::Win32::System::Hypervisor::{
     WHvX64RegisterCr0, WHvX64RegisterCr3, WHvX64RegisterCr4, WHvX64RegisterCs, WHvX64RegisterEfer,
@@ -307,8 +308,14 @@ impl Hypervisor for HypervWindowsDriver {
         outb_hdl: OutBHandlerWrapper,
         mem_access_hdl: MemAccessHandlerWrapper,
         hv_handler: Option<HypervisorHandler>,
+        max_guest_log_level: Option<LevelFilter>,
         #[cfg(gdb)] dbg_mem_access_hdl: DbgMemAccessHandlerWrapper,
     ) -> Result<()> {
+        let max_guest_log_level: u64 = match max_guest_log_level {
+            Some(level) => level as u64,
+            None => self.get_max_log_level().into(),
+        };
+
         let regs = WHvGeneralRegisters {
             rip: self.entrypoint,
             rsp: self.orig_rsp.absolute()?,
@@ -317,7 +324,7 @@ impl Hypervisor for HypervWindowsDriver {
             rcx: peb_address.into(),
             rdx: seed,
             r8: page_size.into(),
-            r9: self.get_max_log_level().into(),
+            r9: max_guest_log_level,
             rflags: 1 << 1, // eflags bit index 1 is reserved and always needs to be 1
 
             ..Default::default()

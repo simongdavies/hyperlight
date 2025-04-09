@@ -17,6 +17,7 @@ limitations under the License.
 use core::time::Duration;
 use std::sync::{Arc, Mutex};
 
+use log::LevelFilter;
 use rand::Rng;
 use tracing::{instrument, Span};
 
@@ -70,6 +71,7 @@ where
             u_sbox.max_initialization_time,
             u_sbox.max_execution_time,
             u_sbox.max_wait_for_cancellation,
+            u_sbox.max_guest_log_level,
             #[cfg(gdb)]
             u_sbox.debug_info,
         )?;
@@ -99,6 +101,7 @@ pub(super) fn evolve_impl_multi_use(u_sbox: UninitializedSandbox) -> Result<Mult
 }
 
 #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
+#[allow(clippy::too_many_arguments)]
 fn hv_init(
     hshm: &MemMgrWrapper<HostSharedMemory>,
     gshm: SandboxMemoryManager<GuestSharedMemory>,
@@ -106,6 +109,7 @@ fn hv_init(
     max_init_time: Duration,
     max_exec_time: Duration,
     max_wait_for_cancellation: Duration,
+    max_guest_log_level: Option<LevelFilter>,
     #[cfg(gdb)] debug_info: Option<DebugInfo>,
 ) -> Result<HypervisorHandler> {
     let outb_hdl = outb_handler_wrapper(hshm.clone(), host_funcs);
@@ -134,6 +138,7 @@ fn hv_init(
         max_init_time,
         max_exec_time,
         max_wait_for_cancellation,
+        max_guest_log_level,
     };
     // Note: `dispatch_function_addr` is set by the Hyperlight guest library, and so it isn't in
     // shared memory at this point in time. We will set it after the execution of `hv_init`.

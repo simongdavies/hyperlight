@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 use kvm_bindings::{kvm_fpu, kvm_regs, kvm_userspace_memory_region, KVM_MEM_READONLY};
 use kvm_ioctls::Cap::UserMemory;
 use kvm_ioctls::{Kvm, VcpuExit, VcpuFd, VmFd};
+use log::LevelFilter;
 use tracing::{instrument, Span};
 
 use super::fpu::{FP_CONTROL_WORD_DEFAULT, FP_TAG_WORD_DEFAULT, MXCSR_DEFAULT};
@@ -406,8 +407,14 @@ impl Hypervisor for KVMDriver {
         outb_hdl: OutBHandlerWrapper,
         mem_access_hdl: MemAccessHandlerWrapper,
         hv_handler: Option<HypervisorHandler>,
+        max_guest_log_level: Option<LevelFilter>,
         #[cfg(gdb)] dbg_mem_access_fn: DbgMemAccessHandlerWrapper,
     ) -> Result<()> {
+        let max_guest_log_level: u64 = match max_guest_log_level {
+            Some(level) => level as u64,
+            None => self.get_max_log_level().into(),
+        };
+
         let regs = kvm_regs {
             rip: self.entrypoint,
             rsp: self.orig_rsp.absolute()?,
@@ -416,7 +423,7 @@ impl Hypervisor for KVMDriver {
             rcx: peb_addr.into(),
             rdx: seed,
             r8: page_size.into(),
-            r9: self.get_max_log_level().into(),
+            r9: max_guest_log_level,
 
             ..Default::default()
         };
