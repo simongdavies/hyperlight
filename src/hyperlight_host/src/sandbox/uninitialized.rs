@@ -20,6 +20,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use log::LevelFilter;
 use tracing::{instrument, Span};
 
 #[cfg(gdb)]
@@ -54,6 +55,7 @@ pub struct UninitializedSandbox {
     pub(crate) max_initialization_time: Duration,
     pub(crate) max_execution_time: Duration,
     pub(crate) max_wait_for_cancellation: Duration,
+    pub(crate) max_guest_log_level: Option<LevelFilter>,
     #[cfg(gdb)]
     pub(crate) debug_info: Option<DebugInfo>,
 }
@@ -195,6 +197,7 @@ impl UninitializedSandbox {
             max_wait_for_cancellation: Duration::from_millis(
                 sandbox_cfg.get_max_wait_for_cancellation() as u64,
             ),
+            max_guest_log_level: None,
             #[cfg(gdb)]
             debug_info,
         };
@@ -298,6 +301,13 @@ impl UninitializedSandbox {
         } else {
             SandboxMemoryManager::load_guest_binary_into_memory(cfg, &mut exe_info, inprocess)
         }
+    }
+
+    /// Set the max log level to be used by the guest.
+    /// If this is not set then the log level will be determined by parsing the RUST_LOG environment variable.
+    /// If the RUST_LOG environment variable is not set then the max log level will be set to `LevelFilter::Error`.
+    pub fn set_max_guest_log_level(&mut self, log_level: LevelFilter) {
+        self.max_guest_log_level = Some(log_level);
     }
 }
 // Check to see if the current version of Windows is supported

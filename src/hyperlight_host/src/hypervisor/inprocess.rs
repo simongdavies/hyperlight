@@ -17,6 +17,8 @@ limitations under the License.
 use std::fmt::Debug;
 use std::os::raw::c_void;
 
+use log::LevelFilter;
+
 #[cfg(gdb)]
 use super::handlers::DbgMemAccessHandlerWrapper;
 use super::{HyperlightExit, Hypervisor};
@@ -75,6 +77,7 @@ impl<'a> Hypervisor for InprocessDriver<'a> {
         _outb_handle_fn: super::handlers::OutBHandlerWrapper,
         _mem_access_fn: super::handlers::MemAccessHandlerWrapper,
         _hv_handler: Option<super::hypervisor_handler::HypervisorHandler>,
+        _guest_max_log_level: Option<LevelFilter>,
         #[cfg(gdb)] _dbg_mem_access_fn: DbgMemAccessHandlerWrapper,
     ) -> crate::Result<()> {
         let entrypoint_fn: extern "win64" fn(u64, u64, u64, u64) =

@@ -28,7 +28,7 @@ use crossbeam::atomic::AtomicCell;
 use crossbeam_channel::{Receiver, Sender};
 #[cfg(target_os = "linux")]
 use libc::{pthread_kill, pthread_self, ESRCH};
-use log::{error, info};
+use log::{error, info, LevelFilter};
 use tracing::{instrument, Span};
 #[cfg(target_os = "linux")]
 use vmm_sys_util::signal::SIGRTMIN;
@@ -191,6 +191,7 @@ pub(crate) struct HvHandlerConfig {
     pub(crate) outb_handler: OutBHandlerWrapper,
     pub(crate) mem_access_handler: MemAccessHandlerWrapper,
     pub(crate) max_wait_for_cancellation: Duration,
+    pub(crate) max_guest_log_level: Option<LevelFilter>,
     #[cfg(gdb)]
     pub(crate) dbg_mem_access_handler: DbgMemAccessHandlerWrapper,
 }
@@ -360,6 +361,7 @@ impl HypervisorHandler {
                                     configuration.outb_handler.clone(),
                                     configuration.mem_access_handler.clone(),
                                     Some(hv_handler_clone.clone()),
+                                    configuration.max_guest_log_level,
                                     #[cfg(gdb)]
                                     configuration.dbg_mem_access_handler.clone(),
                                 );
