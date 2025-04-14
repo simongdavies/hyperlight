@@ -111,9 +111,19 @@ echo "$dependabot_prs" | jq -c '.[]' | while read -r pr; do
     fi
     
     if [ "$has_pending_checks" = true ] || [ "$all_checks_pass" = true ]; then
-        echo "  ✅ Adding merge comment to PR #$pr_number"
-        gh pr comment "$pr_number" -R "$REPO" -b "@dependabot merge"
-        echo "  ✅ Merge command issued for PR #$pr_number"
+        # Check if PR is up-to-date with base branch
+        merge_status=$(gh pr view "$pr_number" -R "$REPO" --json mergeStateStatus -q '.mergeStateStatus')
+        
+        if [ "$merge_status" != "CLEAN" ]; then
+            echo "  ⚠️ PR #$pr_number is not up to date (status: $merge_status)"
+        else
+            echo "  ✅ PR #$pr_number is up to date with base branch"
+        fi
+        
+        # Enable auto-merge with squash strategy
+        echo "  ✅ Enabling auto-merge (squash strategy) for PR #$pr_number"
+        gh pr merge "$pr_number" -R "$REPO" --auto --squash
+        echo "  ✅ Auto-merge enabled for PR #$pr_number"
     fi
     
 done
