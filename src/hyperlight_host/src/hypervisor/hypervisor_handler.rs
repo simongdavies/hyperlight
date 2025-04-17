@@ -37,8 +37,6 @@ use windows::Win32::System::Hypervisor::{WHvCancelRunVirtualProcessor, WHV_PARTI
 
 #[cfg(gdb)]
 use super::gdb::create_gdb_thread;
-#[cfg(feature = "function_call_metrics")]
-use crate::histogram_vec_observe;
 #[cfg(gdb)]
 use crate::hypervisor::handlers::DbgMemAccessHandlerWrapper;
 use crate::hypervisor::handlers::{MemAccessHandlerWrapper, OutBHandlerWrapper};
@@ -53,8 +51,6 @@ use crate::mem::shared_mem::{GuestSharedMemory, HostSharedMemory, SharedMemory};
 #[cfg(gdb)]
 use crate::sandbox::config::DebugInfo;
 use crate::sandbox::hypervisor::{get_available_hypervisor, HypervisorType};
-#[cfg(feature = "function_call_metrics")]
-use crate::sandbox::metrics::SandboxMetric::GuestFunctionCallDurationMicroseconds;
 #[cfg(target_os = "linux")]
 use crate::signal_handlers::setup_signal_handlers;
 use crate::HyperlightError::{
@@ -435,38 +431,22 @@ impl HypervisorHandler {
                                     })?
                                     .shared_mem
                                     .lock
-                                    .try_read();
+                                        .try_read();
 
-                                let res = {
-                                    #[cfg(feature = "function_call_metrics")]
-                                    {
-                                        let start = std::time::Instant::now();
-                                        let result = hv.dispatch_call_from_host(
+                                let res = crate::metrics::maybe_time_and_emit_guest_call(
+                                    &function_name,
+                                    || {
+                                        hv.dispatch_call_from_host(
                                             dispatch_function_addr,
                                             configuration.outb_handler.clone(),
                                             configuration.mem_access_handler.clone(),
                                             Some(hv_handler_clone.clone()),
                                             #[cfg(gdb)]
                                             configuration.dbg_mem_access_handler.clone(),
-                                        );
-                                        histogram_vec_observe!(
-                                            &GuestFunctionCallDurationMicroseconds,
-                                            &[function_name.as_str()],
-                                            start.elapsed().as_micros() as f64
-                                        );
-                                        result
-                                    }
+                                        )
+                                    },
+                                );
 
-                                    #[cfg(not(feature = "function_call_metrics"))]
-                                    hv.dispatch_call_from_host(
-                                        dispatch_function_addr,
-                                        configuration.outb_handler.clone(),
-                                        configuration.mem_access_handler.clone(),
-                                        Some(hv_handler_clone.clone()),
-                                        #[cfg(gdb)]
-                                        configuration.dbg_mem_access_handler.clone(),
-                                    )
-                                };
                                 drop(mem_lock_guard);
                                 drop(evar_lock_guard);
 

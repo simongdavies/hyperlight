@@ -181,20 +181,7 @@ fn call_host_func_impl(
             seccompiler::apply_filter(&seccomp_filter)?;
         }
 
-        #[cfg(feature = "function_call_metrics")]
-        {
-            let start = std::time::Instant::now();
-            let result = func.call(args.clone());
-            crate::histogram_vec_observe!(
-                &crate::sandbox::metrics::SandboxMetric::HostFunctionCallsDurationMicroseconds,
-                &[name],
-                start.elapsed().as_micros() as f64
-            );
-            result
-        }
-
-        #[cfg(not(feature = "function_call_metrics"))]
-        func.call(args)
+        crate::metrics::maybe_time_and_emit_host_call(name, || func.call(args))
     }
 
     cfg_if::cfg_if! {
