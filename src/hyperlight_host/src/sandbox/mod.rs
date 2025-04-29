@@ -71,9 +71,39 @@ use crate::mem::shared_mem::HostSharedMemory;
 // In that case, the sandbox will be in process, we plan on making this a dev only feature and fixing up Linux support
 // so we should review the need for this function at that time.
 
-/// Determine if this is a supported platform for Hyperlight
+/// Determines if the current platform is supported by Hyperlight.
 ///
-/// Returns a boolean indicating whether this is a supported platform.
+/// This function checks whether the current operating system is officially supported by
+/// Hyperlight. Currently, Hyperlight supports Windows and Linux platforms, but may have
+/// specific requirements for each (such as Windows version or Linux kernel version).
+///
+/// # Returns
+///
+/// * `true` - If the current platform is officially supported by Hyperlight
+/// * `false` - If the current platform is not supported
+///
+/// # Platform Support
+///
+/// - Windows: Supported (requires Windows 11 or Windows Server 2022 or newer for hypervisor mode)
+/// - Linux: Supported
+/// - Other platforms: Not currently supported
+///
+/// # Example
+///
+/// ```
+/// use hyperlight_host::sandbox::is_supported_platform;
+///
+/// if is_supported_platform() {
+///     println!("This platform is supported by Hyperlight");
+/// } else {
+///     println!("This platform is not supported by Hyperlight");
+/// }
+/// ```
+///
+/// # Note
+///
+/// Even on supported platforms, you should also check `is_hypervisor_present()`
+/// to determine if the hypervisor features are available.
 #[instrument(skip_all, parent = Span::current())]
 pub fn is_supported_platform() -> bool {
     #[cfg(not(target_os = "linux"))]
@@ -129,10 +159,44 @@ impl PartialEq for FunctionsMap {
 
 impl Eq for FunctionsMap {}
 
-/// Determine whether a suitable hypervisor is available to run
-/// this sandbox.
+/// Determines whether a suitable hypervisor is available to run sandboxed code.
 ///
-//  Returns a boolean indicating whether a suitable hypervisor is present.
+/// This function checks if the host system has a compatible hypervisor available that 
+/// Hyperlight can use to run guest code in a hardware-isolated environment. The availability
+/// depends on both the platform and the specific hypervisor technology supported.
+///
+/// # Returns
+///
+/// * `true` - If a compatible hypervisor is available (e.g., KVM on Linux, WHP on Windows)
+/// * `false` - If no compatible hypervisor is available
+///
+/// # Hypervisor Support
+///
+/// - Windows: Requires Windows Hypervisor Platform (WHP), available on Windows 11 or 
+///   Windows Server 2022 or newer
+/// - Linux: Requires KVM or MSHV, which depends on CPU virtualization support and 
+///   kernel configuration
+///
+/// # Example
+///
+/// ```
+/// use hyperlight_host::sandbox::{is_supported_platform, is_hypervisor_present};
+///
+/// if is_supported_platform() {
+///     if is_hypervisor_present() {
+///         println!("Hypervisor mode available");
+///     } else {
+///         println!("Platform supported but hypervisor not available, will use in-process mode");
+///     }
+/// } else {
+///     println!("Platform not supported");
+/// }
+/// ```
+///
+/// # Note
+///
+/// Even if a hypervisor is not present, Hyperlight can still run in "in-process" mode on
+/// supported platforms, which provides a development experience without hardware isolation.
 #[instrument(skip_all, parent = Span::current())]
 pub fn is_hypervisor_present() -> bool {
     hypervisor::get_available_hypervisor().is_some()

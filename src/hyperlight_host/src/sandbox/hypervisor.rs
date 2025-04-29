@@ -24,6 +24,41 @@ use crate::hypervisor::kvm;
 
 static AVAILABLE_HYPERVISOR: OnceLock<Option<HypervisorType>> = OnceLock::new();
 
+/// Retrieves information about the available hypervisor on the current system.
+///
+/// This function checks which hypervisor technology is available on the current system and
+/// returns a reference to a static Option containing the hypervisor type if one is available.
+/// The result is cached after the first call for efficiency.
+///
+/// # Returns
+///
+/// A reference to a static Option that contains:
+/// * `Some(HypervisorType)` - If a compatible hypervisor is available
+/// * `None` - If no compatible hypervisor is available
+///
+/// # Supported Hypervisors
+///
+/// Depending on the platform and compilation features, this may check for:
+/// - KVM (Linux) - When compiled with the `kvm` feature
+/// - MSHV (Linux) - When compiled with the `mshv` feature
+/// - Windows Hypervisor Platform (Windows) - On Windows platforms
+///
+/// # Example (internal usage)
+///
+/// ```no_run
+/// use hyperlight_host::sandbox::hypervisor::get_available_hypervisor;
+///
+/// let hypervisor = get_available_hypervisor();
+/// match hypervisor {
+///     Some(_) => println!("A hypervisor is available"),
+///     None => println!("No hypervisor is available, using in-process mode"),
+/// }
+/// ```
+///
+/// # Note
+///
+/// This is primarily an internal function used by `is_hypervisor_present()` and other
+/// parts of the Hyperlight runtime to determine hypervisor availability.
 pub fn get_available_hypervisor() -> &'static Option<HypervisorType> {
     AVAILABLE_HYPERVISOR.get_or_init(|| {
         cfg_if::cfg_if! {
@@ -65,7 +100,17 @@ pub fn get_available_hypervisor() -> &'static Option<HypervisorType> {
     })
 }
 
-/// The hypervisor types available for the current platform
+/// Represents the available hypervisor technologies supported by Hyperlight.
+///
+/// This enum identifies which specific hypervisor implementation is being used
+/// by the Hyperlight runtime to provide hardware isolation. The available options
+/// depend on the platform and compile-time features.
+///
+/// # Variants
+///
+/// * `Kvm` - Kernel-based Virtual Machine (available on Linux with KVM support)
+/// * `Mshv` - Microsoft Hypervisor (available on Linux with MSHV support)
+/// * `Whp` - Windows Hypervisor Platform (available on Windows 11+ or Windows Server 2022+)
 #[derive(PartialEq, Eq, Debug)]
 pub(crate) enum HypervisorType {
     #[cfg(kvm)]

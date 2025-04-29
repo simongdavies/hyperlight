@@ -39,11 +39,72 @@ thread_local!(
 );
 
 impl TracingSubscriber {
+    /// Creates a new TracingSubscriber with the specified trace level.
+    /// 
+    /// The trace level determines which spans and events will be captured by this subscriber.
+    /// Only spans and events with a level equal to or more severe than the specified level 
+    /// will be recorded.
+    /// 
+    /// # Parameters
+    /// 
+    /// * `trace_level` - The minimum severity level to capture
+    /// 
+    /// # Returns
+    /// 
+    /// A new `TracingSubscriber` configured to the specified trace level
+    /// 
+    /// # Example
+    /// 
+    /// ```
+    /// use hyperlight_testing::tracing_subscriber::TracingSubscriber;
+    /// use tracing::Level;
+    /// use tracing_core::Subscriber;
+    /// 
+    /// // Create a subscriber that captures Info level and above
+    /// let subscriber = TracingSubscriber::new(Level::INFO);
+    /// 
+    /// // Use the subscriber in a tracing context
+    /// tracing::subscriber::with_default(subscriber, || {
+    ///     // Traced code here
+    /// });
+    /// ```
     pub fn new(trace_level: Level) -> Self {
         LEVEL_FILTER.with(|level_filter| *level_filter.borrow_mut() = trace_level.into());
         Self {}
     }
 
+    /// Retrieves the metadata for a span with the given ID.
+    /// 
+    /// Span metadata contains information about the span's name, target, level, etc.
+    /// 
+    /// # Parameters
+    /// 
+    /// * `id` - The ID of the span to retrieve metadata for
+    /// 
+    /// # Returns
+    /// 
+    /// A reference to the static `Metadata` for the specified span
+    /// 
+    /// # Panics
+    /// 
+    /// This function will panic if no span with the given ID exists
+    /// 
+    /// # Example
+    /// 
+    /// ```
+    /// use hyperlight_testing::tracing_subscriber::TracingSubscriber;
+    /// use tracing::Level;
+    /// use tracing_core::Subscriber;
+    /// 
+    /// let subscriber = TracingSubscriber::new(Level::INFO);
+    /// 
+    /// tracing::subscriber::with_default(subscriber.clone(), || {
+    ///     let span = tracing::info_span!("test_span").entered();
+    ///     // The first span created will have ID 1
+    ///     let metadata = subscriber.get_span_metadata(1);
+    ///     assert_eq!(metadata.name(), "test_span");
+    /// });
+    /// ```
     pub fn get_span_metadata(&self, id: u64) -> &'static Metadata<'static> {
         SPAN_METADATA.with(
             |span_metadata: &RefCell<HashMap<u64, &Metadata<'static>>>| -> &Metadata<'static> {
@@ -55,6 +116,37 @@ impl TracingSubscriber {
         )
     }
 
+    /// Retrieves the JSON representation of a span with the given ID.
+    /// 
+    /// # Parameters
+    /// 
+    /// * `id` - The ID of the span to retrieve
+    /// 
+    /// # Returns
+    /// 
+    /// A `Value` containing the JSON representation of the span
+    /// 
+    /// # Panics
+    /// 
+    /// This function will panic if no span with the given ID exists
+    /// 
+    /// # Example
+    /// 
+    /// ```
+    /// use hyperlight_testing::tracing_subscriber::TracingSubscriber;
+    /// use tracing::Level;
+    /// use tracing_core::Subscriber;
+    /// 
+    /// let subscriber = TracingSubscriber::new(Level::INFO);
+    /// 
+    /// tracing::subscriber::with_default(subscriber.clone(), || {
+    ///     let span = tracing::info_span!("test_span", value = 42).entered();
+    ///     // The first span created will have ID 1
+    ///     let span_json = subscriber.get_span(1);
+    ///     // Now we can analyze the span data
+    ///     // span_json will contain the span's ID, attributes, etc.
+    /// });
+    /// ```
     pub fn get_span(&self, id: u64) -> Value {
         SPANS.with(|spans| {
             spans
@@ -65,10 +157,63 @@ impl TracingSubscriber {
         })
     }
 
+    /// Retrieves all events captured by this subscriber.
+    /// 
+    /// # Returns
+    /// 
+    /// A vector of `Value` objects, each containing the JSON representation of an event
+    /// 
+    /// # Example
+    /// 
+    /// ```
+    /// use hyperlight_testing::tracing_subscriber::TracingSubscriber;
+    /// use tracing::Level;
+    /// use tracing_core::Subscriber;
+    /// 
+    /// let subscriber = TracingSubscriber::new(Level::INFO);
+    /// 
+    /// tracing::subscriber::with_default(subscriber.clone(), || {
+    ///     tracing::info!("Event 1");
+    ///     tracing::error!("Event 2");
+    ///     
+    ///     let events = subscriber.get_events();
+    ///     assert_eq!(events.len(), 2);
+    /// });
+    /// ```
     pub fn get_events(&self) -> Vec<Value> {
         EVENTS.with(|events| events.borrow().clone())
     }
 
+    /// Processes the captured trace records with a provided function and then clears the events.
+    /// 
+    /// This is a convenient way to examine all captured spans and events in a single call.
+    /// 
+    /// # Parameters
+    /// 
+    /// * `f` - A function that takes references to the spans and events collections
+    /// 
+    /// # Example
+    /// 
+    /// ```
+    /// use hyperlight_testing::tracing_subscriber::TracingSubscriber;
+    /// use tracing::Level;
+    /// use tracing_core::Subscriber;
+    /// 
+    /// let subscriber = TracingSubscriber::new(Level::INFO);
+    /// 
+    /// tracing::subscriber::with_default(subscriber.clone(), || {
+    ///     let span = tracing::info_span!("test_span").entered();
+    ///     tracing::info!("Test event");
+    ///     
+    ///     subscriber.test_trace_records(|spans, events| {
+    ///         assert_eq!(spans.len(), 1);
+    ///         assert_eq!(events.len(), 1);
+    ///     });
+    ///     
+    ///     // Events are cleared after the call
+    ///     assert_eq!(subscriber.get_events().len(), 0);
+    /// });
+    /// ```
     pub fn test_trace_records<F: Fn(&HashMap<u64, Value>, &Vec<Value>)>(&self, f: F) {
         SPANS.with(|spans| {
             EVENTS.with(|events| {
@@ -78,6 +223,30 @@ impl TracingSubscriber {
         });
     }
 
+    /// Clears all captured spans and events, resetting the subscriber state.
+    /// 
+    /// This is useful for setting up a clean state before capturing traces for a specific test.
+    /// 
+    /// # Example
+    /// 
+    /// ```
+    /// use hyperlight_testing::tracing_subscriber::TracingSubscriber;
+    /// use tracing::Level;
+    /// use tracing_core::Subscriber;
+    /// 
+    /// let subscriber = TracingSubscriber::new(Level::INFO);
+    /// 
+    /// tracing::subscriber::with_default(subscriber.clone(), || {
+    ///     // Generate some spans and events
+    ///     tracing::info!("Test event");
+    ///     
+    ///     // Clear everything before the actual test
+    ///     subscriber.clear();
+    ///     
+    ///     // Now we have a clean state
+    ///     assert_eq!(subscriber.get_events().len(), 0);
+    /// });
+    /// ```
     pub fn clear(&self) {
         SPANS.with(|spans| spans.borrow_mut().clear());
         EVENTS.with(|events| events.borrow_mut().clear());

@@ -185,7 +185,7 @@ unsafe impl Send for GuestSharedMemory {}
 ///
 /// Unfortunately, there appears to be no way to do this with defined
 /// behaviour in present Rust (see
-/// e.g. https://github.com/rust-lang/unsafe-code-guidelines/issues/152).
+/// e.g. <https://github.com/rust-lang/unsafe-code-guidelines/issues/152>).
 /// Rust does not yet have its own defined memory model, but in the
 /// interim, it is widely treated as inheriting the current C/C++
 /// memory models.  The most immediate problem is that regardless of
@@ -291,12 +291,12 @@ unsafe impl Send for GuestSharedMemory {}
 /// fence on a vmenter/vmexit between data being read and written.
 /// This is unsafe (not guaranteed in the type system)!
 ///
-/// [1] N3047 C23 Working Draft. https://www.open-std.org/jtc1/sc22/wg14/www/docs/n3047.pdf
-/// [2] N4950 C++23 Working Draft. https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2023/n4950.pdf
-/// [3] LLVM Language Reference Manual, Memory Model for Concurrent Operations. https://llvm.org/docs/LangRef.html#memmodel
-/// [4] P1152R0: Deprecating `volatile`. JF Bastien. https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2018/p1152r0.html
-/// [5] P1382R1: `volatile_load<T>` and `volatile_store<T>`. JF Bastien, Paul McKenney, Jeffrey Yasskin, and the indefatigable TBD. https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/p1382r1.pdf
-/// [6] Documentation for std::sync::atomic::fence. https://doc.rust-lang.org/std/sync/atomic/fn.fence.html
+/// [1] N3047 C23 Working Draft. <https://www.open-std.org/jtc1/sc22/wg14/www/docs/n3047.pdf>
+/// [2] N4950 C++23 Working Draft. <https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2023/n4950.pdf>
+/// [3] LLVM Language Reference Manual, Memory Model for Concurrent Operations. <https://llvm.org/docs/LangRef.html#memmodel>
+/// [4] P1152R0: Deprecating `volatile`. JF Bastien. <https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2018/p1152r0.html>
+/// [5] P1382R1: `volatile_load<T>` and `volatile_store<T>`. JF Bastien, Paul McKenney, Jeffrey Yasskin, and the indefatigable TBD. <https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/p1382r1.pdf>
+/// [6] Documentation for std::sync::atomic::fence. <https://doc.rust-lang.org/std/sync/atomic/fn.fence.html>
 #[derive(Clone, Debug)]
 pub struct HostSharedMemory {
     region: Arc<HostMapping>,

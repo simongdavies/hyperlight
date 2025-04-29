@@ -112,13 +112,74 @@ pub enum GuestBinary {
 }
 
 impl UninitializedSandbox {
-    /// Create a new sandbox configured to run the binary at path
-    /// `bin_path`.
+    /// Creates a new uninitialized sandbox configured to run the specified guest binary.
     ///
-    /// The instrument attribute is used to generate tracing spans and also to emit an error should the Result be an error.
-    /// The skip attribute is used to skip the guest binary from being printed in the tracing span.
-    /// The name attribute is used to name the tracing span.
-    /// The err attribute is used to emit an error should the Result be an error, it uses the std::`fmt::Debug trait` to print the error.
+    /// This method sets up the foundation for executing guest code in a sandboxed environment.
+    /// It loads the guest binary, configures the memory layout, and registers essential host
+    /// functions like `HostPrint`. After creating the sandbox, you should register any
+    /// additional host functions needed by the guest, then call `evolve()` to transform it
+    /// into a usable `MultiUseSandbox`.
+    ///
+    /// # Parameters
+    ///
+    /// * `guest_binary` - The guest binary to load, either as a file path or a buffer
+    /// * `cfg` - Optional sandbox configuration (memory sizes, timeouts, etc.). If None, defaults are used
+    /// * `sandbox_run_options` - Optional settings for how to run the sandbox (e.g., in-process mode)
+    /// * `host_print_writer` - Optional custom function for handling output from the guest
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(UninitializedSandbox)` - A new uninitialized sandbox ready for host function registration
+    /// * `Err` - If the sandbox couldn't be created (e.g., guest binary not found, unsupported platform)
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use hyperlight_host::sandbox::uninitialized::{UninitializedSandbox, GuestBinary};
+    /// use hyperlight_host::sandbox::SandboxConfiguration;
+    /// use hyperlight_host::sandbox_state::sandbox::EvolvableSandbox;
+    /// use hyperlight_host::sandbox_state::transition::Noop;
+    ///
+    /// // Create a sandbox with default configuration
+    /// let sandbox = UninitializedSandbox::new(
+    ///     GuestBinary::FilePath("path/to/guest".to_string()),
+    ///     None,
+    ///     None,
+    ///     None
+    /// ).unwrap();
+    ///
+    /// // Evolve the uninitialized sandbox into a usable MultiUseSandbox
+    /// let usable_sandbox = sandbox.evolve(Noop::default()).unwrap();
+    /// ```
+    ///
+    /// # Custom Host Print Example
+    ///
+    /// ```no_run
+    /// use hyperlight_host::sandbox::uninitialized::{UninitializedSandbox, GuestBinary};
+    /// use std::sync::{Arc, Mutex};
+    /// use hyperlight_host::Result;
+    ///
+    /// // Custom function to handle output from the guest
+    /// let host_print = |msg: String| -> Result<i32> {
+    ///     println!("Guest output: {}", msg);
+    ///     Ok(0)
+    /// };
+    ///
+    /// let host_print_func = Arc::new(Mutex::new(host_print));
+    ///
+    /// // Create a sandbox with the custom print handler
+    /// let sandbox = UninitializedSandbox::new(
+    ///     GuestBinary::FilePath("path/to/guest".to_string()),
+    ///     None,
+    ///     None,
+    ///     Some(&host_print_func)
+    /// ).unwrap();
+    /// ```
+    ///
+    /// # Platform Notes
+    ///
+    /// On Windows, this function checks that the OS is Windows 11 or Windows Server 2022
+    /// or newer, as Hyperlight requires features only available in these versions.
     #[instrument(
         err(Debug),
         skip(guest_binary, host_print_writer),
@@ -304,8 +365,42 @@ impl UninitializedSandbox {
     }
 
     /// Set the max log level to be used by the guest.
-    /// If this is not set then the log level will be determined by parsing the RUST_LOG environment variable.
-    /// If the RUST_LOG environment variable is not set then the max log level will be set to `LevelFilter::Error`.
+    /// 
+    /// This function configures the maximum log level that will be used when executing guest code.
+    /// It overrides any log level that might be set via the `RUST_LOG` environment variable.
+    /// 
+    /// # Log Level Hierarchy
+    /// 
+    /// The log levels, from most to least verbose, are:
+    /// - `Trace` - very detailed information, typically of interest only when diagnosing problems
+    /// - `Debug` - useful information for debugging and development
+    /// - `Info` - confirmation that things are working as expected
+    /// - `Warn` - indicates that something unexpected happened or indicative of some problem
+    /// - `Error` - an error occurred, but execution can continue
+    /// - `Off` - turns off all logging
+    /// 
+    /// # Default Behavior
+    /// 
+    /// If this function is not called, the log level will be determined by:
+    /// 1. Parsing the `RUST_LOG` environment variable if it exists
+    /// 2. Defaulting to `LevelFilter::Error` if `RUST_LOG` is not set
+    /// 
+    /// # Examples
+    /// 
+    /// ```no_run
+    /// use log::LevelFilter;
+    /// use hyperlight_host::sandbox::uninitialized::{UninitializedSandbox, GuestBinary};
+    /// 
+    /// let mut sandbox = UninitializedSandbox::new(
+    ///     GuestBinary::FilePath("path/to/guest.exe".to_string()),
+    ///     None,
+    ///     None,
+    ///     None
+    /// ).unwrap();
+    /// 
+    /// // Set maximum log level to Debug
+    /// sandbox.set_max_guest_log_level(LevelFilter::Debug);
+    /// ```
     pub fn set_max_guest_log_level(&mut self, log_level: LevelFilter) {
         self.max_guest_log_level = Some(log_level);
     }
@@ -911,6 +1006,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     // Tests that trace data are emitted when a trace subscriber is set
     // this test is ignored because it is incompatible with other tests , specifically those which require a logger for tracing
     // marking  this test as ignored means that running `cargo test` will not run this test but will allow a developer who runs that command

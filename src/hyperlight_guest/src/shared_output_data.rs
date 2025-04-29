@@ -24,6 +24,55 @@ use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
 use crate::error::{HyperlightGuestError, Result};
 use crate::P_PEB;
 
+/// Adds data to the shared output buffer used for communication between guest and host.
+///
+/// This function writes data to a shared memory region that can be read by the host. It uses a
+/// stack-like structure where each write adds both the data itself and a pointer to that data.
+/// The function maintains a stack pointer at the beginning of the buffer that indicates where
+/// the next write should occur.
+///
+/// # Parameters
+///
+/// * `data` - The byte vector containing the data to write to the shared output buffer
+///
+/// # Returns
+///
+/// * `Ok(())` - If the data was successfully written to the shared output buffer
+/// * `Err` - If there was an error writing to the buffer, such as insufficient space or invalid state
+///
+/// # Errors
+///
+/// This function will return an error in the following situations:
+/// * If the output data buffer has zero size
+/// * If the stack pointer is out of bounds (less than 8 or greater than the buffer size)
+/// * If there is not enough space in the buffer to write the data and its pointer
+///
+/// # Example
+///
+/// ```no_run
+/// use hyperlight_guest::shared_output_data::push_shared_output_data;
+/// use hyperlight_common::flatbuffer_wrappers::util::get_flatbuffer_result;
+///
+/// // Serialize and push a result to the shared output buffer
+/// let result = 42;
+/// let serialized_data = get_flatbuffer_result(result);
+/// push_shared_output_data(serialized_data).expect("Failed to write to shared output buffer");
+/// ```
+///
+/// # Memory Layout
+///
+/// The shared output buffer has the following structure:
+/// ```text
+/// +----------------+------------------+----------+------------------+
+/// | Stack Pointer  | User Data Block 1| Pointer 1| User Data Block 2|
+/// | (8 bytes)      | (variable size)  | (8 bytes)| (variable size)  |
+/// +----------------+------------------+----------+------------------+
+/// ```
+///
+/// Each time this function is called, it:
+/// 1. Writes the user data at the position indicated by the stack pointer
+/// 2. Writes a pointer (offset) to that data immediately after the data
+/// 3. Updates the stack pointer to point past both the data and its pointer
 pub fn push_shared_output_data(data: Vec<u8>) -> Result<()> {
     let peb_ptr = unsafe { P_PEB.unwrap() };
     let shared_buffer_size = unsafe { (*peb_ptr).outputdata.outputDataSize as usize };

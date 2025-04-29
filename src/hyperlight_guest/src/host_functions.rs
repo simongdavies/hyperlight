@@ -27,6 +27,32 @@ use hyperlight_common::flatbuffer_wrappers::host_function_details::HostFunctionD
 use crate::error::{HyperlightGuestError, Result};
 use crate::P_PEB;
 
+/// Validates a host function call before execution.
+///
+/// This internal function checks that a host function call is valid by:
+/// 1. Verifying the host function exists
+/// 2. Checking that the provided parameters match the expected parameter types
+/// 3. Ensuring parameter counts match what the function expects
+///
+/// It's used internally by the Hyperlight runtime before dispatching function calls to
+/// the host to ensure type safety and prevent errors.
+///
+/// # Parameters
+///
+/// * `function_call` - The function call to validate, containing the function name and parameters
+///
+/// # Returns
+///
+/// * `Ok(())` - If the function call is valid
+/// * `Err` - If the function doesn't exist or the parameters don't match expectations
+///
+/// # Errors
+///
+/// This function will return an error in the following situations:
+/// * If no host functions are registered
+/// * If the specified function name doesn't exist among registered host functions
+/// * If the number of parameters doesn't match what the function expects
+/// * If any parameter type doesn't match the expected type at that position
 pub(crate) fn validate_host_function_call(function_call: &FunctionCall) -> Result<()> {
     // get host function details
     let host_function_details = get_host_function_details();
@@ -91,6 +117,38 @@ pub(crate) fn validate_host_function_call(function_call: &FunctionCall) -> Resul
     Ok(())
 }
 
+/// Retrieves information about host functions available to the guest.
+///
+/// This function reads the host function definitions from the shared Process Environment
+/// Block (PEB) and deserializes them into a `HostFunctionDetails` object. This object
+/// contains metadata about all the functions implemented by the host that can be called
+/// by the guest.
+///
+/// # Returns
+///
+/// A `HostFunctionDetails` object containing information about all available host functions,
+/// including their names, parameter types, and return types.
+///
+/// # Panics
+///
+/// This function will panic if:
+/// * The PEB pointer is not initialized
+/// * The host function details buffer cannot be deserialized
+///
+/// # Example
+///
+/// ```no_run
+/// use hyperlight_guest::host_functions::get_host_function_details;
+///
+/// // Get information about available host functions
+/// let host_functions = get_host_function_details();
+///
+/// // Check if a specific host function exists
+/// if let Some(print_function) = host_functions.find_by_function_name("HostPrint") {
+///     println!("HostPrint function is available with {} parameters",
+///              print_function.parameter_types.as_ref().map_or(0, |v| v.len()));
+/// }
+/// ```
 pub fn get_host_function_details() -> HostFunctionDetails {
     let peb_ptr = unsafe { P_PEB.unwrap() };
 

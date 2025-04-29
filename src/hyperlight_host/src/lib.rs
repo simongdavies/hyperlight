@@ -101,7 +101,7 @@ pub use sandbox::SandboxRunOptions;
 /// The re-export for the `UninitializedSandbox` type
 pub use sandbox::UninitializedSandbox;
 
-/// The re-export for the `MultiUseGuestCallContext` type`
+/// The re-export for the `MultiUseGuestCallContext` type
 pub use crate::func::call_ctx::MultiUseGuestCallContext;
 
 /// The universal `Result` type used throughout the Hyperlight codebase.

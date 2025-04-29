@@ -162,6 +162,24 @@ fn call_host_spin(_: &FunctionCall) -> Result<Vec<u8>> {
 }
 
 #[no_mangle]
+/// Main entry point for Hyperlight guest binaries.
+/// 
+/// This function is called when the guest binary is loaded by the Hyperlight host.
+/// It's responsible for registering all guest functions that can be called by the host.
+/// Each function is registered with its name, parameter types, return type, and a pointer
+/// to the implementation function.
+/// 
+/// In this implementation, we register several guest functions:
+/// - `PrintOutput`: Prints a message to the host's output
+/// - `GuestMethod`, `GuestMethod1`, etc.: Various functions that can be called from the host
+/// - `LogMessage`: Writes messages to the guest log
+/// - `CallErrorMethod`: Demonstrates error handling between guest and host
+/// - `CallHostSpin`: Calls a host function that spins/blocks
+/// 
+/// # Note
+/// 
+/// This function must be named exactly `hyperlight_main` and must have the `#[no_mangle]`
+/// attribute to ensure the Hyperlight host can find it when loading the guest binary.
 pub extern "C" fn hyperlight_main() {
     let print_output_def = GuestFunctionDefinition::new(
         "PrintOutput".to_string(),
@@ -241,6 +259,25 @@ pub extern "C" fn hyperlight_main() {
 }
 
 #[no_mangle]
+/// Dispatches function calls to the appropriate guest function handler.
+/// 
+/// This function serves as a fallback dispatcher for any function calls not handled
+/// by the explicitly registered functions. In this implementation, it simply returns
+/// an error indicating that the requested function was not found.
+/// 
+/// # Parameters
+/// 
+/// * `function_call` - The function call information including name and parameters
+/// 
+/// # Returns
+/// 
+/// * `Result<Vec<u8>>` - A serialized flatbuffer containing the function result or an error
+///
+/// # Example
+/// 
+/// This function is typically called by the hyperlight host runtime when it cannot find
+/// a registered function with the specified name. It is not meant to be called directly
+/// from guest code.
 pub fn guest_dispatch_function(function_call: FunctionCall) -> Result<Vec<u8>> {
     Err(HyperlightGuestError::new(
         ErrorCode::GuestFunctionNotFound,
