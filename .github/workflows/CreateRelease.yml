@@ -83,7 +83,6 @@ jobs:
       [
         build-rust-ubuntu,
         build-rust-windows,
-        build-guest-binaries,
         benchmarks,
       ]
 
@@ -116,20 +115,6 @@ jobs:
           version=$(echo "${{ github.ref }}" | sed -E 's#refs/heads/release/v##')
           echo "HYPERLIGHT_VERSION=$version" >> $GITHUB_ENV
           echo "HYPERLIGHT_VERSION=$version"
-
-      - name: Download Guest Binaries
-        uses: actions/download-artifact@v4
-        with:
-          name: guest-binaries-${{ env.CONFIG }}
-          path: ./downloaded-guest-binaries-${{ env.CONFIG }}
-
-      - name: Copy Guest Binaries
-        run: |
-          cp ./downloaded-guest-binaries-${{ env.CONFIG }}/callbackguest ./src/tests/rust_guests/bin/${{ env.CONFIG }}/callbackguest
-          cp ./downloaded-guest-binaries-${{ env.CONFIG }}/callbackguest.exe ./src/tests/rust_guests/bin/${{ env.CONFIG }}/callbackguest.exe
-          cp ./downloaded-guest-binaries-${{ env.CONFIG }}/simpleguest ./src/tests/rust_guests/bin/${{ env.CONFIG }}/simpleguest
-          cp ./downloaded-guest-binaries-${{ env.CONFIG }}/simpleguest.exe ./src/tests/rust_guests/bin/${{ env.CONFIG }}/simpleguest.exe
-          cp ./downloaded-guest-binaries-${{ env.CONFIG }}/dummyguest ./src/tests/rust_guests/bin/${{ env.CONFIG }}/dummyguest
 
       - name: Build and archive guest library + header files
         run: |
@@ -168,11 +153,6 @@ jobs:
         if: ${{ contains(github.ref, 'refs/heads/release/') }}
         run: |
             gh release create v${{ env.HYPERLIGHT_VERSION }} -t "Release v${{ env.HYPERLIGHT_VERSION }}" --notes-file RELEASE_NOTES.md \
-            src/tests/rust_guests/bin/${{ env.CONFIG }}/callbackguest \
-            src/tests/rust_guests/bin/${{ env.CONFIG }}/callbackguest.exe \
-            src/tests/rust_guests/bin/${{ env.CONFIG }}/simpleguest \
-            src/tests/rust_guests/bin/${{ env.CONFIG }}/simpleguest.exe \
-            src/tests/rust_guests/bin/${{ env.CONFIG }}/dummyguest \
             benchmarks_Windows_hyperv_amd.tar.gz \
             benchmarks_Windows_hyperv_intel.tar.gz \
             benchmarks_Linux_kvm_amd.tar.gz \
@@ -192,11 +172,6 @@ jobs:
         run: |
             gh release delete dev-latest -y --cleanup-tag || true
             gh release create dev-latest -t "Latest prerelease from main branch" --notes-file RELEASE_NOTES.md --latest=false -p \
-            src/tests/rust_guests/bin/${{ env.CONFIG }}/callbackguest \
-            src/tests/rust_guests/bin/${{ env.CONFIG }}/callbackguest.exe \
-            src/tests/rust_guests/bin/${{ env.CONFIG }}/simpleguest \
-            src/tests/rust_guests/bin/${{ env.CONFIG }}/simpleguest.exe \
-            src/tests/rust_guests/bin/${{ env.CONFIG }}/dummyguest \
             benchmarks_Windows_hyperv_amd.tar.gz \
             benchmarks_Windows_hyperv_intel.tar.gz \
             benchmarks_Linux_kvm_amd.tar.gz \
