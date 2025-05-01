@@ -58,7 +58,7 @@ const PAGE_USER: u64 = 1 << 2; // User/Supervisor (if this bit is set then the p
 const PAGE_NX: u64 = 1 << 63; // Execute Disable (if this bit is set then data in the page cannot be executed)
 
 // The amount of memory that can be mapped per page table
-pub(super) const AMOUNT_OF_MEMORY_PER_PT: usize = 0x200000;
+pub(super) const AMOUNT_OF_MEMORY_PER_PT: usize = 0x200_000;
 /// Read/write permissions flag for the 64-bit PDE
 /// The page size for the 64-bit PDE
 /// The size of stack guard cookies
@@ -213,8 +213,6 @@ where
                             // Host Exception Data are readonly in the guest
                             MemoryRegionType::HostExceptionData => PAGE_PRESENT | PAGE_NX,
                             MemoryRegionType::PageTables => PAGE_PRESENT | PAGE_RW | PAGE_NX,
-                            MemoryRegionType::KernelStack => PAGE_PRESENT | PAGE_RW | PAGE_NX,
-                            MemoryRegionType::BootStack => PAGE_PRESENT | PAGE_RW | PAGE_NX,
                         },
                         // If there is an error then the address isn't mapped so mark it as not present
                         Err(_) => 0,
