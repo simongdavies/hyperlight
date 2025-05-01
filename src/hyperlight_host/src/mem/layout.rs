@@ -64,13 +64,13 @@ use crate::{log_then_return, new_error, Result};
 // |               Guest Code                  |
 // +-------------------------------------------+
 // |                    PT                     |
-// +-------------------------------------------+ 0x203_000
+// +-------------------------------------------+ 0x3_000
 // |                    PD                     |
-// +-------------------------------------------+ 0x202_000
+// +-------------------------------------------+ 0x2_000
 // |                   PDPT                    |
-// +-------------------------------------------+ 0x201_000
+// +-------------------------------------------+ 0x1_000
 // |                   PML4                    |
-// +-------------------------------------------+ 0x200_000
+// +-------------------------------------------+ 0x0_000
 // |                    ⋮                      |
 // |                 Unmapped                  |
 // |                    ⋮                      |
@@ -308,7 +308,7 @@ impl SandboxMemoryLayout {
     const MAX_MEMORY_SIZE: usize = 0x40000000 - Self::BASE_ADDRESS;
 
     /// The base address of the sandbox's memory.
-    pub(crate) const BASE_ADDRESS: usize = 0x0200000;
+    pub(crate) const BASE_ADDRESS: usize = 0x0;
 
     // the offset into a sandbox's input/output buffer where the stack starts
     const STACK_POINTER_SIZE_BYTES: u64 = 8;
@@ -699,12 +699,10 @@ impl SandboxMemoryLayout {
     // The size of a single table is 4K, we can map up to 1GB total memory which requires 1 PML4, 1 PDPT, 1 PD and 512 PTs
     // but we only need enough PTs to map the memory we are using. (In other words we only need 512 PTs to map the memory if the memory size is 1GB)
     //
-    // Because we always start the physical address space at 0x200_000
-    // we can calculate the amount of memory needed for the PTs by calculating how much memory is needed for the sandbox configuration in total,
-    // then add 0x200_000 to that (as we start at 0x200_000),
+    // We can calculate the amount of memory needed for the PTs by calculating how much memory is needed for the sandbox configuration in total,
     // and then add 3 * 4K (for the PML4, PDPT and PD)  to that,
     // then add 2MB to that (the maximum size of memory required for the PTs themselves is 2MB when we map 1GB of memory in 4K pages),
-    // then divide that by 0x200_000 (as we can map 2MB in each PT) and then round the result up by 1 .
+    // then divide that by 0x200_000 (as we can map 2MB in each PT).
     // This will give us the total size of the PTs required for the sandbox to which we can add the size of the PML4, PDPT and PD.
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     fn get_total_page_table_size(
@@ -741,7 +739,6 @@ impl SandboxMemoryLayout {
 
         let num_pages: usize = ((total_mapped_memory_size + AMOUNT_OF_MEMORY_PER_PT - 1)
             / AMOUNT_OF_MEMORY_PER_PT)
-            + 1 // Round up
             + 3; // PML4, PDPT, PD
 
         num_pages * PAGE_SIZE_USIZE
@@ -1077,7 +1074,7 @@ impl SandboxMemoryLayout {
         macro_rules! get_address {
             ($something:ident) => {
                 paste! {
-                    if guest_offset == 0 {
+                    if run_inprocess {
                         let offset = self.[<$something _offset>];
                         let calculated_addr = shared_mem.calculate_address(offset)?;
                         u64::try_from(calculated_addr)?
