@@ -29,7 +29,6 @@ use hyperlight_common::mem::RunMode;
 
 use crate::error::{HyperlightGuestError, Result};
 use crate::host_error::check_for_host_error;
-use crate::host_functions::validate_host_function_call;
 use crate::shared_input_data::try_pop_shared_input_data_into;
 use crate::shared_output_data::push_shared_output_data;
 use crate::{OUTB_PTR, OUTB_PTR_WITH_CONTEXT, P_PEB, RUNNING_MODE};
@@ -70,8 +69,6 @@ pub fn call_host_function(
         FunctionCallType::Host,
         return_type,
     );
-
-    validate_host_function_call(&host_function_call)?;
 
     let host_function_call_buffer: Vec<u8> = host_function_call
         .try_into()

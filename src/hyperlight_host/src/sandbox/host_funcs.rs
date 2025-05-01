@@ -24,8 +24,6 @@ use tracing::{instrument, Span};
 
 use super::{ExtraAllowedSyscall, FunctionsMap};
 use crate::func::HyperlightFunction;
-use crate::mem::mgr::SandboxMemoryManager;
-use crate::mem::shared_mem::ExclusiveSharedMemory;
 use crate::HyperlightError::HostFunctionNotFound;
 use crate::{new_error, Result};
 
@@ -58,11 +56,10 @@ impl HostFuncsWrapper {
     #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
     pub(crate) fn register_host_function(
         &mut self,
-        mgr: &mut SandboxMemoryManager<ExclusiveSharedMemory>,
         hfd: &HostFunctionDefinition,
         func: HyperlightFunction,
     ) -> Result<()> {
-        register_host_function_helper(self, mgr, hfd, func, None)
+        register_host_function_helper(self, hfd, func, None)
     }
 
     /// Register a host function with the sandbox, with a list of extra syscalls
@@ -71,12 +68,11 @@ impl HostFuncsWrapper {
     #[cfg(all(feature = "seccomp", target_os = "linux"))]
     pub(crate) fn register_host_function_with_syscalls(
         &mut self,
-        mgr: &mut SandboxMemoryManager<ExclusiveSharedMemory>,
         hfd: &HostFunctionDefinition,
         func: HyperlightFunction,
         extra_allowed_syscalls: Vec<ExtraAllowedSyscall>,
     ) -> Result<()> {
-        register_host_function_helper(self, mgr, hfd, func, Some(extra_allowed_syscalls))
+        register_host_function_helper(self, hfd, func, Some(extra_allowed_syscalls))
     }
 
     /// Assuming a host function called `"HostPrint"` exists, and takes a
@@ -113,7 +109,6 @@ impl HostFuncsWrapper {
 
 fn register_host_function_helper(
     self_: &mut HostFuncsWrapper,
-    mgr: &mut SandboxMemoryManager<ExclusiveSharedMemory>,
     hfd: &HostFunctionDefinition,
     func: HyperlightFunction,
     extra_allowed_syscalls: Option<Vec<ExtraAllowedSyscall>>,
@@ -137,18 +132,11 @@ fn register_host_function_helper(
         .get_host_func_details_mut()
         .insert_host_function(hfd.clone());
     // Functions need to be sorted so that they are serialised in sorted order
-    // this is required in order for flatbuffers C implementation used in the Gues Library
+    // this is required in order for flatbuffers C implementation used in the Guest Library
     // to be able to search the functions by name.
     self_
         .get_host_func_details_mut()
         .sort_host_functions_by_name();
-    let buffer: Vec<u8> = self_.get_host_func_details().try_into().map_err(|e| {
-        new_error!(
-            "Error serializing host function details to flatbuffer: {}",
-            e
-        )
-    })?;
-    mgr.write_buffer_host_function_details(&buffer)?;
 
     Ok(())
 }

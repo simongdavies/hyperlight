@@ -131,8 +131,6 @@ pub enum MemoryRegionType {
     Code,
     /// The region contains the PEB
     Peb,
-    /// The region contains the Host Function Definitions
-    HostFunctionDefinitions,
     /// The region contains the Host Exception Data
     HostExceptionData,
     /// The region contains the Guest Error Data

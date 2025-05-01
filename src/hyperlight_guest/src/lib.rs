@@ -40,7 +40,6 @@ pub mod guest_function_register;
 
 pub mod host_error;
 pub mod host_function_call;
-pub mod host_functions;
 
 pub(crate) mod guest_logger;
 pub mod memory;
