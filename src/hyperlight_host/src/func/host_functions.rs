@@ -17,8 +17,9 @@ limitations under the License.
 #![allow(non_snake_case)]
 use std::sync::{Arc, Mutex};
 
-use hyperlight_common::flatbuffer_wrappers::function_types::ParameterValue;
-use hyperlight_common::flatbuffer_wrappers::host_function_definition::HostFunctionDefinition;
+use hyperlight_common::flatbuffer_wrappers::function_types::{
+    ParameterType, ParameterValue, ReturnType,
+};
 use paste::paste;
 use tracing::{instrument, Span};
 
@@ -26,6 +27,32 @@ use super::{HyperlightFunction, SupportedParameterType, SupportedReturnType};
 use crate::sandbox::{ExtraAllowedSyscall, UninitializedSandbox};
 use crate::HyperlightError::UnexpectedNoOfArguments;
 use crate::{log_then_return, new_error, Result};
+
+/// The definition of a function exposed from the host to the guest
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct HostFunctionDefinition {
+    /// The function name
+    pub function_name: String,
+    /// The type of the parameter values for the host function call.
+    pub parameter_types: Option<Vec<ParameterType>>,
+    /// The type of the return value from the host function call
+    pub return_type: ReturnType,
+}
+
+impl HostFunctionDefinition {
+    /// Create a new `HostFunctionDefinition`.
+    pub fn new(
+        function_name: String,
+        parameter_types: Option<Vec<ParameterType>>,
+        return_type: ReturnType,
+    ) -> Self {
+        Self {
+            function_name,
+            parameter_types,
+            return_type,
+        }
+    }
+}
 
 macro_rules! host_function {
     // Special case for zero parameters

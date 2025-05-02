@@ -17,15 +17,16 @@ limitations under the License.
 use std::io::{IsTerminal, Write};
 
 use hyperlight_common::flatbuffer_wrappers::function_types::{ParameterValue, ReturnValue};
-use hyperlight_common::flatbuffer_wrappers::host_function_definition::HostFunctionDefinition;
-use hyperlight_common::flatbuffer_wrappers::host_function_details::HostFunctionDetails;
 use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
 use tracing::{instrument, Span};
 
 use super::{ExtraAllowedSyscall, FunctionsMap};
+use crate::func::host_functions::HostFunctionDefinition;
 use crate::func::HyperlightFunction;
 use crate::HyperlightError::HostFunctionNotFound;
 use crate::{new_error, Result};
+
+type HostFunctionDetails = Option<Vec<HostFunctionDefinition>>;
 
 #[derive(Default, Clone)]
 /// A Wrapper around details of functions exposed by the Host
@@ -105,6 +106,17 @@ impl HostFuncsWrapper {
     ) -> Result<ReturnValue> {
         call_host_func_impl(self.get_host_funcs(), name, args)
     }
+
+    /// Insert a host function into the list of registered host functions.
+    pub(super) fn insert_host_function(&mut self, host_function: HostFunctionDefinition) {
+        match &mut self.function_details {
+            Some(host_functions) => host_functions.push(host_function),
+            None => {
+                let host_functions = Vec::from(&[host_function]);
+                self.function_details = Some(host_functions);
+            }
+        }
+    }
 }
 
 fn register_host_function_helper(
@@ -128,15 +140,7 @@ fn register_host_function_helper(
             .get_host_funcs_mut()
             .insert(hfd.function_name.to_string(), func, None);
     }
-    self_
-        .get_host_func_details_mut()
-        .insert_host_function(hfd.clone());
-    // Functions need to be sorted so that they are serialised in sorted order
-    // this is required in order for flatbuffers C implementation used in the Guest Library
-    // to be able to search the functions by name.
-    self_
-        .get_host_func_details_mut()
-        .sort_host_functions_by_name();
+    self_.insert_host_function(hfd.clone());
 
     Ok(())
 }

@@ -82,7 +82,7 @@ impl FlatbufferSerializable for &[u8] {
                 Fbhlsizeprefixedbuffer::create(
                     builder,
                     &FbhlsizeprefixedbufferArgs {
-                        size_: self.len() as i32,
+                        size: self.len() as i32,
                         value: Some(vec_offset),
                     },
                 )
