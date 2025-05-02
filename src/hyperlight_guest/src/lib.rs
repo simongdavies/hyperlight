@@ -38,7 +38,6 @@ pub mod guest_function_call;
 pub mod guest_function_definition;
 pub mod guest_function_register;
 
-pub mod host_error;
 pub mod host_function_call;
 
 pub(crate) mod guest_logger;

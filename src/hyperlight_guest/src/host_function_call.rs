@@ -28,7 +28,6 @@ use hyperlight_common::flatbuffer_wrappers::util::get_flatbuffer_result;
 use hyperlight_common::mem::RunMode;
 
 use crate::error::{HyperlightGuestError, Result};
-use crate::host_error::check_for_host_error;
 use crate::shared_input_data::try_pop_shared_input_data_into;
 use crate::shared_output_data::push_shared_output_data;
 use crate::{OUTB_PTR, OUTB_PTR_WITH_CONTEXT, P_PEB, RUNNING_MODE};
@@ -102,8 +101,6 @@ pub fn outb(port: u16, value: u8) {
                 panic!("Tried to call outb in invalid runmode");
             }
         }
-
-        check_for_host_error();
     }
 }
 

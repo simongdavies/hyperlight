@@ -25,7 +25,6 @@ use std::cell::{BorrowError, BorrowMutError};
 use std::convert::Infallible;
 use std::error::Error;
 use std::num::TryFromIntError;
-use std::str::Utf8Error;
 use std::string::FromUtf8Error;
 use std::sync::{MutexGuard, PoisonError};
 use std::time::SystemTimeError;
@@ -86,14 +85,6 @@ pub enum HyperlightError {
     /// A generic error with a message
     #[error("{0}")]
     Error(String),
-
-    /// Exception Data Length is incorrect
-    #[error("Exception Data Length is incorrect. Expected: {0}, Actual: {1}")]
-    ExceptionDataLengthIncorrect(i32, usize),
-
-    /// Exception Message is too big
-    #[error("Exception Message is too big. Max Size: {0}, Actual: {1}")]
-    ExceptionMessageTooBig(usize, usize),
 
     /// Execution violation
     #[error("Non-executable address {0:#x} tried to be executed")]
@@ -171,10 +162,6 @@ pub enum HyperlightError {
     #[error("The flatbuffer is invalid")]
     InvalidFlatBuffer(#[from] InvalidFlatbuffer),
 
-    /// Conversion of str to Json failed
-    #[error("Conversion of str data to json failed")]
-    JsonConversionFailure(#[from] serde_json::Error),
-
     /// Error occurred in KVM Operation
     #[error("KVM Error {0:?}")]
     #[cfg(kvm)]
@@ -224,10 +211,6 @@ pub enum HyperlightError {
     /// Restore_state called with no valid snapshot
     #[error("Restore_state called with no valid snapshot")]
     NoMemorySnapshot,
-
-    /// An error occurred handling an outb message
-    #[error("An error occurred handling an outb message {0:?}: {1}")]
-    OutBHandlingError(String, String),
 
     /// Failed to get value from parameter value
     #[error("Failed To Convert Parameter Value {0:?} to {1:?}")]
@@ -291,10 +274,6 @@ pub enum HyperlightError {
     /// The return value type is unexpected
     #[error("The return value type is unexpected got {0:?} expected {1:?}")]
     UnexpectedReturnValueType(ReturnValue, String),
-
-    /// Slice conversion to UTF8 failed
-    #[error("Slice Conversion of UTF8 data to str failed")]
-    UTF8SliceConversionFailure(#[from] Utf8Error),
 
     /// Slice conversion to UTF8 failed
     #[error("String Conversion of UTF8 data to str failed")]
