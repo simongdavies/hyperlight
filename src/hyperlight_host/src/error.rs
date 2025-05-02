@@ -34,20 +34,12 @@ use crossbeam_channel::{RecvError, SendError};
 use flatbuffers::InvalidFlatbuffer;
 use hyperlight_common::flatbuffer_wrappers::function_types::{ParameterValue, ReturnValue};
 use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
-use serde::{Deserialize, Serialize};
-use serde_yaml;
 use thiserror::Error;
 
 #[cfg(target_os = "windows")]
 use crate::hypervisor::wrappers::HandleWrapper;
 use crate::mem::memory_region::MemoryRegionFlags;
 use crate::mem::ptr::RawPtr;
-
-#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
-pub(crate) struct HyperlightHostError {
-    pub(crate) message: String,
-    pub(crate) source: String,
-}
 
 /// The error type for Hyperlight operations
 #[derive(Error, Debug)]
@@ -294,10 +286,6 @@ pub enum HyperlightError {
     #[cfg(target_os = "windows")]
     #[error("Windows API Error Result {0:?}")]
     WindowsAPIError(#[from] windows_result::Error),
-
-    /// Conversion of str to YAML failed
-    #[error("Conversion of str data to yaml failed")]
-    YamlConversionFailure(#[from] serde_yaml::Error),
 }
 
 impl From<Infallible> for HyperlightError {
