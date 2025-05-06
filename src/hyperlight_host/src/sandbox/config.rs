@@ -1,3 +1,5 @@
+// TODO(danbugs:297): forgot to remove stuff related to host exceptions and
+// host function definitions in my previous PR. Will remove them in the next commit.
 /*
 Copyright 2024 The Hyperlight Authors.
 
@@ -36,8 +38,6 @@ pub struct SandboxConfiguration {
     /// Guest gdb debug port
     #[cfg(gdb)]
     guest_debug_info: Option<DebugInfo>,
-    /// The maximum size of the guest error buffer.
-    guest_error_buffer_size: usize,
     /// The size of the memory buffer that is made available for Guest Function
     /// Definitions
     host_function_definition_size: usize,
@@ -117,10 +117,6 @@ impl SandboxConfiguration {
     pub const DEFAULT_HOST_EXCEPTION_SIZE: usize = 0x4000;
     /// The minimum size for host exceptions
     pub const MIN_HOST_EXCEPTION_SIZE: usize = 0x4000;
-    /// The default size for guest error messages
-    pub const DEFAULT_GUEST_ERROR_BUFFER_SIZE: usize = 0x100;
-    /// The minimum size for guest error messages
-    pub const MIN_GUEST_ERROR_BUFFER_SIZE: usize = 0x80;
     /// The default value for max initialization time (in milliseconds)
     pub const DEFAULT_MAX_INITIALIZATION_TIME: u16 = 2000;
     /// The minimum value for max initialization time (in milliseconds)
@@ -156,7 +152,6 @@ impl SandboxConfiguration {
         output_data_size: usize,
         function_definition_size: usize,
         host_exception_size: usize,
-        guest_error_buffer_size: usize,
         stack_size_override: Option<u64>,
         heap_size_override: Option<u64>,
         kernel_stack_size: usize,
@@ -174,10 +169,6 @@ impl SandboxConfiguration {
                 Self::MIN_HOST_FUNCTION_DEFINITION_SIZE,
             ),
             host_exception_size: max(host_exception_size, Self::MIN_HOST_EXCEPTION_SIZE),
-            guest_error_buffer_size: max(
-                guest_error_buffer_size,
-                Self::MIN_GUEST_ERROR_BUFFER_SIZE,
-            ),
             stack_size_override: stack_size_override.unwrap_or(0),
             heap_size_override: heap_size_override.unwrap_or(0),
             kernel_stack_size: max(kernel_stack_size, Self::MIN_KERNEL_STACK_SIZE),
@@ -266,14 +257,6 @@ impl SandboxConfiguration {
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub fn set_host_exception_size(&mut self, host_exception_size: usize) {
         self.host_exception_size = max(host_exception_size, Self::MIN_HOST_EXCEPTION_SIZE);
-    }
-
-    /// Set the size of the memory buffer that is made available for serialising guest error messages
-    /// the minimum value is MIN_GUEST_ERROR_BUFFER_SIZE
-    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
-    pub fn set_guest_error_buffer_size(&mut self, guest_error_buffer_size: usize) {
-        self.guest_error_buffer_size =
-            max(guest_error_buffer_size, Self::MIN_GUEST_ERROR_BUFFER_SIZE);
     }
 
     /// Set the stack size to use in the guest sandbox. If set to 0, the stack size will be determined from the PE file header
@@ -368,11 +351,6 @@ impl SandboxConfiguration {
     }
 
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
-    pub(crate) fn get_guest_error_buffer_size(&self) -> usize {
-        self.guest_error_buffer_size
-    }
-
-    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub(crate) fn get_host_function_definition_size(&self) -> usize {
         self.host_function_definition_size
     }
@@ -457,7 +435,6 @@ impl Default for SandboxConfiguration {
             Self::DEFAULT_OUTPUT_SIZE,
             Self::DEFAULT_HOST_FUNCTION_DEFINITION_SIZE,
             Self::DEFAULT_HOST_EXCEPTION_SIZE,
-            Self::DEFAULT_GUEST_ERROR_BUFFER_SIZE,
             None,
             None,
             Self::DEFAULT_KERNEL_STACK_SIZE,
@@ -486,7 +463,6 @@ mod tests {
         const OUTPUT_DATA_SIZE_OVERRIDE: usize = 0x4001;
         const HOST_FUNCTION_DEFINITION_SIZE_OVERRIDE: usize = 0x4002;
         const HOST_EXCEPTION_SIZE_OVERRIDE: usize = 0x4003;
-        const GUEST_ERROR_BUFFER_SIZE_OVERRIDE: usize = 0x40004;
         const MAX_EXECUTION_TIME_OVERRIDE: u16 = 1010;
         const MAX_WAIT_FOR_CANCELLATION_OVERRIDE: u8 = 200;
         const MAX_INITIALIZATION_TIME_OVERRIDE: u16 = 2000;
@@ -497,7 +473,6 @@ mod tests {
             OUTPUT_DATA_SIZE_OVERRIDE,
             HOST_FUNCTION_DEFINITION_SIZE_OVERRIDE,
             HOST_EXCEPTION_SIZE_OVERRIDE,
-            GUEST_ERROR_BUFFER_SIZE_OVERRIDE,
             Some(STACK_SIZE_OVERRIDE),
             Some(HEAP_SIZE_OVERRIDE),
             KERNEL_STACK_SIZE_OVERRIDE,
@@ -534,10 +509,6 @@ mod tests {
             cfg.host_function_definition_size
         );
         assert_eq!(HOST_EXCEPTION_SIZE_OVERRIDE, cfg.host_exception_size);
-        assert_eq!(
-            GUEST_ERROR_BUFFER_SIZE_OVERRIDE,
-            cfg.guest_error_buffer_size
-        );
         assert_eq!(MAX_EXECUTION_TIME_OVERRIDE, cfg.max_execution_time);
         assert_eq!(
             MAX_WAIT_FOR_CANCELLATION_OVERRIDE,
@@ -560,7 +531,6 @@ mod tests {
             SandboxConfiguration::MIN_OUTPUT_SIZE - 1,
             SandboxConfiguration::MIN_HOST_FUNCTION_DEFINITION_SIZE - 1,
             SandboxConfiguration::MIN_HOST_EXCEPTION_SIZE - 1,
-            SandboxConfiguration::MIN_GUEST_ERROR_BUFFER_SIZE - 1,
             None,
             None,
             SandboxConfiguration::MIN_KERNEL_STACK_SIZE - 1,
@@ -591,10 +561,6 @@ mod tests {
             SandboxConfiguration::MIN_HOST_EXCEPTION_SIZE,
             cfg.host_exception_size
         );
-        assert_eq!(
-            SandboxConfiguration::MIN_GUEST_ERROR_BUFFER_SIZE,
-            cfg.guest_error_buffer_size
-        );
         assert_eq!(0, cfg.stack_size_override);
         assert_eq!(0, cfg.heap_size_override);
         assert_eq!(
@@ -620,7 +586,6 @@ mod tests {
             SandboxConfiguration::MIN_HOST_FUNCTION_DEFINITION_SIZE - 1,
         );
         cfg.set_host_exception_size(SandboxConfiguration::MIN_HOST_EXCEPTION_SIZE - 1);
-        cfg.set_guest_error_buffer_size(SandboxConfiguration::MIN_GUEST_ERROR_BUFFER_SIZE - 1);
         cfg.set_max_execution_time(Duration::from_millis(
             SandboxConfiguration::MIN_MAX_EXECUTION_TIME as u64,
         ));
@@ -645,10 +610,6 @@ mod tests {
             cfg.host_exception_size
         );
         assert_eq!(
-            SandboxConfiguration::MIN_GUEST_ERROR_BUFFER_SIZE,
-            cfg.guest_error_buffer_size
-        );
-        assert_eq!(
             SandboxConfiguration::MIN_MAX_EXECUTION_TIME,
             cfg.max_execution_time
         );
@@ -670,13 +631,6 @@ mod tests {
         use crate::sandbox::config::DebugInfo;
 
         proptest! {
-            #[test]
-            fn error_buffer_size(size in SandboxConfiguration::MIN_GUEST_ERROR_BUFFER_SIZE..=SandboxConfiguration::MIN_GUEST_ERROR_BUFFER_SIZE * 10) {
-                let mut cfg = SandboxConfiguration::default();
-                cfg.set_guest_error_buffer_size(size);
-                prop_assert_eq!(size, cfg.get_guest_error_buffer_size());
-            }
-
             #[test]
             fn host_function_definition_size(size in SandboxConfiguration::MIN_HOST_FUNCTION_DEFINITION_SIZE..=SandboxConfiguration::MIN_HOST_FUNCTION_DEFINITION_SIZE * 10) {
                 let mut cfg = SandboxConfiguration::default();

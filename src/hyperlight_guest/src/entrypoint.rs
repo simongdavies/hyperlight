@@ -23,7 +23,6 @@ use log::LevelFilter;
 use spin::Once;
 
 use crate::gdt::load_gdt;
-use crate::guest_error::reset_error;
 use crate::guest_function_call::dispatch_function;
 use crate::guest_logger::init_logger;
 use crate::host_function_call::{outb, OutBAction};
@@ -145,8 +144,6 @@ pub extern "win64" fn entrypoint(peb_address: u64, seed: u64, ops: u64, max_log_
             OS_PAGE_SIZE = ops as u32;
 
             (*peb_ptr).guest_function_dispatch_ptr = dispatch_function as usize as u64;
-
-            reset_error();
 
             hyperlight_main();
         }

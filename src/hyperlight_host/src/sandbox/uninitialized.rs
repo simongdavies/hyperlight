@@ -436,7 +436,6 @@ mod tests {
             cfg.set_output_data_size(0x1000);
             cfg.set_host_function_definition_size(0x1000);
             cfg.set_host_exception_size(0x1000);
-            cfg.set_guest_error_buffer_size(0x1000);
             cfg.set_stack_size(0x1000);
             cfg.set_heap_size(0x1000);
             cfg.set_max_execution_time(Duration::from_millis(1001));

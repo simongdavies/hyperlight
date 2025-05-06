@@ -22,8 +22,7 @@ use rand::{rng, RngCore};
 use tracing::{instrument, Span};
 
 use super::memory_region::MemoryRegionType::{
-    Code, GuardPage, GuestErrorData, Heap, InputData, OutputData, PageTables, PanicContext, Peb,
-    Stack,
+    Code, GuardPage, Heap, InputData, OutputData, PageTables, PanicContext, Peb, Stack,
 };
 use super::memory_region::{MemoryRegion, MemoryRegionFlags, MemoryRegionVecBuilder};
 use super::mgr::AMOUNT_OF_MEMORY_PER_PT;
@@ -45,8 +44,6 @@ use crate::{log_then_return, new_error, Result};
 // +-------------------------------------------+
 // |              Input Data                   |
 // +-------------------------------------------+
-// |           Guest Error Log                 |
-// +-------------------------------------------+
 // |                PEB Struct                 | (HyperlightPEB size)
 // +-------------------------------------------+
 // |               Guest Code                  |
@@ -60,9 +57,6 @@ use crate::{log_then_return, new_error, Result};
 // |                   PML4                    |
 // +-------------------------------------------+ 0x0_000
 
-/// - `GuestError` - contains a buffer for any guest error that occurred.
-///   the length of this field is `GuestErrorBufferSize` from `SandboxConfiguration`
-///
 /// - `InputData` -  this is a buffer that is used for input data to the host program.
 ///   the length of this field is `InputDataSize` from `SandboxConfiguration`
 ///
@@ -95,7 +89,6 @@ pub(crate) struct SandboxMemoryLayout {
     peb_offset: usize,
     peb_security_cookie_seed_offset: usize,
     peb_guest_dispatch_function_ptr_offset: usize, // set by guest in guest entrypoint
-    peb_guest_error_offset: usize,
     peb_code_and_outb_pointer_offset: usize,
     peb_runmode_offset: usize,
     peb_input_data_offset: usize,
@@ -106,7 +99,6 @@ pub(crate) struct SandboxMemoryLayout {
 
     // The following are the actual values
     // that are written to the PEB struct
-    pub(super) guest_error_buffer_offset: usize,
     pub(super) input_data_buffer_offset: usize,
     pub(super) output_data_buffer_offset: usize,
     guest_panic_context_buffer_offset: usize,
@@ -144,10 +136,6 @@ impl Debug for SandboxMemoryLayout {
                 &format_args!("{:#x}", self.peb_guest_dispatch_function_ptr_offset),
             )
             .field(
-                "Guest Error Offset",
-                &format_args!("{:#x}", self.peb_guest_error_offset),
-            )
-            .field(
                 "Code and OutB Pointer Offset",
                 &format_args!("{:#x}", self.peb_code_and_outb_pointer_offset),
             )
@@ -170,10 +158,6 @@ impl Debug for SandboxMemoryLayout {
             .field(
                 "Guest Stack Offset",
                 &format_args!("{:#x}", self.peb_guest_stack_data_offset),
-            )
-            .field(
-                "Guest Error Buffer Offset",
-                &format_args!("{:#x}", self.guest_error_buffer_offset),
             )
             .field(
                 "Input Data Buffer Offset",
@@ -259,7 +243,6 @@ impl SandboxMemoryLayout {
             peb_offset + offset_of!(HyperlightPEB, security_cookie_seed);
         let peb_guest_dispatch_function_ptr_offset =
             peb_offset + offset_of!(HyperlightPEB, guest_function_dispatch_ptr);
-        let peb_guest_error_offset = peb_offset + offset_of!(HyperlightPEB, guestErrorData);
         let peb_code_and_outb_pointer_offset = peb_offset + offset_of!(HyperlightPEB, pCode);
         let peb_runmode_offset = peb_offset + offset_of!(HyperlightPEB, runMode);
         let peb_input_data_offset = peb_offset + offset_of!(HyperlightPEB, inputdata);
@@ -272,12 +255,8 @@ impl SandboxMemoryLayout {
         // The following offsets are the actual values that relate to memory layout,
         // which are written to PEB struct
         let peb_address = Self::BASE_ADDRESS + peb_offset;
-        let guest_error_buffer_offset = round_up_to(
-            peb_guest_stack_data_offset + size_of::<GuestStackData>(),
-            PAGE_SIZE_USIZE,
-        );
         let input_data_buffer_offset = round_up_to(
-            guest_error_buffer_offset + cfg.get_guest_error_buffer_size(),
+            peb_guest_stack_data_offset + size_of::<GuestStackData>(),
             PAGE_SIZE_USIZE,
         );
         let output_data_buffer_offset = round_up_to(
@@ -305,7 +284,6 @@ impl SandboxMemoryLayout {
             heap_size,
             peb_security_cookie_seed_offset,
             peb_guest_dispatch_function_ptr_offset,
-            peb_guest_error_offset,
             peb_code_and_outb_pointer_offset,
             peb_runmode_offset,
             peb_input_data_offset,
@@ -313,7 +291,6 @@ impl SandboxMemoryLayout {
             peb_guest_panic_context_offset,
             peb_heap_data_offset,
             peb_guest_stack_data_offset,
-            guest_error_buffer_offset,
             sandbox_memory_config: cfg,
             code_size,
             input_data_buffer_offset,
@@ -331,18 +308,6 @@ impl SandboxMemoryLayout {
     /// Gets the offset in guest memory to the RunMode field in the PEB struct.
     pub fn get_run_mode_offset(&self) -> usize {
         self.peb_runmode_offset
-    }
-
-    /// Get the offset in guest memory to the max size of the guest error buffer
-    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
-    pub(super) fn get_guest_error_buffer_size_offset(&self) -> usize {
-        self.peb_guest_error_offset
-    }
-
-    /// Get the offset in guest memory to the error message buffer pointer
-    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
-    fn get_guest_error_buffer_pointer_offset(&self) -> usize {
-        self.peb_guest_error_offset + size_of::<u64>()
     }
 
     /// Get the offset in guest memory to the output data size
@@ -542,7 +507,6 @@ impl SandboxMemoryLayout {
         let mut total_mapped_memory_size: usize = round_up_to(code_size, PAGE_SIZE_USIZE);
         total_mapped_memory_size += round_up_to(stack_size, PAGE_SIZE_USIZE);
         total_mapped_memory_size += round_up_to(heap_size, PAGE_SIZE_USIZE);
-        total_mapped_memory_size += round_up_to(cfg.get_guest_error_buffer_size(), PAGE_SIZE_USIZE);
         total_mapped_memory_size += round_up_to(cfg.get_input_data_size(), PAGE_SIZE_USIZE);
         total_mapped_memory_size += round_up_to(cfg.get_output_data_size(), PAGE_SIZE_USIZE);
         total_mapped_memory_size +=
@@ -626,28 +590,10 @@ impl SandboxMemoryLayout {
         }
 
         // PEB
-        let guest_error_offset = builder.push_page_aligned(
+        let input_data_offset = builder.push_page_aligned(
             size_of::<HyperlightPEB>(),
             MemoryRegionFlags::READ | MemoryRegionFlags::WRITE,
             Peb,
-        );
-
-        let expected_guest_error_offset =
-            TryInto::<usize>::try_into(self.guest_error_buffer_offset)?;
-
-        if guest_error_offset != expected_guest_error_offset {
-            return Err(new_error!(
-                "Guest error offset does not match expected Guest error offset expected:  {}, actual:  {}",
-                expected_guest_error_offset,
-                guest_error_offset
-            ));
-        }
-
-        // guest error
-        let input_data_offset = builder.push_page_aligned(
-            self.sandbox_memory_config.get_guest_error_buffer_size(),
-            MemoryRegionFlags::READ | MemoryRegionFlags::WRITE,
-            GuestErrorData,
         );
 
         let expected_input_data_offset = TryInto::<usize>::try_into(self.input_data_buffer_offset)?;
@@ -818,14 +764,6 @@ impl SandboxMemoryLayout {
 
         // Skip guest_dispatch_function_ptr_offset because it is set by the guest
 
-        // Set up Guest Error Fields
-        let addr = get_address!(guest_error_buffer);
-        shared_mem.write_u64(self.get_guest_error_buffer_pointer_offset(), addr)?;
-        shared_mem.write_u64(
-            self.get_guest_error_buffer_size_offset(),
-            u64::try_from(self.sandbox_memory_config.get_guest_error_buffer_size())?,
-        )?;
-
         // Skip code, is set when loading binary
         // skip outb and outb context, is set when running in_proc
 
@@ -957,8 +895,6 @@ mod tests {
         expected_size += layout.code_size;
 
         expected_size += round_up_to(size_of::<HyperlightPEB>(), PAGE_SIZE_USIZE);
-
-        expected_size += round_up_to(cfg.get_guest_error_buffer_size(), PAGE_SIZE_USIZE);
 
         expected_size += round_up_to(cfg.get_input_data_size(), PAGE_SIZE_USIZE);
 

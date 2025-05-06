@@ -199,7 +199,6 @@ where
                             MemoryRegionType::OutputData => PAGE_PRESENT | PAGE_RW | PAGE_NX,
                             MemoryRegionType::Peb => PAGE_PRESENT | PAGE_RW | PAGE_NX,
                             MemoryRegionType::PanicContext => PAGE_PRESENT | PAGE_RW | PAGE_NX,
-                            MemoryRegionType::GuestErrorData => PAGE_PRESENT | PAGE_RW | PAGE_NX,
                             MemoryRegionType::PageTables => PAGE_PRESENT | PAGE_RW | PAGE_NX,
                         },
                         // If there is an error then the address isn't mapped so mark it as not present
@@ -591,22 +590,11 @@ impl SandboxMemoryManager<HostSharedMemory> {
 
     /// Get the guest error data
     #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
-    pub(crate) fn get_guest_error(&self) -> Result<GuestError> {
-        // get memory buffer max size
-        let err_buffer_size_offset = self.layout.get_guest_error_buffer_size_offset();
-        let max_err_buffer_size = self.shared_mem.read::<u64>(err_buffer_size_offset)?;
-
-        // get guest error from layout and shared mem
-        let mut guest_error_buffer = vec![b'0'; usize::try_from(max_err_buffer_size)?];
-        let err_msg_offset = self.layout.guest_error_buffer_offset;
-        self.shared_mem
-            .copy_to_slice(guest_error_buffer.as_mut_slice(), err_msg_offset)?;
-        GuestError::try_from(guest_error_buffer.as_slice()).map_err(|e| {
-            new_error!(
-                "get_guest_error: failed to convert buffer to GuestError: {}",
-                e
-            )
-        })
+    pub(crate) fn get_guest_error(&mut self) -> Result<GuestError> {
+        self.shared_mem.try_pop_buffer_into::<GuestError>(
+            self.layout.output_data_buffer_offset,
+            self.layout.sandbox_memory_config.get_output_data_size(),
+        )
     }
 
     /// Read guest panic data from the `SharedMemory` contained within `self`

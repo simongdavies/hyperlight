@@ -84,7 +84,6 @@ pub struct GuestPanicContextData {
 pub struct HyperlightPEB {
     pub security_cookie_seed: u64,
     pub guest_function_dispatch_ptr: u64,
-    pub guestErrorData: GuestErrorData,
     pub pCode: *mut c_char,
     pub pOutb: *mut c_void,
     pub pOutbContext: *mut c_void,
