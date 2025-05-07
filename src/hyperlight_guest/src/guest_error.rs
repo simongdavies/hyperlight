@@ -19,9 +19,10 @@ use alloc::vec::Vec;
 use core::ffi::{c_char, CStr};
 
 use hyperlight_common::flatbuffer_wrappers::guest_error::{ErrorCode, GuestError};
+use hyperlight_common::outb::OutBAction;
 
 use crate::entrypoint::halt;
-use crate::host_function_call::{outb, OutBAction};
+use crate::host_function_call::outb;
 use crate::shared_output_data::push_shared_output_data;
 
 pub(crate) fn write_error(error_code: ErrorCode, message: Option<&str>) {

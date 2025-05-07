@@ -19,13 +19,14 @@ use core::ffi::{c_char, c_void, CStr};
 use core::ptr::copy_nonoverlapping;
 
 use hyperlight_common::mem::{HyperlightPEB, RunMode};
+use hyperlight_common::outb::OutBAction;
 use log::LevelFilter;
 use spin::Once;
 
 use crate::gdt::load_gdt;
 use crate::guest_function_call::dispatch_function;
 use crate::guest_logger::init_logger;
-use crate::host_function_call::{outb, OutBAction};
+use crate::host_function_call::outb;
 use crate::idtr::load_idt;
 use crate::{
     __security_cookie, HEAP_ALLOCATOR, MIN_STACK_ADDRESS, OS_PAGE_SIZE, OUTB_PTR,

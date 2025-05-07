@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 use hyperlight_common::flatbuffer_wrappers::function_types::ParameterValue;
 use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
 use hyperlight_common::flatbuffer_wrappers::guest_log_data::GuestLogData;
+use hyperlight_common::outb::OutBAction;
 use log::{Level, Record};
 use tracing::{instrument, Span};
 use tracing_log::format_trace;
@@ -29,25 +30,6 @@ use crate::hypervisor::handlers::{OutBHandler, OutBHandlerFunction, OutBHandlerW
 use crate::mem::mgr::SandboxMemoryManager;
 use crate::mem::shared_mem::HostSharedMemory;
 use crate::{new_error, HyperlightError, Result};
-
-pub(super) enum OutBAction {
-    Log,
-    CallFunction,
-    Abort,
-}
-
-impl TryFrom<u16> for OutBAction {
-    type Error = HyperlightError;
-    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
-    fn try_from(val: u16) -> Result<Self> {
-        match val {
-            99 => Ok(OutBAction::Log),
-            101 => Ok(OutBAction::CallFunction),
-            102 => Ok(OutBAction::Abort),
-            _ => Err(new_error!("Invalid OutB value: {}", val)),
-        }
-    }
-}
 
 #[instrument(err(Debug), skip_all, parent = Span::current(), level="Trace")]
 pub(super) fn outb_log(mgr: &mut SandboxMemoryManager<HostSharedMemory>) -> Result<()> {

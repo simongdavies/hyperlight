@@ -26,17 +26,12 @@ use hyperlight_common::flatbuffer_wrappers::function_types::{
 use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
 use hyperlight_common::flatbuffer_wrappers::util::get_flatbuffer_result;
 use hyperlight_common::mem::RunMode;
+use hyperlight_common::outb::OutBAction;
 
 use crate::error::{HyperlightGuestError, Result};
 use crate::shared_input_data::try_pop_shared_input_data_into;
 use crate::shared_output_data::push_shared_output_data;
 use crate::{OUTB_PTR, OUTB_PTR_WITH_CONTEXT, P_PEB, RUNNING_MODE};
-
-pub enum OutBAction {
-    Log = 99,
-    CallFunction = 101,
-    Abort = 102,
-}
 
 /// Get a return value from a host function call.
 /// This usually requires a host function to be called first using `call_host_function`.
