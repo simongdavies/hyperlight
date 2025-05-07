@@ -542,11 +542,10 @@ impl Hypervisor for HypervLinuxDriver {
         instruction_length: u64,
         outb_handle_fn: OutBHandlerWrapper,
     ) -> Result<()> {
-        let payload = data[..8].try_into()?;
         outb_handle_fn
             .try_lock()
             .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?
-            .call(port, u64::from_le_bytes(payload))?;
+            .call(port, data)?;
 
         // update rip
         self.vcpu_fd.set_reg(&[hv_register_assoc {

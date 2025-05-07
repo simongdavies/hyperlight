@@ -57,5 +57,5 @@ pub fn log_message(
     line: u32,
 ) {
     write_log_data(log_level, message, source, caller, source_file, line);
-    outb(OutBAction::Log as u16, 0);
+    outb(OutBAction::Log as u16, &[0]);
 }

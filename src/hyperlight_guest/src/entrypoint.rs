@@ -48,7 +48,8 @@ pub extern "C" fn abort() -> ! {
 }
 
 pub fn abort_with_code(code: i32) -> ! {
-    outb(OutBAction::Abort as u16, code as u8);
+    let byte = code as u8;
+    outb(OutBAction::Abort as u16, &[byte]);
     unreachable!()
 }
 
@@ -63,7 +64,8 @@ pub unsafe fn abort_with_code_and_message(code: i32, message_ptr: *const c_char)
         (*peb_ptr).guestPanicContextData.guestPanicContextDataBuffer as *mut c_char,
         CStr::from_ptr(message_ptr).count_bytes() + 1, // +1 for null terminator
     );
-    outb(OutBAction::Abort as u16, code as u8);
+    let byte = code as u8;
+    outb(OutBAction::Abort as u16, &[byte]);
     unreachable!()
 }
 
@@ -115,7 +117,7 @@ pub extern "win64" fn entrypoint(peb_address: u64, seed: u64, ops: u64, max_log_
                     RUNNING_MODE = (*peb_ptr).runMode;
 
                     OUTB_PTR = {
-                        let outb_ptr: extern "win64" fn(u16, u8) =
+                        let outb_ptr: extern "win64" fn(u16, *const u8, u64) =
                             core::mem::transmute((*peb_ptr).pOutb);
                         Some(outb_ptr)
                     };
@@ -125,8 +127,12 @@ pub extern "win64" fn entrypoint(peb_address: u64, seed: u64, ops: u64, max_log_
                     }
 
                     OUTB_PTR_WITH_CONTEXT = {
-                        let outb_ptr_with_context: extern "win64" fn(*mut c_void, u16, u8) =
-                            core::mem::transmute((*peb_ptr).pOutb);
+                        let outb_ptr_with_context: extern "win64" fn(
+                            *mut c_void,
+                            u16,
+                            *const u8,
+                            u64,
+                        ) = core::mem::transmute((*peb_ptr).pOutb);
                         Some(outb_ptr_with_context)
                     };
                 }

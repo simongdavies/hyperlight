@@ -49,7 +49,7 @@ pub(crate) fn set_error_and_halt(error_code: ErrorCode, message: &str) {
 
 #[no_mangle]
 pub(crate) extern "win64" fn set_stack_allocate_error() {
-    outb(OutBAction::Abort as u16, ErrorCode::StackOverflow as u8);
+    outb(OutBAction::Abort as u16, &[ErrorCode::StackOverflow as u8]);
 }
 
 #[no_mangle]

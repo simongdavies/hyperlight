@@ -81,7 +81,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
             (*peb_ptr).guestPanicContextData.guestPanicContextDataSize as usize,
         );
     }
-    outb(OutBAction::Abort as u16, ErrorCode::UnknownError as u8);
+    outb(OutBAction::Abort as u16, &[ErrorCode::UnknownError as u8]);
     unsafe { unreachable_unchecked() }
 }
 
@@ -97,9 +97,9 @@ pub(crate) static mut P_PEB: Option<*mut HyperlightPEB> = None;
 pub static mut MIN_STACK_ADDRESS: u64 = 0;
 
 pub static mut OS_PAGE_SIZE: u32 = 0;
-pub(crate) static mut OUTB_PTR: Option<extern "win64" fn(u16, u8)> = None;
+pub(crate) static mut OUTB_PTR: Option<extern "win64" fn(u16, *const u8, u64)> = None;
 pub(crate) static mut OUTB_PTR_WITH_CONTEXT: Option<
-    extern "win64" fn(*mut core::ffi::c_void, u16, u8),
+    extern "win64" fn(*mut core::ffi::c_void, u16, *const u8, u64),
 > = None;
 pub static mut RUNNING_MODE: RunMode = RunMode::None;
 

@@ -70,24 +70,40 @@ pub fn call_host_function(
 
     push_shared_output_data(host_function_call_buffer)?;
 
-    outb(OutBAction::CallFunction as u16, 0);
+    outb(OutBAction::CallFunction as u16, &[0]);
 
     Ok(())
 }
 
-pub fn outb(port: u16, value: u8) {
+pub fn outb(port: u16, data: &[u8]) {
     unsafe {
         match RUNNING_MODE {
             RunMode::Hypervisor => {
-                hloutb(port, value);
+                for chunk in data.chunks(4) {
+                    let val = match chunk {
+                        [a, b, c, d] => u32::from_le_bytes([*a, *b, *c, *d]),
+                        [a, b, c] => u32::from_le_bytes([*a, *b, *c, 0]),
+                        [a, b] => u32::from_le_bytes([*a, *b, 0, 0]),
+                        [a] => u32::from_le_bytes([*a, 0, 0, 0]),
+                        [] => break,
+                        _ => unreachable!(),
+                    };
+
+                    hloutd(val, port);
+                }
             }
             RunMode::InProcessLinux | RunMode::InProcessWindows => {
                 if let Some(outb_func) = OUTB_PTR_WITH_CONTEXT {
                     if let Some(peb_ptr) = P_PEB {
-                        outb_func((*peb_ptr).pOutbContext, port, value);
+                        outb_func(
+                            (*peb_ptr).pOutbContext,
+                            port,
+                            data.as_ptr(),
+                            data.len() as u64,
+                        );
                     }
                 } else if let Some(outb_func) = OUTB_PTR {
-                    outb_func(port, value);
+                    outb_func(port, data.as_ptr(), data.len() as u64);
                 } else {
                     panic!("Tried to call outb without hypervisor and without outb function ptrs");
                 }
@@ -100,7 +116,7 @@ pub fn outb(port: u16, value: u8) {
 }
 
 extern "win64" {
-    fn hloutb(port: u16, value: u8);
+    fn hloutd(value: u32, port: u16);
 }
 
 pub fn print_output_as_guest_function(function_call: &FunctionCall) -> Result<Vec<u8>> {
@@ -120,13 +136,15 @@ pub fn print_output_as_guest_function(function_call: &FunctionCall) -> Result<Ve
     }
 }
 
-// port: RCX(cx), value: RDX(dl)
+pub fn debug_print(msg: &str) {
+    outb(OutBAction::DebugPrint as u16, msg.as_bytes());
+}
+
 global_asm!(
-    ".global hloutb
-        hloutb:
-            xor rax, rax
-            mov al, dl
-            mov dx, cx
-            out dx, al
-            ret"
+    ".global hloutd
+     hloutd:
+        mov eax, ecx
+        mov dx, dx
+        out dx, eax
+        ret"
 );

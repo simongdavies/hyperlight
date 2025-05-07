@@ -99,7 +99,7 @@ fn handle_outb_impl(
     mem_mgr: &mut MemMgrWrapper<HostSharedMemory>,
     host_funcs: Arc<Mutex<HostFuncsWrapper>>,
     port: u16,
-    byte: u64,
+    data: Vec<u8>,
 ) -> Result<()> {
     match port.try_into()? {
         OutBAction::Log => outb_log(mem_mgr.as_mut()),
@@ -118,6 +118,7 @@ fn handle_outb_impl(
             Ok(())
         }
         OutBAction::Abort => {
+            let byte = u64::from(data[0]);
             let guest_error = ErrorCode::from(byte);
             let panic_context = mem_mgr.as_mut().read_guest_panic_context_data()?;
             // trim off trailing \0 bytes if they exist
@@ -134,6 +135,11 @@ fn handle_outb_impl(
                     s.trim().to_string(),
                 )),
             }
+        }
+        OutBAction::DebugPrint => {
+            let s = String::from_utf8_lossy(&data);
+            eprint!("{}", s);
+            Ok(())
         }
     }
 }
