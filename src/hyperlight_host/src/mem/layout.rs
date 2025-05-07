@@ -17,7 +17,6 @@ use std::fmt::Debug;
 use std::mem::{offset_of, size_of};
 
 use hyperlight_common::mem::{GuestStackData, HyperlightPEB, RunMode, PAGE_SIZE_USIZE};
-use paste::paste;
 use rand::{rng, RngCore};
 use tracing::{instrument, Span};
 
@@ -737,14 +736,12 @@ impl SandboxMemoryLayout {
     ) -> Result<()> {
         macro_rules! get_address {
             ($something:ident) => {
-                paste! {
-                    if run_inprocess {
-                        let offset = self.[<$something _offset>];
-                        let calculated_addr = shared_mem.calculate_address(offset)?;
-                        u64::try_from(calculated_addr)?
-                    } else {
-                        u64::try_from(guest_offset +  self.[<$something _offset>])?
-                    }
+                if run_inprocess {
+                    let offset = self.$something;
+                    let calculated_addr = shared_mem.calculate_address(offset)?;
+                    u64::try_from(calculated_addr)?
+                } else {
+                    u64::try_from(guest_offset + self.$something)?
                 }
             };
         }
@@ -789,7 +786,7 @@ impl SandboxMemoryLayout {
                 .get_input_data_size()
                 .try_into()?,
         )?;
-        let addr = get_address!(input_data_buffer);
+        let addr = get_address!(input_data_buffer_offset);
         shared_mem.write_u64(self.get_input_data_pointer_offset(), addr)?;
 
         // Set up output buffer pointer
@@ -799,11 +796,11 @@ impl SandboxMemoryLayout {
                 .get_output_data_size()
                 .try_into()?,
         )?;
-        let addr = get_address!(output_data_buffer);
+        let addr = get_address!(output_data_buffer_offset);
         shared_mem.write_u64(self.get_output_data_pointer_offset(), addr)?;
 
         // Set up the guest panic context buffer
-        let addr = get_address!(guest_panic_context_buffer);
+        let addr = get_address!(guest_panic_context_buffer_offset);
         shared_mem.write_u64(
             self.get_guest_panic_context_size_offset(),
             self.sandbox_memory_config
@@ -813,7 +810,7 @@ impl SandboxMemoryLayout {
         shared_mem.write_u64(self.get_guest_panic_context_buffer_pointer_offset(), addr)?;
 
         // Set up heap buffer pointer
-        let addr = get_address!(guest_heap_buffer);
+        let addr = get_address!(guest_heap_buffer_offset);
         shared_mem.write_u64(self.get_heap_size_offset(), self.heap_size.try_into()?)?;
         shared_mem.write_u64(self.get_heap_pointer_offset(), addr)?;
 
