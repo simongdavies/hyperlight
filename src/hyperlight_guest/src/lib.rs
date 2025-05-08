@@ -18,10 +18,10 @@ limitations under the License.
 // Deps
 use alloc::string::ToString;
 use core::hint::unreachable_unchecked;
-use core::ptr::copy_nonoverlapping;
 
 use buddy_system_allocator::LockedHeap;
 use guest_function_register::GuestFunctionRegister;
+use host_function_call::debug_print;
 use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
 use hyperlight_common::mem::{HyperlightPEB, RunMode};
 use hyperlight_common::outb::OutBAction;
@@ -73,14 +73,7 @@ pub(crate) static _fltused: i32 = 0;
 // to satisfy the clippy when cfg == test
 #[allow(dead_code)]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    unsafe {
-        let peb_ptr = P_PEB.unwrap();
-        copy_nonoverlapping(
-            info.to_string().as_ptr(),
-            (*peb_ptr).guestPanicContextData.guestPanicContextDataBuffer as *mut u8,
-            (*peb_ptr).guestPanicContextData.guestPanicContextDataSize as usize,
-        );
-    }
+    debug_print(info.to_string().as_str());
     outb(OutBAction::Abort as u16, &[ErrorCode::UnknownError as u8]);
     unsafe { unreachable_unchecked() }
 }

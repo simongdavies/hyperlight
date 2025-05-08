@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use hyperlight_common::flatbuffer_wrappers::function_types::ParameterValue;
 use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
 use hyperlight_common::flatbuffer_wrappers::guest_log_data::GuestLogData;
-use hyperlight_common::outb::OutBAction;
+use hyperlight_common::outb::{Exception, OutBAction};
 use log::{Level, Record};
 use tracing::{instrument, Span};
 use tracing_log::format_trace;
@@ -120,20 +120,22 @@ fn handle_outb_impl(
         OutBAction::Abort => {
             let byte = u64::from(data[0]);
             let guest_error = ErrorCode::from(byte);
-            let panic_context = mem_mgr.as_mut().read_guest_panic_context_data()?;
-            // trim off trailing \0 bytes if they exist
-            let index_opt = panic_context.iter().position(|&x| x == 0x00);
-            let trimmed = match index_opt {
-                Some(n) => &panic_context[0..n],
-                None => &panic_context,
-            };
-            let s = String::from_utf8_lossy(trimmed);
+
             match guest_error {
                 ErrorCode::StackOverflow => Err(HyperlightError::StackOverflow()),
-                _ => Err(HyperlightError::GuestAborted(
-                    byte as u8,
-                    s.trim().to_string(),
-                )),
+                _ => {
+                    let message = match data.get(1) {
+                        Some(&exception_code) => match Exception::try_from(exception_code) {
+                            Ok(exception) => format!("Exception: {:?}", exception),
+                            Err(e) => {
+                                format!("Unknown exception code: {:#x} ({})", exception_code, e)
+                            }
+                        },
+                        None => "See stderr for panic context".into(),
+                    };
+
+                    Err(HyperlightError::GuestAborted(byte as u8, message))
+                }
             }
         }
         OutBAction::DebugPrint => {

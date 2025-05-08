@@ -81,9 +81,6 @@ pub struct SandboxConfiguration {
     // field should be represented as an `Option`, that type is not
     // FFI-safe, so it cannot be.
     max_initialization_time: u16,
-    /// The size of the memory buffer that is made available for serializing
-    /// guest panic context
-    guest_panic_context_buffer_size: usize,
 }
 
 impl SandboxConfiguration {
@@ -113,10 +110,6 @@ impl SandboxConfiguration {
     pub const MIN_MAX_WAIT_FOR_CANCELLATION: u8 = 10;
     /// The maximum value for max wait for cancellation (in milliseconds)
     pub const MAX_MAX_WAIT_FOR_CANCELLATION: u8 = u8::MAX;
-    /// The default and minimum values for guest panic context data
-    pub const DEFAULT_GUEST_PANIC_CONTEXT_BUFFER_SIZE: usize = 0x400;
-    /// The minimum value for guest panic context data
-    pub const MIN_GUEST_PANIC_CONTEXT_BUFFER_SIZE: usize = 0x400;
 
     #[allow(clippy::too_many_arguments)]
     /// Create a new configuration for a sandbox with the given sizes.
@@ -129,7 +122,6 @@ impl SandboxConfiguration {
         max_execution_time: Option<Duration>,
         max_initialization_time: Option<Duration>,
         max_wait_for_cancellation: Option<Duration>,
-        guest_panic_context_buffer_size: usize,
         #[cfg(gdb)] guest_debug_info: Option<DebugInfo>,
     ) -> Self {
         Self {
@@ -184,10 +176,6 @@ impl SandboxConfiguration {
                     None => Self::DEFAULT_MAX_INITIALIZATION_TIME,
                 }
             },
-            guest_panic_context_buffer_size: max(
-                guest_panic_context_buffer_size,
-                Self::MIN_GUEST_PANIC_CONTEXT_BUFFER_SIZE,
-            ),
             #[cfg(gdb)]
             guest_debug_info,
         }
@@ -275,15 +263,6 @@ impl SandboxConfiguration {
         }
     }
 
-    /// Set the size of the memory buffer that is made available for serializing guest panic context
-    /// the minimum value is MIN_GUEST_PANIC_CONTEXT_BUFFER_SIZE
-    pub fn set_guest_panic_context_buffer_size(&mut self, guest_panic_context_buffer_size: usize) {
-        self.guest_panic_context_buffer_size = max(
-            guest_panic_context_buffer_size,
-            Self::MIN_GUEST_PANIC_CONTEXT_BUFFER_SIZE,
-        );
-    }
-
     /// Sets the configuration for the guest debug
     #[cfg(gdb)]
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
@@ -299,11 +278,6 @@ impl SandboxConfiguration {
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub(crate) fn get_output_data_size(&self) -> usize {
         self.output_data_size
-    }
-
-    #[instrument(skip_all, parent = Span::current(), level="Trace")]
-    pub(crate) fn get_guest_panic_context_buffer_size(&self) -> usize {
-        self.guest_panic_context_buffer_size
     }
 
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
@@ -364,7 +338,6 @@ impl Default for SandboxConfiguration {
             None,
             None,
             None,
-            Self::DEFAULT_GUEST_PANIC_CONTEXT_BUFFER_SIZE,
             #[cfg(gdb)]
             None,
         )
@@ -387,7 +360,6 @@ mod tests {
         const MAX_EXECUTION_TIME_OVERRIDE: u16 = 1010;
         const MAX_WAIT_FOR_CANCELLATION_OVERRIDE: u8 = 200;
         const MAX_INITIALIZATION_TIME_OVERRIDE: u16 = 2000;
-        const GUEST_PANIC_CONTEXT_BUFFER_SIZE_OVERRIDE: usize = 0x4005;
         let mut cfg = SandboxConfiguration::new(
             INPUT_DATA_SIZE_OVERRIDE,
             OUTPUT_DATA_SIZE_OVERRIDE,
@@ -400,7 +372,6 @@ mod tests {
             Some(Duration::from_millis(
                 MAX_WAIT_FOR_CANCELLATION_OVERRIDE as u64,
             )),
-            GUEST_PANIC_CONTEXT_BUFFER_SIZE_OVERRIDE,
             #[cfg(gdb)]
             None,
         );
@@ -429,10 +400,6 @@ mod tests {
             MAX_WAIT_FOR_CANCELLATION_OVERRIDE,
             cfg.max_wait_for_cancellation
         );
-        assert_eq!(
-            GUEST_PANIC_CONTEXT_BUFFER_SIZE_OVERRIDE,
-            cfg.guest_panic_context_buffer_size
-        );
     }
 
     #[test]
@@ -451,7 +418,6 @@ mod tests {
             Some(Duration::from_millis(
                 SandboxConfiguration::MIN_MAX_WAIT_FOR_CANCELLATION as u64 - 1,
             )),
-            SandboxConfiguration::MIN_GUEST_PANIC_CONTEXT_BUFFER_SIZE - 1,
             #[cfg(gdb)]
             None,
         );
@@ -466,10 +432,6 @@ mod tests {
         assert_eq!(
             SandboxConfiguration::MIN_MAX_WAIT_FOR_CANCELLATION,
             cfg.max_wait_for_cancellation
-        );
-        assert_eq!(
-            SandboxConfiguration::MIN_GUEST_PANIC_CONTEXT_BUFFER_SIZE,
-            cfg.guest_panic_context_buffer_size
         );
         assert_eq!(
             SandboxConfiguration::MIN_MAX_EXECUTION_TIME,
@@ -487,9 +449,6 @@ mod tests {
         cfg.set_max_execution_cancel_wait_time(Duration::from_millis(
             SandboxConfiguration::MIN_MAX_WAIT_FOR_CANCELLATION as u64 - 1,
         ));
-        cfg.set_guest_panic_context_buffer_size(
-            SandboxConfiguration::MIN_GUEST_PANIC_CONTEXT_BUFFER_SIZE - 1,
-        );
 
         assert_eq!(SandboxConfiguration::MIN_INPUT_SIZE, cfg.input_data_size);
         assert_eq!(SandboxConfiguration::MIN_OUTPUT_SIZE, cfg.output_data_size);
@@ -500,10 +459,6 @@ mod tests {
         assert_eq!(
             SandboxConfiguration::MIN_MAX_WAIT_FOR_CANCELLATION,
             cfg.max_wait_for_cancellation
-        );
-        assert_eq!(
-            SandboxConfiguration::MIN_GUEST_PANIC_CONTEXT_BUFFER_SIZE,
-            cfg.guest_panic_context_buffer_size
         );
     }
 
@@ -527,13 +482,6 @@ mod tests {
                 let mut cfg = SandboxConfiguration::default();
                 cfg.set_output_data_size(size);
                 prop_assert_eq!(size, cfg.get_output_data_size());
-            }
-
-            #[test]
-            fn guest_panic_context_buffer_size(size in SandboxConfiguration::MIN_GUEST_PANIC_CONTEXT_BUFFER_SIZE..=SandboxConfiguration::MIN_GUEST_PANIC_CONTEXT_BUFFER_SIZE * 10) {
-                let mut cfg = SandboxConfiguration::default();
-                cfg.set_guest_panic_context_buffer_size(size);
-                prop_assert_eq!(size, cfg.get_guest_panic_context_buffer_size());
             }
 
             #[test]

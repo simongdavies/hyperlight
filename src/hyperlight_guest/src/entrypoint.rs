@@ -16,7 +16,6 @@ limitations under the License.
 
 use core::arch::asm;
 use core::ffi::{c_char, c_void, CStr};
-use core::ptr::copy_nonoverlapping;
 
 use hyperlight_common::mem::{HyperlightPEB, RunMode};
 use hyperlight_common::outb::OutBAction;
@@ -26,7 +25,7 @@ use spin::Once;
 use crate::gdt::load_gdt;
 use crate::guest_function_call::dispatch_function;
 use crate::guest_logger::init_logger;
-use crate::host_function_call::outb;
+use crate::host_function_call::{debug_print, outb};
 use crate::idtr::load_idt;
 use crate::{
     __security_cookie, HEAP_ALLOCATOR, MIN_STACK_ADDRESS, OS_PAGE_SIZE, OUTB_PTR,
@@ -44,12 +43,11 @@ pub fn halt() {
 
 #[no_mangle]
 pub extern "C" fn abort() -> ! {
-    abort_with_code(0)
+    abort_with_code(&[0])
 }
 
-pub fn abort_with_code(code: i32) -> ! {
-    let byte = code as u8;
-    outb(OutBAction::Abort as u16, &[byte]);
+pub fn abort_with_code(code: &[u8]) -> ! {
+    outb(OutBAction::Abort as u16, code);
     unreachable!()
 }
 
@@ -57,15 +55,14 @@ pub fn abort_with_code(code: i32) -> ! {
 ///
 /// # Safety
 /// This function is unsafe because it dereferences a raw pointer.
-pub unsafe fn abort_with_code_and_message(code: i32, message_ptr: *const c_char) -> ! {
-    let peb_ptr = P_PEB.unwrap();
-    copy_nonoverlapping(
-        message_ptr,
-        (*peb_ptr).guestPanicContextData.guestPanicContextDataBuffer as *mut c_char,
-        CStr::from_ptr(message_ptr).count_bytes() + 1, // +1 for null terminator
+pub unsafe fn abort_with_code_and_message(code: &[u8], message_ptr: *const c_char) -> ! {
+    debug_print(
+        CStr::from_ptr(message_ptr)
+            .to_str()
+            .expect("Invalid UTF-8 string"),
     );
-    let byte = code as u8;
-    outb(OutBAction::Abort as u16, &[byte]);
+
+    outb(OutBAction::Abort as u16, code);
     unreachable!()
 }
 

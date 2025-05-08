@@ -494,7 +494,7 @@ mod tests {
         match res.unwrap_err() {
             HyperlightError::GuestAborted(_, msg) => {
                 // msg should indicate we got an invalid opcode exception
-                assert!(msg.contains("EXCEPTION: 0x6"));
+                assert!(msg.contains("InvalidOpcode"));
             }
             e => panic!(
                 "Expected HyperlightError::GuestExecutionError but got {:?}",

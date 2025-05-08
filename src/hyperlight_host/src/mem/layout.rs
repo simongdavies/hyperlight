@@ -21,7 +21,7 @@ use rand::{rng, RngCore};
 use tracing::{instrument, Span};
 
 use super::memory_region::MemoryRegionType::{
-    Code, GuardPage, Heap, InputData, OutputData, PageTables, PanicContext, Peb, Stack,
+    Code, GuardPage, Heap, InputData, OutputData, PageTables, Peb, Stack,
 };
 use super::memory_region::{MemoryRegion, MemoryRegionFlags, MemoryRegionVecBuilder};
 use super::mgr::AMOUNT_OF_MEMORY_PER_PT;
@@ -36,8 +36,6 @@ use crate::{log_then_return, new_error, Result};
 // |             Guard Page (4KiB)             |
 // +-------------------------------------------+
 // |             Guest Heap                    |
-// +-------------------------------------------+
-// |         Guest Panic Context               |
 // +-------------------------------------------+
 // |             Output Data                   |
 // +-------------------------------------------+
@@ -70,10 +68,6 @@ use crate::{log_then_return, new_error, Result};
 ///   the stack might be slightly bigger or smaller than this value since total memory
 ///   size is rounded up to the nearest 4K, and there is a 16-byte stack guard written
 ///   to the top of the stack. (see below for more details)
-///
-/// - `GuestPanicContext` - contains a buffer for context associated with any guest
-///   panic that occurred.
-///   the length of this field is returned by the `guest_panic_context_size()` fn of this struct.
 
 #[derive(Copy, Clone)]
 pub(crate) struct SandboxMemoryLayout {
@@ -92,7 +86,6 @@ pub(crate) struct SandboxMemoryLayout {
     peb_runmode_offset: usize,
     peb_input_data_offset: usize,
     peb_output_data_offset: usize,
-    peb_guest_panic_context_offset: usize,
     peb_heap_data_offset: usize,
     peb_guest_stack_data_offset: usize,
 
@@ -100,7 +93,6 @@ pub(crate) struct SandboxMemoryLayout {
     // that are written to the PEB struct
     pub(super) input_data_buffer_offset: usize,
     pub(super) output_data_buffer_offset: usize,
-    guest_panic_context_buffer_offset: usize,
     guest_heap_buffer_offset: usize,
     guard_page_offset: usize,
     guest_user_stack_buffer_offset: usize, // the lowest address of the user stack
@@ -147,10 +139,6 @@ impl Debug for SandboxMemoryLayout {
                 &format_args!("{:#x}", self.peb_output_data_offset),
             )
             .field(
-                "Guest Panic Context Offset",
-                &format_args!("{:#x}", self.peb_guest_panic_context_offset),
-            )
-            .field(
                 "Guest Heap Offset",
                 &format_args!("{:#x}", self.peb_heap_data_offset),
             )
@@ -165,10 +153,6 @@ impl Debug for SandboxMemoryLayout {
             .field(
                 "Output Data Buffer Offset",
                 &format_args!("{:#x}", self.output_data_buffer_offset),
-            )
-            .field(
-                "Guest Panic Context Buffer Offset",
-                &format_args!("{:#x}", self.guest_panic_context_buffer_offset),
             )
             .field(
                 "Guest Heap Buffer Offset",
@@ -246,8 +230,6 @@ impl SandboxMemoryLayout {
         let peb_runmode_offset = peb_offset + offset_of!(HyperlightPEB, runMode);
         let peb_input_data_offset = peb_offset + offset_of!(HyperlightPEB, inputdata);
         let peb_output_data_offset = peb_offset + offset_of!(HyperlightPEB, outputdata);
-        let peb_guest_panic_context_offset =
-            peb_offset + offset_of!(HyperlightPEB, guestPanicContextData);
         let peb_heap_data_offset = peb_offset + offset_of!(HyperlightPEB, guestheapData);
         let peb_guest_stack_data_offset = peb_offset + offset_of!(HyperlightPEB, gueststackData);
 
@@ -262,13 +244,9 @@ impl SandboxMemoryLayout {
             input_data_buffer_offset + cfg.get_input_data_size(),
             PAGE_SIZE_USIZE,
         );
-        let guest_panic_context_buffer_offset = round_up_to(
-            output_data_buffer_offset + cfg.get_output_data_size(),
-            PAGE_SIZE_USIZE,
-        );
         // make sure heap buffer starts at 4K boundary
         let guest_heap_buffer_offset = round_up_to(
-            guest_panic_context_buffer_offset + cfg.get_guest_panic_context_buffer_size(),
+            output_data_buffer_offset + cfg.get_output_data_size(),
             PAGE_SIZE_USIZE,
         );
         // make sure guard page starts at 4K boundary
@@ -287,7 +265,6 @@ impl SandboxMemoryLayout {
             peb_runmode_offset,
             peb_input_data_offset,
             peb_output_data_offset,
-            peb_guest_panic_context_offset,
             peb_heap_data_offset,
             peb_guest_stack_data_offset,
             sandbox_memory_config: cfg,
@@ -297,7 +274,6 @@ impl SandboxMemoryLayout {
             guest_heap_buffer_offset,
             guest_user_stack_buffer_offset,
             peb_address,
-            guest_panic_context_buffer_offset,
             guard_page_offset,
             total_page_table_size,
             guest_code_offset,
@@ -425,33 +401,6 @@ impl SandboxMemoryLayout {
         self.get_min_guest_stack_address_offset() + size_of::<u64>()
     }
 
-    // Get the offset in guest memory to the start of the guest panic context data
-    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
-    pub(crate) fn get_guest_panic_context_offset(&self) -> usize {
-        self.peb_guest_panic_context_offset
-    }
-
-    // Get the offset to the guest panic context buffer size
-    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
-    pub(crate) fn get_guest_panic_context_size_offset(&self) -> usize {
-        // The size field is the first field in the `GuestPanicContext` data
-        self.peb_guest_panic_context_offset
-    }
-
-    /// Get the offset to the guest panic context buffer pointer
-    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
-    pub(crate) fn get_guest_panic_context_buffer_pointer_offset(&self) -> usize {
-        // The guest panic data pointer is immediately after the guest
-        // panic data size field in the `GuestPanicContext` data which is a `u64`
-        self.get_guest_panic_context_size_offset() + size_of::<u64>()
-    }
-
-    /// Get the offset to the guest panic context buffer pointer
-    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
-    pub(crate) fn get_guest_panic_context_buffer_offset(&self) -> usize {
-        self.guest_panic_context_buffer_offset
-    }
-
     /// Get the offset to the guest guard page
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub fn get_guard_page_offset(&self) -> usize {
@@ -508,8 +457,6 @@ impl SandboxMemoryLayout {
         total_mapped_memory_size += round_up_to(heap_size, PAGE_SIZE_USIZE);
         total_mapped_memory_size += round_up_to(cfg.get_input_data_size(), PAGE_SIZE_USIZE);
         total_mapped_memory_size += round_up_to(cfg.get_output_data_size(), PAGE_SIZE_USIZE);
-        total_mapped_memory_size +=
-            round_up_to(cfg.get_guest_panic_context_buffer_size(), PAGE_SIZE_USIZE);
         total_mapped_memory_size += round_up_to(size_of::<HyperlightPEB>(), PAGE_SIZE_USIZE);
 
         // Add the base address of the sandbox
@@ -624,29 +571,10 @@ impl SandboxMemoryLayout {
         }
 
         // guest output data
-        let guest_panic_context_offset = builder.push_page_aligned(
+        let heap_offset = builder.push_page_aligned(
             self.sandbox_memory_config.get_output_data_size(),
             MemoryRegionFlags::READ | MemoryRegionFlags::WRITE,
             OutputData,
-        );
-
-        let expected_guest_panic_context_offset =
-            TryInto::<usize>::try_into(self.guest_panic_context_buffer_offset)?;
-
-        if guest_panic_context_offset != expected_guest_panic_context_offset {
-            return Err(new_error!(
-                "Guest Panic Context offset does not match expected Guest Panic Context offset expected:  {}, actual:  {}",
-                expected_guest_panic_context_offset,
-                guest_panic_context_offset
-            ));
-        }
-
-        // guest panic context
-        let heap_offset = builder.push_page_aligned(
-            self.sandbox_memory_config
-                .get_guest_panic_context_buffer_size(),
-            MemoryRegionFlags::READ | MemoryRegionFlags::WRITE,
-            PanicContext,
         );
 
         let expected_heap_offset = TryInto::<usize>::try_into(self.guest_heap_buffer_offset)?;
@@ -799,16 +727,6 @@ impl SandboxMemoryLayout {
         let addr = get_address!(output_data_buffer_offset);
         shared_mem.write_u64(self.get_output_data_pointer_offset(), addr)?;
 
-        // Set up the guest panic context buffer
-        let addr = get_address!(guest_panic_context_buffer_offset);
-        shared_mem.write_u64(
-            self.get_guest_panic_context_size_offset(),
-            self.sandbox_memory_config
-                .get_guest_panic_context_buffer_size()
-                .try_into()?,
-        )?;
-        shared_mem.write_u64(self.get_guest_panic_context_buffer_pointer_offset(), addr)?;
-
         // Set up heap buffer pointer
         let addr = get_address!(guest_heap_buffer_offset);
         shared_mem.write_u64(self.get_heap_size_offset(), self.heap_size.try_into()?)?;
@@ -896,8 +814,6 @@ mod tests {
         expected_size += round_up_to(cfg.get_input_data_size(), PAGE_SIZE_USIZE);
 
         expected_size += round_up_to(cfg.get_output_data_size(), PAGE_SIZE_USIZE);
-
-        expected_size += round_up_to(cfg.get_guest_panic_context_buffer_size(), PAGE_SIZE_USIZE);
 
         expected_size += round_up_to(layout.heap_size, PAGE_SIZE_USIZE);
 

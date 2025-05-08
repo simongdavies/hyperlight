@@ -80,11 +80,15 @@ pub fn outb(port: u16, data: &[u8]) {
         match RUNNING_MODE {
             RunMode::Hypervisor => {
                 for chunk in data.chunks(4) {
+                    // Process the data in chunks of 4 bytes. If a chunk has fewer than 4 bytes,
+                    // pad it with 0x7F to ensure it can be converted into a 4-byte array.
+                    // The choice of 0x7F as the padding value is arbitrary and does not carry
+                    // any special meaning; it simply ensures consistent chunk size.
                     let val = match chunk {
                         [a, b, c, d] => u32::from_le_bytes([*a, *b, *c, *d]),
-                        [a, b, c] => u32::from_le_bytes([*a, *b, *c, 0]),
-                        [a, b] => u32::from_le_bytes([*a, *b, 0, 0]),
-                        [a] => u32::from_le_bytes([*a, 0, 0, 0]),
+                        [a, b, c] => u32::from_le_bytes([*a, *b, *c, 0x7F]),
+                        [a, b] => u32::from_le_bytes([*a, *b, 0x7F, 0x7F]),
+                        [a] => u32::from_le_bytes([*a, 0x7F, 0x7F, 0x7F]),
                         [] => break,
                         _ => unreachable!(),
                     };
