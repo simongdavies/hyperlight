@@ -14,53 +14,33 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+use std::collections::HashMap;
 use std::io::{IsTerminal, Write};
 
 use hyperlight_common::flatbuffer_wrappers::function_types::{ParameterValue, ReturnValue};
 use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
 use tracing::{instrument, Span};
 
-use super::{ExtraAllowedSyscall, FunctionsMap};
-use crate::func::host_functions::HostFunctionDefinition;
+use super::ExtraAllowedSyscall;
 use crate::func::HyperlightFunction;
 use crate::HyperlightError::HostFunctionNotFound;
 use crate::{new_error, Result};
 
-type HostFunctionDetails = Option<Vec<HostFunctionDefinition>>;
-
 #[derive(Default, Clone)]
 /// A Wrapper around details of functions exposed by the Host
 pub struct HostFuncsWrapper {
-    functions_map: FunctionsMap,
-    function_details: HostFunctionDetails,
+    functions_map: HashMap<String, (HyperlightFunction, Option<Vec<ExtraAllowedSyscall>>)>,
 }
 
 impl HostFuncsWrapper {
-    #[instrument(skip_all, parent = Span::current(), level = "Trace")]
-    fn get_host_funcs(&self) -> &FunctionsMap {
-        &self.functions_map
-    }
-    #[instrument(skip_all, parent = Span::current(), level = "Trace")]
-    fn get_host_funcs_mut(&mut self) -> &mut FunctionsMap {
-        &mut self.functions_map
-    }
-    #[instrument(skip_all, parent = Span::current(), level = "Trace")]
-    fn get_host_func_details(&self) -> &HostFunctionDetails {
-        &self.function_details
-    }
-    #[instrument(skip_all, parent = Span::current(), level = "Trace")]
-    fn get_host_func_details_mut(&mut self) -> &mut HostFunctionDetails {
-        &mut self.function_details
-    }
-
     /// Register a host function with the sandbox.
     #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
     pub(crate) fn register_host_function(
         &mut self,
-        hfd: &HostFunctionDefinition,
+        name: String,
         func: HyperlightFunction,
     ) -> Result<()> {
-        register_host_function_helper(self, hfd, func, None)
+        register_host_function_helper(self, name, func, None)
     }
 
     /// Register a host function with the sandbox, with a list of extra syscalls
@@ -69,11 +49,11 @@ impl HostFuncsWrapper {
     #[cfg(all(feature = "seccomp", target_os = "linux"))]
     pub(crate) fn register_host_function_with_syscalls(
         &mut self,
-        hfd: &HostFunctionDefinition,
+        name: String,
         func: HyperlightFunction,
         extra_allowed_syscalls: Vec<ExtraAllowedSyscall>,
     ) -> Result<()> {
-        register_host_function_helper(self, hfd, func, Some(extra_allowed_syscalls))
+        register_host_function_helper(self, name, func, Some(extra_allowed_syscalls))
     }
 
     /// Assuming a host function called `"HostPrint"` exists, and takes a
@@ -84,7 +64,7 @@ impl HostFuncsWrapper {
     #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
     pub(super) fn host_print(&mut self, msg: String) -> Result<i32> {
         let res = call_host_func_impl(
-            self.get_host_funcs(),
+            &self.functions_map,
             "HostPrint",
             vec![ParameterValue::String(msg)],
         )?;
@@ -104,56 +84,40 @@ impl HostFuncsWrapper {
         name: &str,
         args: Vec<ParameterValue>,
     ) -> Result<ReturnValue> {
-        call_host_func_impl(self.get_host_funcs(), name, args)
-    }
-
-    /// Insert a host function into the list of registered host functions.
-    pub(super) fn insert_host_function(&mut self, host_function: HostFunctionDefinition) {
-        match &mut self.function_details {
-            Some(host_functions) => host_functions.push(host_function),
-            None => {
-                let host_functions = Vec::from(&[host_function]);
-                self.function_details = Some(host_functions);
-            }
-        }
+        call_host_func_impl(&self.functions_map, name, args)
     }
 }
 
 fn register_host_function_helper(
     self_: &mut HostFuncsWrapper,
-    hfd: &HostFunctionDefinition,
+    name: String,
     func: HyperlightFunction,
     extra_allowed_syscalls: Option<Vec<ExtraAllowedSyscall>>,
 ) -> Result<()> {
     if let Some(_syscalls) = extra_allowed_syscalls {
         #[cfg(all(feature = "seccomp", target_os = "linux"))]
-        self_
-            .get_host_funcs_mut()
-            .insert(hfd.function_name.to_string(), func, Some(_syscalls));
+        self_.functions_map.insert(name, (func, Some(_syscalls)));
 
         #[cfg(not(all(feature = "seccomp", target_os = "linux")))]
         return Err(new_error!(
             "Extra syscalls are only supported on Linux with seccomp"
         ));
     } else {
-        self_
-            .get_host_funcs_mut()
-            .insert(hfd.function_name.to_string(), func, None);
+        self_.functions_map.insert(name, (func, None));
     }
-    self_.insert_host_function(hfd.clone());
 
     Ok(())
 }
 
 #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
 fn call_host_func_impl(
-    host_funcs: &FunctionsMap,
+    host_funcs: &HashMap<String, (HyperlightFunction, Option<Vec<ExtraAllowedSyscall>>)>,
     name: &str,
     args: Vec<ParameterValue>,
 ) -> Result<ReturnValue> {
     // Inner function containing the common logic
     fn call_func(
-        host_funcs: &FunctionsMap,
+        host_funcs: &HashMap<String, (HyperlightFunction, Option<Vec<ExtraAllowedSyscall>>)>,
         name: &str,
         args: Vec<ParameterValue>,
     ) -> Result<ReturnValue> {

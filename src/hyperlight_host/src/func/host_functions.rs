@@ -17,41 +17,13 @@ limitations under the License.
 #![allow(non_snake_case)]
 use std::sync::{Arc, Mutex};
 
-use hyperlight_common::flatbuffer_wrappers::function_types::{
-    ParameterType, ParameterValue, ReturnType,
-};
+use hyperlight_common::flatbuffer_wrappers::function_types::ParameterValue;
 use tracing::{instrument, Span};
 
 use super::{HyperlightFunction, SupportedParameterType, SupportedReturnType};
 use crate::sandbox::{ExtraAllowedSyscall, UninitializedSandbox};
 use crate::HyperlightError::UnexpectedNoOfArguments;
 use crate::{log_then_return, new_error, Result};
-
-/// The definition of a function exposed from the host to the guest
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct HostFunctionDefinition {
-    /// The function name
-    pub function_name: String,
-    /// The type of the parameter values for the host function call.
-    pub parameter_types: Option<Vec<ParameterType>>,
-    /// The type of the return value from the host function call
-    pub return_type: ReturnType,
-}
-
-impl HostFunctionDefinition {
-    /// Create a new `HostFunctionDefinition`.
-    pub fn new(
-        function_name: String,
-        parameter_types: Option<Vec<ParameterType>>,
-        return_type: ReturnType,
-    ) -> Self {
-        Self {
-            function_name,
-            parameter_types,
-            return_type,
-        }
-    }
-}
 
 /// Trait for registering a host function
 pub trait HostFunction<R, Args> {
@@ -181,8 +153,6 @@ macro_rules! impl_host_function {
                     Ok(result.into_value())
                 });
 
-                let parameter_types = Some(vec![$($P::TYPE),*]);
-
                 if let Some(_eas) = extra_allowed_syscalls {
                     if cfg!(all(feature = "seccomp", target_os = "linux")) {
                         // Register with extra allowed syscalls
@@ -193,11 +163,7 @@ macro_rules! impl_host_function {
                                 .try_lock()
                                 .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?
                                 .register_host_function_with_syscalls(
-                                    &HostFunctionDefinition::new(
-                                        name.to_string(),
-                                        parameter_types,
-                                        R::TYPE,
-                                    ),
+                                    name.to_string(),
                                     HyperlightFunction::new(func),
                                     _eas,
                                 )?;
@@ -213,11 +179,7 @@ macro_rules! impl_host_function {
                         .try_lock()
                         .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?
                         .register_host_function(
-                            &HostFunctionDefinition::new(
-                                name.to_string(),
-                                parameter_types,
-                                R::TYPE,
-                            ),
+                            name.to_string(),
                             HyperlightFunction::new(func),
                         )?;
                 }
