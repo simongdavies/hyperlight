@@ -25,7 +25,7 @@ use tracing::{instrument, Span};
 
 #[cfg(gdb)]
 use super::config::DebugInfo;
-use super::host_funcs::{default_writer_func, HostFuncsWrapper};
+use super::host_funcs::{default_writer_func, FunctionRegistry};
 use super::mem_mgr::MemMgrWrapper;
 use super::run_options::SandboxRunOptions;
 use super::uninitialized_evolve::evolve_impl_multi_use;
@@ -48,7 +48,7 @@ use crate::{log_build_details, log_then_return, new_error, MultiUseSandbox, Resu
 /// `UninitializedSandbox` into an initialized `Sandbox`.
 pub struct UninitializedSandbox {
     /// Registered host functions
-    pub(crate) host_funcs: Arc<Mutex<HostFuncsWrapper>>,
+    pub(crate) host_funcs: Arc<Mutex<FunctionRegistry>>,
     /// The memory manager for the sandbox.
     pub(crate) mgr: MemMgrWrapper<ExclusiveSharedMemory>,
     pub(crate) run_inprocess: bool,
@@ -184,7 +184,7 @@ impl UninitializedSandbox {
 
         mem_mgr_wrapper.write_memory_layout(run_inprocess)?;
 
-        let host_funcs = Arc::new(Mutex::new(HostFuncsWrapper::default()));
+        let host_funcs = Arc::new(Mutex::new(FunctionRegistry::default()));
 
         let mut sandbox = Self {
             host_funcs,

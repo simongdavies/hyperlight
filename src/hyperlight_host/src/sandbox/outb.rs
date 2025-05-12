@@ -24,7 +24,7 @@ use log::{Level, Record};
 use tracing::{instrument, Span};
 use tracing_log::format_trace;
 
-use super::host_funcs::HostFuncsWrapper;
+use super::host_funcs::FunctionRegistry;
 use super::mem_mgr::MemMgrWrapper;
 use crate::hypervisor::handlers::{OutBHandler, OutBHandlerFunction, OutBHandlerWrapper};
 use crate::mem::mgr::SandboxMemoryManager;
@@ -97,7 +97,7 @@ pub(super) fn outb_log(mgr: &mut SandboxMemoryManager<HostSharedMemory>) -> Resu
 #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
 fn handle_outb_impl(
     mem_mgr: &mut MemMgrWrapper<HostSharedMemory>,
-    host_funcs: Arc<Mutex<HostFuncsWrapper>>,
+    host_funcs: Arc<Mutex<FunctionRegistry>>,
     port: u16,
     data: Vec<u8>,
 ) -> Result<()> {
@@ -153,7 +153,7 @@ fn handle_outb_impl(
 #[instrument(skip_all, parent = Span::current(), level= "Trace")]
 pub(crate) fn outb_handler_wrapper(
     mut mem_mgr_wrapper: MemMgrWrapper<HostSharedMemory>,
-    host_funcs_wrapper: Arc<Mutex<HostFuncsWrapper>>,
+    host_funcs_wrapper: Arc<Mutex<FunctionRegistry>>,
 ) -> OutBHandlerWrapper {
     let outb_func: OutBHandlerFunction = Box::new(move |port, payload| {
         handle_outb_impl(
