@@ -79,11 +79,16 @@ jobs:
         shell: pwsh
 
       - name: Build and move Rust guests
-        run: just build-and-move-rust-guests
+        run: |
+          # use these commands in favor of build-and-move-rust-guests to avoid building both configs
+          just build-rust-guests ${{ matrix.config }}
+          just move-rust-guests ${{ matrix.config }}
 
       - name: Build c guests
-        run: just build-and-move-c-guests
-
+        run: |
+          # use these commands in favor of build-and-move-c-guests to avoid building both configs
+          just build-c-guests ${{ matrix.config }}
+          just move-c-guests ${{ matrix.config }}
       - name: Build
         run: just build ${{ matrix.config }}
 
