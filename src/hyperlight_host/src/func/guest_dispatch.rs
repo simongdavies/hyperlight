@@ -349,19 +349,6 @@ mod tests {
         call_guest_function_by_name_hv();
     }
 
-    #[test]
-    #[cfg(inprocess)]
-    fn test_call_guest_function_by_name_in_proc_manual() {
-        let u_sbox = UninitializedSandbox::new(
-            guest_bin(),
-            None,
-            Some(crate::SandboxRunOptions::RunInProcess(false)),
-            None,
-        )
-        .unwrap();
-        test_call_guest_function_by_name(u_sbox);
-    }
-
     fn terminate_vcpu_after_1000ms() -> Result<()> {
         // This test relies upon a Hypervisor being present so for now
         // we will skip it if there isn't one.
@@ -456,7 +443,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(inprocess))]
     fn test_trigger_exception_on_guest() {
         let usbox = UninitializedSandbox::new(
             GuestBinary::FilePath(simple_guest_as_string().expect("Guest Binary Missing")),

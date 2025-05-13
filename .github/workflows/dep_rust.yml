@@ -102,8 +102,8 @@ jobs:
           # with default features
           just test ${{ matrix.config }} ${{ matrix.hypervisor == 'mshv3' && 'mshv3' || ''}}
 
-          # with only one driver enabled (driver mshv/kvm feature is ignored on windows) + seccomp + inprocess
-          just test ${{ matrix.config }} inprocess,seccomp,${{ matrix.hypervisor == 'mshv' && 'mshv2' || matrix.hypervisor == 'mshv3' && 'mshv3' || 'kvm' }} 
+          # with only one driver enabled (driver mshv/kvm feature is ignored on windows) + seccomp 
+          just test ${{ matrix.config }} seccomp,${{ matrix.hypervisor == 'mshv' && 'mshv2' || matrix.hypervisor == 'mshv3' && 'mshv3' || 'kvm' }} 
 
           # make sure certain cargo features compile
           cargo check -p hyperlight-host --features crashdump

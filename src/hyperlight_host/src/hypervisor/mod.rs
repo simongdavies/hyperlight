@@ -39,9 +39,6 @@ pub(crate) mod hypervisor_handler;
 #[cfg(gdb)]
 mod gdb;
 
-/// Driver for running in process instead of using hypervisor
-#[cfg(inprocess)]
-pub mod inprocess;
 #[cfg(kvm)]
 /// Functionality to manipulate KVM-based virtual machines
 pub mod kvm;

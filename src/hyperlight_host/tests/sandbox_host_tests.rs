@@ -461,18 +461,7 @@ fn simple_test_helper() -> Result<()> {
         assert!(matches!(res3, Ok(ReturnValue::VecBytes(v)) if v == buffer));
     }
 
-    let expected_calls = {
-        if cfg!(all(target_os = "windows", inprocess)) {
-            // windows debug build
-            2
-        } else if cfg!(inprocess) {
-            // linux debug build
-            2
-        } else {
-            // {windows,linux} release build
-            1
-        }
-    };
+    let expected_calls = 1;
 
     assert_eq!(
         messages

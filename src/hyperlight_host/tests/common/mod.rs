@@ -55,17 +55,6 @@ pub fn get_simpleguest_sandboxes(
             .unwrap()
             .evolve(Noop::default())
             .unwrap(),
-        // in-process elf
-        #[cfg(inprocess)]
-        UninitializedSandbox::new(
-            GuestBinary::FilePath(elf_path.clone()),
-            None,
-            Some(hyperlight_host::SandboxRunOptions::RunInProcess(false)),
-            writer,
-        )
-        .unwrap()
-        .evolve(Noop::default())
-        .unwrap(),
     ]
 }
 
@@ -78,15 +67,6 @@ pub fn get_callbackguest_uninit_sandboxes(
         // in hypervisor elf
         UninitializedSandbox::new(GuestBinary::FilePath(elf_path.clone()), None, None, writer)
             .unwrap(),
-        // in-process elf
-        #[cfg(inprocess)]
-        UninitializedSandbox::new(
-            GuestBinary::FilePath(elf_path.clone()),
-            None,
-            Some(hyperlight_host::SandboxRunOptions::RunInProcess(false)),
-            writer,
-        )
-        .unwrap(),
     ]
 }
 
