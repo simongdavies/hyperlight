@@ -28,12 +28,6 @@ use crate::hypervisor::wrappers::{WHvFPURegisters, WHvGeneralRegisters, WHvSpeci
 use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags};
 use crate::{new_error, Result};
 
-// We need to pass in a primitive array of register names/values
-// to WHvSetVirtualProcessorRegisters and rust needs to know array size
-// at compile time. There is an assert in set_virtual_process_registers
-// to ensure we never try and set more registers than this constant
-const REGISTER_COUNT: usize = 16;
-
 /// Interop calls for Windows Hypervisor Platform APIs
 ///
 /// Documentation can be found at:
@@ -218,7 +212,6 @@ impl VMProcessor {
     ) -> Result<()> {
         let partition_handle = self.get_partition_hdl();
         let register_count = registers.len();
-        assert!(register_count <= REGISTER_COUNT);
         let mut register_names: Vec<WHV_REGISTER_NAME> = vec![];
         let mut register_values: Vec<WHV_REGISTER_VALUE> = vec![];
 
