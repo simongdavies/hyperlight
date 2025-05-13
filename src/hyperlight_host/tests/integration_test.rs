@@ -388,27 +388,11 @@ fn execute_on_stack() {
         .call_guest_function_by_name("ExecuteOnStack", ReturnType::String, Some(vec![]))
         .unwrap_err();
 
-    #[cfg(inprocess)]
-    if let HyperlightError::Error(message) = result {
-        cfg_if::cfg_if! {
-            if #[cfg(target_os = "linux")] {
-                assert!(message.starts_with("Unexpected VM Exit") || message.starts_with("unknown Hyper-V run message type"));
-            } else if #[cfg(target_os = "windows")] {
-                assert!(message.starts_with("Unexpected VM Exit \"Did not receive a halt from Hypervisor as expected - Received WHV_RUN_VP_EXIT_REASON(4)"));
-            } else {
-                panic!("Unexpected");
-            }
-        }
-    }
-
-    #[cfg(not(inprocess))]
-    {
-        let err = result.to_string();
-        assert!(
-            // exception that indicates a page fault
-            err.contains("PageFault")
-        );
-    }
+    let err = result.to_string();
+    assert!(
+        // exception that indicates a page fault
+        err.contains("PageFault")
+    );
 }
 
 #[test]

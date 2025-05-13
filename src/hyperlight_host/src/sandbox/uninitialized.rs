@@ -50,7 +50,6 @@ pub struct UninitializedSandbox {
     pub(crate) host_funcs: Arc<Mutex<FunctionRegistry>>,
     /// The memory manager for the sandbox.
     pub(crate) mgr: MemMgrWrapper<ExclusiveSharedMemory>,
-    pub(crate) run_inprocess: bool,
     pub(crate) max_initialization_time: Duration,
     pub(crate) max_execution_time: Duration,
     pub(crate) max_wait_for_cancellation: Duration,
@@ -150,36 +149,24 @@ impl UninitializedSandbox {
             buffer @ GuestBinary::Buffer(_) => buffer,
         };
 
-        let run_opts = sandbox_run_options.unwrap_or_default();
-
-        let run_inprocess = run_opts.in_process();
-
-        if run_inprocess && cfg!(not(inprocess)) {
-            log_then_return!(
-                "Inprocess mode is only available in debug builds, and also requires cargo feature 'inprocess'"
-            )
-        }
-
         let sandbox_cfg = cfg.unwrap_or_default();
 
         #[cfg(gdb)]
         let debug_info = sandbox_cfg.get_guest_debug_info();
         let mut mem_mgr_wrapper = {
-            let mut mgr =
-                UninitializedSandbox::load_guest_binary(sandbox_cfg, &guest_binary, run_inprocess)?;
+            let mut mgr = UninitializedSandbox::load_guest_binary(sandbox_cfg, &guest_binary)?;
             let stack_guard = Self::create_stack_guard();
             mgr.set_stack_guard(&stack_guard)?;
             MemMgrWrapper::new(mgr, stack_guard)
         };
 
-        mem_mgr_wrapper.write_memory_layout(run_inprocess)?;
+        mem_mgr_wrapper.write_memory_layout()?;
 
         let host_funcs = Arc::new(Mutex::new(FunctionRegistry::default()));
 
         let mut sandbox = Self {
             host_funcs,
             mgr: mem_mgr_wrapper,
-            run_inprocess,
             max_initialization_time: Duration::from_millis(
                 sandbox_cfg.get_max_initialization_time() as u64,
             ),
@@ -263,14 +250,13 @@ impl UninitializedSandbox {
     pub(super) fn load_guest_binary(
         cfg: SandboxConfiguration,
         guest_binary: &GuestBinary,
-        inprocess: bool,
     ) -> Result<SandboxMemoryManager<ExclusiveSharedMemory>> {
         let mut exe_info = match guest_binary {
             GuestBinary::FilePath(bin_path_str) => ExeInfo::from_file(bin_path_str)?,
             GuestBinary::Buffer(buffer) => ExeInfo::from_buf(buffer)?,
         };
 
-        SandboxMemoryManager::load_guest_binary_into_memory(cfg, &mut exe_info, inprocess)
+        SandboxMemoryManager::load_guest_binary_into_memory(cfg, &mut exe_info)
     }
 
     /// Set the max log level to be used by the guest.
@@ -354,32 +340,7 @@ mod tests {
     use crate::sandbox_state::sandbox::EvolvableSandbox;
     use crate::sandbox_state::transition::Noop;
     use crate::testing::log_values::{test_value_as_str, try_to_strings};
-    use crate::{new_error, MultiUseSandbox, Result, SandboxRunOptions, UninitializedSandbox};
-
-    #[test]
-    fn test_in_process() {
-        let simple_guest_path = simple_guest_as_string().unwrap();
-        let sbox = UninitializedSandbox::new(
-            GuestBinary::FilePath(simple_guest_path.clone()),
-            None,
-            Some(SandboxRunOptions::RunInProcess(false)),
-            None,
-        );
-
-        // in process should only be enabled with the inprocess feature and on debug builds
-        assert_eq!(sbox.is_ok(), cfg!(inprocess));
-
-        let simple_guest_path = simple_guest_as_string().unwrap();
-        let sbox = UninitializedSandbox::new(
-            GuestBinary::FilePath(simple_guest_path.clone()),
-            None,
-            Some(SandboxRunOptions::RunInProcess(false)),
-            None,
-        );
-
-        // in process should only be enabled with the inprocess feature and on debug builds
-        assert_eq!(sbox.is_ok(), cfg!(all(inprocess)));
-    }
+    use crate::{new_error, MultiUseSandbox, Result, UninitializedSandbox};
 
     #[test]
     fn test_new_sandbox() {
@@ -452,12 +413,8 @@ mod tests {
 
         let simple_guest_path = simple_guest_as_string().unwrap();
 
-        UninitializedSandbox::load_guest_binary(
-            cfg,
-            &GuestBinary::FilePath(simple_guest_path),
-            false,
-        )
-        .unwrap();
+        UninitializedSandbox::load_guest_binary(cfg, &GuestBinary::FilePath(simple_guest_path))
+            .unwrap();
     }
 
     #[test]

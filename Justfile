@@ -61,8 +61,8 @@ test-like-ci config=default-target hypervisor="kvm":
     @# with default features
     just test {{config}} {{ if hypervisor == "mshv3" {"mshv3"} else {""} }}
 
-    @# with only one driver enabled + seccomp + inprocess
-    just test {{config}} inprocess,seccomp,{{ if hypervisor == "mshv" {"mshv2"} else if hypervisor == "mshv3" {"mshv3"} else {"kvm"} }}
+    @# with only one driver enabled + seccomp
+    just test {{config}} seccomp,{{ if hypervisor == "mshv" {"mshv2"} else if hypervisor == "mshv3" {"mshv3"} else {"kvm"} }}
 
     @# make sure certain cargo features compile
     cargo check -p hyperlight-host --features crashdump
