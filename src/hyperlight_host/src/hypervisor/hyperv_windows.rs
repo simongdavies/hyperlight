@@ -390,10 +390,15 @@ impl Hypervisor for HypervWindowsDriver {
         instruction_length: u64,
         outb_handle_fn: OutBHandlerWrapper,
     ) -> Result<()> {
+        let mut padded = [0u8; 4];
+        let copy_len = data.len().min(4);
+        padded[..copy_len].copy_from_slice(&data[..copy_len]);
+        let val = u32::from_le_bytes(padded);
+
         outb_handle_fn
             .try_lock()
             .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?
-            .call(port, data)?;
+            .call(port, val)?;
 
         let mut regs = self.processor.get_regs()?;
         regs.rip = rip + instruction_length;
@@ -505,7 +510,7 @@ pub mod tests {
     #[serial]
     fn test_init() {
         let outb_handler = {
-            let func: Box<dyn FnMut(u16, Vec<u8>) -> Result<()> + Send> =
+            let func: Box<dyn FnMut(u16, u32) -> Result<()> + Send> =
                 Box::new(|_, _| -> Result<()> { Ok(()) });
             Arc::new(Mutex::new(OutBHandler::from(func)))
         };

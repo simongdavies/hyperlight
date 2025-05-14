@@ -339,9 +339,8 @@ fn check_windows_version() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
     use std::sync::mpsc::channel;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::time::Duration;
     use std::{fs, thread};
 
