@@ -17,7 +17,6 @@ limitations under the License.
 use hyperlight_common::flatbuffer_wrappers::function_types::{ParameterValue, ReturnType};
 use tracing::{span, Level};
 extern crate hyperlight_host;
-use std::sync::{Arc, Mutex};
 use std::thread::{spawn, JoinHandle};
 
 use hyperlight_host::sandbox::uninitialized::UninitializedSandbox;
@@ -60,7 +59,6 @@ fn run_example() -> Result<()> {
 
     for i in 0..10 {
         let path = hyperlight_guest_path.clone();
-        let writer_func = Arc::new(Mutex::new(fn_writer));
         let handle = spawn(move || -> Result<()> {
             // Construct a new span named "hyperlight tracing example thread" with INFO  level.
             let id = Uuid::new_v4();
@@ -73,12 +71,8 @@ fn run_example() -> Result<()> {
             let _entered = span.enter();
 
             // Create a new sandbox.
-            let usandbox = UninitializedSandbox::new(
-                GuestBinary::FilePath(path),
-                None,
-                None,
-                Some(&writer_func),
-            )?;
+            let mut usandbox = UninitializedSandbox::new(GuestBinary::FilePath(path), None, None)?;
+            usandbox.register_print(fn_writer)?;
 
             // Initialize the sandbox.
 
@@ -117,7 +111,6 @@ fn run_example() -> Result<()> {
     // Create a new sandbox.
     let usandbox = UninitializedSandbox::new(
         GuestBinary::FilePath(hyperlight_guest_path.clone()),
-        None,
         None,
         None,
     )?;

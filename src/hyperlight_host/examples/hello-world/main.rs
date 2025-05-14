@@ -29,7 +29,6 @@ fn main() -> hyperlight_host::Result<()> {
         ),
         None, // default configuration
         None, // default run options
-        None, // default host print function
     )?;
 
     // Register a host functions

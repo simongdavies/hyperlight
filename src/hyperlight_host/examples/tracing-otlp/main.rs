@@ -116,7 +116,6 @@ fn run_example(wait_input: bool) -> HyperlightResult<()> {
     for i in 0..10 {
         let path = hyperlight_guest_path.clone();
         let exit = Arc::clone(&should_exit);
-        let writer_func = Arc::new(Mutex::new(fn_writer));
         let handle = spawn(move || -> HyperlightResult<()> {
             while !*exit.try_lock().unwrap() {
                 // Construct a new span named "hyperlight tracing example thread" with INFO  level.
@@ -130,12 +129,9 @@ fn run_example(wait_input: bool) -> HyperlightResult<()> {
                 let _entered = span.enter();
 
                 // Create a new sandbox.
-                let usandbox = UninitializedSandbox::new(
-                    GuestBinary::FilePath(path.clone()),
-                    None,
-                    None,
-                    Some(&writer_func),
-                )?;
+                let mut usandbox =
+                    UninitializedSandbox::new(GuestBinary::FilePath(path.clone()), None, None)?;
+                usandbox.register_print(fn_writer)?;
 
                 // Initialize the sandbox.
 

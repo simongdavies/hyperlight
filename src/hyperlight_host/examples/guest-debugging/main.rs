@@ -49,7 +49,6 @@ fn main() -> hyperlight_host::Result<()> {
         ),
         cfg,  // sandbox configuration
         None, // default run options
-        None, // default host print function
     )?;
 
     // Register a host functions

@@ -155,7 +155,6 @@ mod tests {
                 GuestBinary::FilePath(simple_guest_as_string().expect("Guest Binary Missing")),
                 None,
                 None,
-                None,
             )
             .unwrap();
 
@@ -189,7 +188,6 @@ mod tests {
                 GuestBinary::FilePath(simple_guest_as_string().expect("Guest Binary Missing")),
                 None,
                 None,
-                None,
             )
             .unwrap();
 
@@ -219,7 +217,6 @@ mod tests {
         let uninitialized_sandbox = || {
             UninitializedSandbox::new(
                 GuestBinary::FilePath(simple_guest_as_string().expect("Guest Binary Missing")),
-                None,
                 None,
                 None,
             )
@@ -337,8 +334,6 @@ mod tests {
             None,
             // by default, the below represents in-hypervisor mode
             None,
-            // just use the built-in host print function
-            None,
         )
         .unwrap();
         test_call_guest_function_by_name(u_sbox);
@@ -358,7 +353,6 @@ mod tests {
         }
         let usbox = UninitializedSandbox::new(
             GuestBinary::FilePath(simple_guest_as_string().expect("Guest Binary Missing")),
-            None,
             None,
             None,
         )?;
@@ -409,7 +403,6 @@ mod tests {
             GuestBinary::FilePath(callback_guest_as_string().expect("Guest Binary Missing")),
             None,
             None,
-            None,
         )
         .unwrap();
 
@@ -446,7 +439,6 @@ mod tests {
     fn test_trigger_exception_on_guest() {
         let usbox = UninitializedSandbox::new(
             GuestBinary::FilePath(simple_guest_as_string().expect("Guest Binary Missing")),
-            None,
             None,
             None,
         )

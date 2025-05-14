@@ -393,7 +393,6 @@ fn max_memory_sandbox() {
         GuestBinary::FilePath(simple_guest_as_string().unwrap()),
         Some(cfg),
         None,
-        None,
     );
 
     assert!(matches!(

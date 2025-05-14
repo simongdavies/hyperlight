@@ -976,7 +976,6 @@ mod tests {
             GuestBinary::FilePath(simple_guest_as_string().expect("Guest Binary Missing")),
             cfg,
             None,
-            None,
         )
         .unwrap();
 
