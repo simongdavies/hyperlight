@@ -74,7 +74,7 @@ extern "C" {
 static INIT: Once = Once::new();
 
 #[no_mangle]
-pub extern "win64" fn entrypoint(peb_address: u64, seed: u64, ops: u64, max_log_level: u64) {
+pub extern "C" fn entrypoint(peb_address: u64, seed: u64, ops: u64, max_log_level: u64) {
     if peb_address == 0 {
         panic!("PEB address is null");
     }
