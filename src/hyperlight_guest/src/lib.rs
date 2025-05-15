@@ -44,11 +44,14 @@ pub mod print;
 pub(crate) mod security_check;
 
 pub mod error;
-pub mod gdt;
-pub mod idt;
-pub mod idtr;
-pub mod interrupt_entry;
-pub mod interrupt_handlers;
+#[cfg(target_arch = "x86_64")]
+pub mod exceptions {
+    pub mod gdt;
+    pub mod handlers;
+    pub mod idt;
+    pub mod idtr;
+    pub mod interrupt_entry;
+}
 pub mod logging;
 
 // Unresolved symbols

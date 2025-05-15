@@ -22,11 +22,11 @@ use hyperlight_common::outb::OutBAction;
 use log::LevelFilter;
 use spin::Once;
 
-use crate::gdt::load_gdt;
+#[cfg(target_arch = "x86_64")]
+use crate::exceptions::{gdt::load_gdt, idtr::load_idt};
 use crate::guest_function_call::dispatch_function;
 use crate::guest_logger::init_logger;
 use crate::host_function_call::outb;
-use crate::idtr::load_idt;
 use crate::{__security_cookie, HEAP_ALLOCATOR, MIN_STACK_ADDRESS, OS_PAGE_SIZE, P_PEB};
 
 #[inline(never)]
@@ -101,9 +101,12 @@ pub extern "win64" fn entrypoint(peb_address: u64, seed: u64, ops: u64, max_log_
             // don't have to change the assembly code.
             MIN_STACK_ADDRESS = (*peb_ptr).gueststackData.minUserStackAddress;
 
-            // Setup GDT and IDT
-            load_gdt();
-            load_idt();
+            #[cfg(target_arch = "x86_64")]
+            {
+                // Setup GDT and IDT
+                load_gdt();
+                load_idt();
+            }
 
             let heap_start = (*peb_ptr).guestheapData.guestHeapBuffer as usize;
             let heap_size = (*peb_ptr).guestheapData.guestHeapSize as usize;
