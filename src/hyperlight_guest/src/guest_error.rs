@@ -40,11 +40,6 @@ pub(crate) fn set_error(error_code: ErrorCode, message: &str) {
     write_error(error_code, Some(message));
 }
 
-pub(crate) fn set_error_and_halt(error_code: ErrorCode, message: &str) {
-    set_error(error_code, message);
-    halt();
-}
-
 /// Exposes a C API to allow the guest to set an error
 ///
 /// # Safety

@@ -27,7 +27,7 @@ use crate::exceptions::{gdt::load_gdt, idtr::load_idt};
 use crate::guest_function_call::dispatch_function;
 use crate::guest_logger::init_logger;
 use crate::host_function_call::outb;
-use crate::{__security_cookie, HEAP_ALLOCATOR, MIN_STACK_ADDRESS, OS_PAGE_SIZE, P_PEB};
+use crate::{HEAP_ALLOCATOR, MIN_STACK_ADDRESS, OS_PAGE_SIZE, P_PEB};
 
 #[inline(never)]
 pub fn halt() {
@@ -83,7 +83,6 @@ pub extern "C" fn entrypoint(peb_address: u64, seed: u64, ops: u64, max_log_leve
         unsafe {
             P_PEB = Some(peb_address as *mut HyperlightPEB);
             let peb_ptr = P_PEB.unwrap();
-            __security_cookie = peb_address ^ seed;
 
             let srand_seed = ((peb_address << 8 ^ seed >> 4) >> 32) as u32;
 

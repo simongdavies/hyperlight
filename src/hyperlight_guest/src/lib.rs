@@ -41,7 +41,6 @@ pub mod host_function_call;
 pub(crate) mod guest_logger;
 pub mod memory;
 pub mod print;
-pub(crate) mod security_check;
 
 pub mod error;
 #[cfg(target_arch = "x86_64")]
@@ -73,11 +72,6 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 // Globals
 #[global_allocator]
 pub(crate) static HEAP_ALLOCATOR: LockedHeap<32> = LockedHeap::<32>::empty();
-
-///cbindgen:ignore
-#[no_mangle]
-#[clippy::allow(clippy::non_upper_case_globals)]
-pub(crate) static mut __security_cookie: u64 = 0;
 
 pub(crate) static mut P_PEB: Option<*mut HyperlightPEB> = None;
 pub static mut MIN_STACK_ADDRESS: u64 = 0;
