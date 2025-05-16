@@ -54,15 +54,6 @@ pub mod exceptions {
 }
 pub mod logging;
 
-// Unresolved symbols
-///cbindgen:ignore
-#[no_mangle]
-pub(crate) extern "C" fn __CxxFrameHandler3() {}
-///cbindgen:ignore
-#[no_mangle]
-#[clippy::allow(clippy::non_upper_case_globals)]
-pub(crate) static _fltused: i32 = 0;
-
 // It looks like rust-analyzer doesn't correctly manage no_std crates,
 // and so it displays an error about a duplicate panic_handler.
 // See more here: https://github.com/rust-lang/rust-analyzer/issues/4490
