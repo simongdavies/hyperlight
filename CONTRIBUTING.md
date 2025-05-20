@@ -39,9 +39,26 @@ All contributions come through pull requests. To submit a proposed change, we re
 
 A good way to communicate before investing too much time is to create a "Work-in-progress" PR and share it with your reviewers. The standard way of doing this is to add a "[WIP]" prefix in your PR's title and open the pull request as a draft.
 
-### Developer Certificate of Origin: Signing your work
+## Commit Signing Requirements
 
-#### Every commit needs to be signed
+All commits must meet **both** of the following requirements:
+
+- **GPG-signed:** Every commit must be GPG-signed to ensure authenticity and allow verification of authorship. 
+- **DCO sign-off:** Most commits must include a Developer Certificate of Origin (DCO) sign-off line. 
+
+PRs with unsigned or unsigned-off commits cannot be merged.
+
+### gpg-sign commits
+
+ Every commit must be GPG-signed to ensure authenticity and allow verification of authorship. You can configure GPG signing by following the instructions in the [Git documentation](https://git-scm.com/book/en/v2/Git-Tools-Signing-Your-Work) and configure verification by following the instructions in the [GitHub documentation](https://docs.github.com/en/authentication/managing-commit-signature-verification/about-commit-signature-verification#gpg-commit-signature-verification).
+
+  - To sign your commits, use the `-S` flag with `git commit`:
+    ```sh
+    git commit -S -m 'This is my commit message'
+    ```
+  - To verify your commits, use the `git log --show-signature` command to check the signature of each commit.
+
+### Developer Certificate of Origin: Signing off your work
 
 The Developer Certificate of Origin (DCO) is a lightweight way for contributors to certify that they wrote or otherwise have the right to submit the code they are contributing to the project. Here is the full text of the [DCO](https://developercertificate.org/), reformatted for readability:
 ```
@@ -64,21 +81,26 @@ This is my commit message
 Signed-off-by: Random J Developer <random@developer.example.org>
 ```
 
-Git even has a `-s` command line option to append this automatically to your commit message:
+Git has a `-s` command line option to append this automatically to your commit message:
 
 ```sh
 git commit -s -m 'This is my commit message'
 ```
 
-Each Pull Request is checked  whether or not commits in a Pull Request do contain a valid Signed-off-by line.
+Each Pull Request is checked  to ensure commits contain a valid Signed-off-by line and a verified gpg signature.
 
-#### I didn't sign my commit, now what?!
+#### I didn't sign or sign-off my commit, now what?!
 
-No worries - You can easily replay your changes, sign them and force push them!
+No worries - You can easily replay your changes, sign and/or sign-off them and force push them!
 
 ```sh
 git checkout <branch-name>
-git commit --amend --no-edit --signoff
+git rebase --exec 'git commit --amend --no-edit -S -s' main
+```
+
+This will GPG-sign and sign-off each commit in your branch. Be sure to force-push after rebasing:
+
+```sh
 git push --force-with-lease <remote-name> <branch-name>
 ```
 
