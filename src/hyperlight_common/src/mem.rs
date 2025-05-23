@@ -20,24 +20,22 @@ pub const PAGE_SHIFT: u64 = 12;
 pub const PAGE_SIZE: u64 = 1 << 12;
 pub const PAGE_SIZE_USIZE: usize = 1 << 12;
 
-use core::ffi::{c_char, c_void};
-
 #[repr(C)]
 pub struct InputData {
     pub inputDataSize: u64,
-    pub inputDataBuffer: *mut c_void,
+    pub inputDataBuffer: u64,
 }
 
 #[repr(C)]
 pub struct OutputData {
     pub outputDataSize: u64,
-    pub outputDataBuffer: *mut c_void,
+    pub outputDataBuffer: u64,
 }
 
 #[repr(C)]
 pub struct GuestHeapData {
     pub guestHeapSize: u64,
-    pub guestHeapBuffer: *mut c_void,
+    pub guestHeapBuffer: u64,
 }
 
 #[repr(C)]
@@ -52,7 +50,7 @@ pub struct GuestStackData {
 pub struct HyperlightPEB {
     pub security_cookie_seed: u64,
     pub guest_function_dispatch_ptr: u64,
-    pub pCode: *mut c_char,
+    pub pCode: u64,
     pub inputdata: InputData,
     pub outputdata: OutputData,
     pub guestheapData: GuestHeapData,
