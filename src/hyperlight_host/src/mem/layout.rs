@@ -16,7 +16,7 @@ limitations under the License.
 use std::fmt::Debug;
 use std::mem::{offset_of, size_of};
 
-use hyperlight_common::mem::{GuestStackData, HyperlightPEB, PAGE_SIZE_USIZE};
+use hyperlight_common::mem::{GuestStack, HyperlightPEB, PAGE_SIZE_USIZE};
 use rand::{rng, RngCore};
 use tracing::{instrument, Span};
 
@@ -225,17 +225,17 @@ impl SandboxMemoryLayout {
             peb_offset + offset_of!(HyperlightPEB, security_cookie_seed);
         let peb_guest_dispatch_function_ptr_offset =
             peb_offset + offset_of!(HyperlightPEB, guest_function_dispatch_ptr);
-        let peb_code_pointer_offset = peb_offset + offset_of!(HyperlightPEB, pCode);
-        let peb_input_data_offset = peb_offset + offset_of!(HyperlightPEB, inputdata);
-        let peb_output_data_offset = peb_offset + offset_of!(HyperlightPEB, outputdata);
-        let peb_heap_data_offset = peb_offset + offset_of!(HyperlightPEB, guestheapData);
-        let peb_guest_stack_data_offset = peb_offset + offset_of!(HyperlightPEB, gueststackData);
+        let peb_code_pointer_offset = peb_offset + offset_of!(HyperlightPEB, code_ptr);
+        let peb_input_data_offset = peb_offset + offset_of!(HyperlightPEB, input_stack);
+        let peb_output_data_offset = peb_offset + offset_of!(HyperlightPEB, output_stack);
+        let peb_heap_data_offset = peb_offset + offset_of!(HyperlightPEB, guest_heap);
+        let peb_guest_stack_data_offset = peb_offset + offset_of!(HyperlightPEB, guest_stack);
 
         // The following offsets are the actual values that relate to memory layout,
         // which are written to PEB struct
         let peb_address = Self::BASE_ADDRESS + peb_offset;
         let input_data_buffer_offset = round_up_to(
-            peb_guest_stack_data_offset + size_of::<GuestStackData>(),
+            peb_guest_stack_data_offset + size_of::<GuestStack>(),
             PAGE_SIZE_USIZE,
         );
         let output_data_buffer_offset = round_up_to(
@@ -332,7 +332,7 @@ impl SandboxMemoryLayout {
     /// Get the offset in guest memory to the input data size.
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub(super) fn get_input_data_size_offset(&self) -> usize {
-        // The input data size is the first field in the `InputData` struct
+        // The input data size is the first field in the input stack's `GuestMemoryRegion` struct
         self.peb_input_data_offset
     }
 
@@ -340,7 +340,7 @@ impl SandboxMemoryLayout {
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     fn get_input_data_pointer_offset(&self) -> usize {
         // The input data pointer is immediately after the input
-        // data size field in the `InputData` struct which is a `u64`.
+        // data size field in the input data `GuestMemoryRegion` struct which is a `u64`.
         self.get_input_data_size_offset() + size_of::<u64>()
     }
 
@@ -375,7 +375,7 @@ impl SandboxMemoryLayout {
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     fn get_heap_pointer_offset(&self) -> usize {
         // The heap pointer is immediately after the
-        // heap size field in the `GuestHeap` struct which is a `u64`.
+        // heap size field in the guest heap's `GuestMemoryRegion` struct which is a `u64`.
         self.get_heap_size_offset() + size_of::<u64>()
     }
 
