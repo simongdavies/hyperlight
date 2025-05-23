@@ -41,22 +41,7 @@ pub mod hypervisor;
 /// Functionality to establish and manage an individual sandbox's
 /// memory.
 ///
-/// The following structs are not used other than to calculate the size of the memory needed
-/// and also to illustrate the layout of the memory:
-///
-/// - `HostFunctionDefinitions`
-/// - `HostExceptionData`
-/// - `GuestError`
-/// - `CodeAndOutBPointers`
-/// - `InputData`
-/// - `OutputData`
-/// - `GuestHeap`
-/// - `GuestStack`
-///
-/// the start of the guest  memory contains the page tables and is always located at the Virtual Address 0x00200000 when
-/// running in a Hypervisor:
-///
-/// Virtual Address
+/// - Virtual Address
 ///
 /// 0x0000    PML4
 /// 0x1000    PDPT
@@ -64,8 +49,8 @@ pub mod hypervisor;
 /// 0x3000    The guest PE code (When the code has been loaded using LoadLibrary to debug the guest this will not be
 /// present and code length will be zero;
 ///
-/// The pointer passed to the Entrypoint in the Guest application is the ize of page table + size of code,
-/// at this address structs below are laid out in this order
+/// - The pointer passed to the Entrypoint in the Guest application is the size of page table + size of code,
+///     at this address structs below are laid out in this order
 pub mod mem;
 /// Metric definitions and helpers
 pub mod metrics;
