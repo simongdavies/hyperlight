@@ -1181,6 +1181,10 @@ dependencies = [
 [[package]]
 name = "hyperlight-guest-bin"
 version = "0.4.0"
+dependencies = [
+ "hyperlight-common",
+ "hyperlight-guest",
+]
 
 [[package]]
 name = "hyperlight-host"
@@ -1272,6 +1276,7 @@ dependencies = [
  "cbindgen",
  "hyperlight-common",
  "hyperlight-guest",
+ "hyperlight-guest-bin",
  "log",
 ]
 
