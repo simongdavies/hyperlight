@@ -155,6 +155,10 @@ pub enum HyperlightError {
     #[cfg(kvm)]
     KVMError(#[from] kvm_ioctls::Error),
 
+    /// Conversion of str to Json failed
+    #[error("Conversion of str data to json failed")]
+    JsonConversionFailure(#[from] serde_json::Error),
+
     /// An attempt to get a lock from a Mutex failed.
     #[error("Unable to lock resource")]
     LockAttemptFailed(String),
