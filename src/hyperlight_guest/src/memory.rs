@@ -82,9 +82,9 @@ unsafe fn alloc_helper(size: usize, zero: bool) -> *mut c_void {
 /// # Safety
 /// The returned pointer must be freed with `memory::free` when it is no longer needed, otherwise memory will leak.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn malloc(size: usize) -> *mut c_void { unsafe {
-    alloc_helper(size, false)
-}}
+pub unsafe extern "C" fn malloc(size: usize) -> *mut c_void {
+    unsafe { alloc_helper(size, false) }
+}
 
 /// Allocates a block of memory for an array of `nmemb` elements, each of `size` bytes.
 /// The memory is initialized to 0s.
@@ -92,13 +92,15 @@ pub unsafe extern "C" fn malloc(size: usize) -> *mut c_void { unsafe {
 /// # Safety
 /// The returned pointer must be freed with `memory::free` when it is no longer needed, otherwise memory will leak.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn calloc(nmemb: usize, size: usize) -> *mut c_void { unsafe {
-    let total_size = nmemb
-        .checked_mul(size)
-        .expect("nmemb * size should not overflow in calloc");
+pub unsafe extern "C" fn calloc(nmemb: usize, size: usize) -> *mut c_void {
+    unsafe {
+        let total_size = nmemb
+            .checked_mul(size)
+            .expect("nmemb * size should not overflow in calloc");
 
-    alloc_helper(total_size, true)
-}}
+        alloc_helper(total_size, true)
+    }
+}
 
 /// Frees the memory block pointed to by `ptr`.
 ///
@@ -124,39 +126,37 @@ pub unsafe extern "C" fn free(ptr: *mut c_void) {
 pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
     if ptr.is_null() {
         // If the pointer is null, treat as a malloc
-        return unsafe {malloc(size)};
+        return unsafe { malloc(size) };
     }
 
     if size == 0 {
         // If the size is 0, treat as a free and return null
-         unsafe {
-             free(ptr);
+        unsafe {
+            free(ptr);
         }
         return ptr::null_mut();
     }
 
-    
-        let total_new_size = size
-            .checked_add(size_of::<Layout>())
-            .expect("data and layout size should not overflow in realloc");
+    let total_new_size = size
+        .checked_add(size_of::<Layout>())
+        .expect("data and layout size should not overflow in realloc");
 
-        let block_start = unsafe { (ptr as *const Layout).sub(1) };
-        let old_layout = unsafe { block_start.read() };
-        let new_layout = Layout::from_size_align(total_new_size, MAX_ALIGN).unwrap();
+    let block_start = unsafe { (ptr as *const Layout).sub(1) };
+    let old_layout = unsafe { block_start.read() };
+    let new_layout = Layout::from_size_align(total_new_size, MAX_ALIGN).unwrap();
 
-        let new_block_start =
-            unsafe {alloc::alloc::realloc(block_start as *mut u8, old_layout, total_new_size)}
-                as *mut Layout;
+    let new_block_start =
+        unsafe { alloc::alloc::realloc(block_start as *mut u8, old_layout, total_new_size) }
+            as *mut Layout;
 
-        if new_block_start.is_null() {
-            // Realloc failed
-            abort_with_code(&[ErrorCode::MallocFailed as u8]);
-        } else {
-            // Update the stored Layout, then return ptr to memory right after the Layout.
-            unsafe {
-                new_block_start.write(new_layout);
-                new_block_start.add(1) as *mut c_void
-            }
+    if new_block_start.is_null() {
+        // Realloc failed
+        abort_with_code(&[ErrorCode::MallocFailed as u8]);
+    } else {
+        // Update the stored Layout, then return ptr to memory right after the Layout.
+        unsafe {
+            new_block_start.write(new_layout);
+            new_block_start.add(1) as *mut c_void
         }
-    
+    }
 }

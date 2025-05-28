@@ -49,22 +49,24 @@ pub fn abort_with_code(code: &[u8]) -> ! {
 ///
 /// # Safety
 /// This function is unsafe because it dereferences a raw pointer.
-pub unsafe fn abort_with_code_and_message(code: &[u8], message_ptr: *const c_char) -> ! { unsafe {
-    // Step 1: Send abort code (typically 1 byte, but `code` allows flexibility)
-    outb(OutBAction::Abort as u16, code);
+pub unsafe fn abort_with_code_and_message(code: &[u8], message_ptr: *const c_char) -> ! {
+    unsafe {
+        // Step 1: Send abort code (typically 1 byte, but `code` allows flexibility)
+        outb(OutBAction::Abort as u16, code);
 
-    // Step 2: Convert the C string to bytes
-    let message_bytes = CStr::from_ptr(message_ptr).to_bytes(); // excludes null terminator
+        // Step 2: Convert the C string to bytes
+        let message_bytes = CStr::from_ptr(message_ptr).to_bytes(); // excludes null terminator
 
-    // Step 3: Send the message itself in chunks
-    outb(OutBAction::Abort as u16, message_bytes);
+        // Step 3: Send the message itself in chunks
+        outb(OutBAction::Abort as u16, message_bytes);
 
-    // Step 4: Send abort terminator to signal completion (e.g., 0xFF)
-    outb(OutBAction::Abort as u16, &[0xFF]);
+        // Step 4: Send abort terminator to signal completion (e.g., 0xFF)
+        outb(OutBAction::Abort as u16, &[0xFF]);
 
-    // This function never returns
-    unreachable!()
-}}
+        // This function never returns
+        unreachable!()
+    }
+}
 
 unsafe extern "C" {
     fn hyperlight_main();
