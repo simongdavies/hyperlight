@@ -121,29 +121,31 @@ pub unsafe extern "C" fn free(ptr: *mut c_void) {
 /// # Safety
 /// `ptr` must be a pointer to a memory block previously allocated by `memory::malloc`, `memory::calloc`, or `memory::realloc`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void { unsafe {
+pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
     if ptr.is_null() {
         // If the pointer is null, treat as a malloc
-        return malloc(size);
+        return unsafe {malloc(size)};
     }
 
     if size == 0 {
         // If the size is 0, treat as a free and return null
-        free(ptr);
+         unsafe {
+             free(ptr);
+        }
         return ptr::null_mut();
     }
 
-    unsafe {
+    
         let total_new_size = size
             .checked_add(size_of::<Layout>())
             .expect("data and layout size should not overflow in realloc");
 
-        let block_start = (ptr as *const Layout).sub(1);
-        let old_layout = block_start.read();
+        let block_start = unsafe { (ptr as *const Layout).sub(1) };
+        let old_layout = unsafe { block_start.read() };
         let new_layout = Layout::from_size_align(total_new_size, MAX_ALIGN).unwrap();
 
         let new_block_start =
-            alloc::alloc::realloc(block_start as *mut u8, old_layout, total_new_size)
+            unsafe {alloc::alloc::realloc(block_start as *mut u8, old_layout, total_new_size)}
                 as *mut Layout;
 
         if new_block_start.is_null() {
@@ -151,8 +153,10 @@ pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
             abort_with_code(&[ErrorCode::MallocFailed as u8]);
         } else {
             // Update the stored Layout, then return ptr to memory right after the Layout.
-            new_block_start.write(new_layout);
-            new_block_start.add(1) as *mut c_void
+            unsafe {
+                new_block_start.write(new_layout);
+                new_block_start.add(1) as *mut c_void
+            }
         }
-    }
-}}
+    
+}
