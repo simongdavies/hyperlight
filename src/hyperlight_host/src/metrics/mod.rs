@@ -152,7 +152,7 @@ mod tests {
                 assert!(
                     matches!(
                         histogram_value,
-                        metrics_util::debugging::DebugValue::Histogram(ref histogram) if histogram.len() == 1
+                        metrics_util::debugging::DebugValue::Histogram(histogram) if histogram.len() == 1
                     ),
                     "Histogram metric does not match expected value"
                 );
@@ -169,7 +169,7 @@ mod tests {
                 assert!(
                     matches!(
                         histogram_value,
-                        metrics_util::debugging::DebugValue::Histogram(ref histogram) if histogram.len() == 1
+                        metrics_util::debugging::DebugValue::Histogram(histogram) if histogram.len() == 1
                     ),
                     "Histogram metric does not match expected value"
                 );
@@ -196,7 +196,7 @@ mod tests {
                 assert!(
                     matches!(
                         histogram_value,
-                        metrics_util::debugging::DebugValue::Histogram(ref histogram) if histogram.len() == 1
+                        metrics_util::debugging::DebugValue::Histogram(histogram) if histogram.len() == 1
                     ),
                     "Histogram metric does not match expected value"
                 );
