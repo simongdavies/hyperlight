@@ -43,8 +43,9 @@ pub(crate) fn call_guest_function(function_call: FunctionCall) -> Result<Vec<u8>
     }
 
     // Find the function definition for the function call.
-    if let Some(registered_function_definition) =
-        unsafe { REGISTERED_GUEST_FUNCTIONS.get(&function_call.function_name) }
+    // Use &raw const to get an immutable reference to the static HashMap
+    // this is to avoid the clippy warning "shared reference to mutable static"
+    if let Some(registered_function_definition) = unsafe { (*(&raw const REGISTERED_GUEST_FUNCTIONS)).get(&function_call.function_name) }
     {
         let function_call_parameter_types: Vec<ParameterType> = function_call
             .parameters

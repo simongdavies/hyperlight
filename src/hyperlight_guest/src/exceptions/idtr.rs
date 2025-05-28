@@ -26,7 +26,10 @@ pub(crate) unsafe fn load_idt() { unsafe {
 
     let idt_size = 256 * size_of::<IdtEntry>();
     let expected_base = addr_of!(IDT) as *const _ as u64;
-
-    IDTR.init(expected_base, idt_size as u16);
-    IDTR.load();
+    
+    // Use &raw mut to get a mutable raw pointer, then dereference it
+    // this is to avoid the clippy warning "shared reference to mutable static"
+    let idtr = &mut *(&raw mut IDTR);
+    idtr.init(expected_base, idt_size as u16);
+    idtr.load();
 }}
