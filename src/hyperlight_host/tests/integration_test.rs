@@ -478,19 +478,23 @@ fn log_message() {
         assert_eq!(expected, LOGGER.num_log_calls());
 
         // Set the log level via env var
-        std::env::set_var("RUST_LOG", format!("hyperlight_guest={}", level));
+        // TODO: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("RUST_LOG", format!("hyperlight_guest={}", level)) };
         log_test_messages(None);
         assert_eq!(expected, LOGGER.num_log_calls());
 
-        std::env::set_var("RUST_LOG", format!("hyperlight_host={}", level));
+        // TODO: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("RUST_LOG", format!("hyperlight_host={}", level)) };
         log_test_messages(None);
         assert_eq!(expected, LOGGER.num_log_calls());
 
-        std::env::set_var("RUST_LOG", format!("{}", level));
+        // TODO: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("RUST_LOG", format!("{}", level)) };
         log_test_messages(None);
         assert_eq!(expected, LOGGER.num_log_calls());
 
-        std::env::remove_var("RUST_LOG");
+        // TODO: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("RUST_LOG") };
     }
 
     // Test that if no log level is set, the default is error
