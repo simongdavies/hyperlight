@@ -31,9 +31,9 @@ static mut MESSAGE_BUFFER: Vec<u8> = Vec::new();
 ///
 /// # Safety
 /// This function is not thread safe
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[allow(static_mut_refs)]
-pub unsafe extern "C" fn _putchar(c: c_char) {
+pub unsafe extern "C" fn _putchar(c: c_char) { unsafe {
     let char = c as u8;
 
     // Extend buffer capacity if it's empty (like `with_capacity` in lazy_static).
@@ -66,4 +66,4 @@ pub unsafe extern "C" fn _putchar(c: c_char) {
         // Clear the buffer after sending
         MESSAGE_BUFFER.clear();
     }
-}
+}}

@@ -34,7 +34,7 @@ pub fn halt() {
     unsafe { asm!("hlt", options(nostack)) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn abort() -> ! {
     abort_with_code(&[0, 0xFF])
 }
@@ -49,7 +49,7 @@ pub fn abort_with_code(code: &[u8]) -> ! {
 ///
 /// # Safety
 /// This function is unsafe because it dereferences a raw pointer.
-pub unsafe fn abort_with_code_and_message(code: &[u8], message_ptr: *const c_char) -> ! {
+pub unsafe fn abort_with_code_and_message(code: &[u8], message_ptr: *const c_char) -> ! { unsafe {
     // Step 1: Send abort code (typically 1 byte, but `code` allows flexibility)
     outb(OutBAction::Abort as u16, code);
 
@@ -64,16 +64,16 @@ pub unsafe fn abort_with_code_and_message(code: &[u8], message_ptr: *const c_cha
 
     // This function never returns
     unreachable!()
-}
+}}
 
-extern "C" {
+unsafe extern "C" {
     fn hyperlight_main();
     fn srand(seed: u32);
 }
 
 static INIT: Once = Once::new();
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn entrypoint(peb_address: u64, seed: u64, ops: u64, max_log_level: u64) {
     if peb_address == 0 {
         panic!("PEB address is null");

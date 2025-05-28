@@ -68,7 +68,7 @@ pub(crate) fn call_guest_function(function_call: FunctionCall) -> Result<Vec<u8>
         // TODO: ideally we would define a default implementation of this with weak linkage so the guest is not required
         // to implement the function but its seems that weak linkage is an unstable feature so for now its probably better
         // to not do that.
-        extern "Rust" {
+        unsafe extern "Rust" {
             fn guest_dispatch_function(function_call: FunctionCall) -> Result<Vec<u8>>;
         }
 
@@ -78,7 +78,7 @@ pub(crate) fn call_guest_function(function_call: FunctionCall) -> Result<Vec<u8>
 
 // This function is marked as no_mangle/inline to prevent the compiler from inlining it , if its inlined the epilogue will not be called
 // and we will leak memory as the epilogue will not be called as halt() is not going to return.
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[inline(never)]
 fn internal_dispatch_function() -> Result<()> {
     #[cfg(debug_assertions)]

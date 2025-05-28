@@ -72,7 +72,7 @@ struct GdtPointer {
 }
 
 /// Load the GDT
-pub unsafe fn load_gdt() {
+pub unsafe fn load_gdt() { unsafe {
     let gdt_ptr = GdtPointer {
         size: (core::mem::size_of::<[GdtEntry; 3]>() - 1) as u16,
         base: addr_of!(GDT) as *const _ as u64,
@@ -94,4 +94,4 @@ pub unsafe fn load_gdt() {
     in(reg) &gdt_ptr,
     options(nostack, preserves_flags)
     );
-}
+}}

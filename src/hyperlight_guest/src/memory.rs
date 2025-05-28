@@ -81,30 +81,30 @@ unsafe fn alloc_helper(size: usize, zero: bool) -> *mut c_void {
 ///
 /// # Safety
 /// The returned pointer must be freed with `memory::free` when it is no longer needed, otherwise memory will leak.
-#[no_mangle]
-pub unsafe extern "C" fn malloc(size: usize) -> *mut c_void {
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn malloc(size: usize) -> *mut c_void { unsafe {
     alloc_helper(size, false)
-}
+}}
 
 /// Allocates a block of memory for an array of `nmemb` elements, each of `size` bytes.
 /// The memory is initialized to 0s.
 ///
 /// # Safety
 /// The returned pointer must be freed with `memory::free` when it is no longer needed, otherwise memory will leak.
-#[no_mangle]
-pub unsafe extern "C" fn calloc(nmemb: usize, size: usize) -> *mut c_void {
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn calloc(nmemb: usize, size: usize) -> *mut c_void { unsafe {
     let total_size = nmemb
         .checked_mul(size)
         .expect("nmemb * size should not overflow in calloc");
 
     alloc_helper(total_size, true)
-}
+}}
 
 /// Frees the memory block pointed to by `ptr`.
 ///
 /// # Safety
 /// `ptr` must be a pointer to a memory block previously allocated by `memory::malloc`, `memory::calloc`, or `memory::realloc`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn free(ptr: *mut c_void) {
     if !ptr.is_null() {
         unsafe {
@@ -120,8 +120,8 @@ pub unsafe extern "C" fn free(ptr: *mut c_void) {
 ///
 /// # Safety
 /// `ptr` must be a pointer to a memory block previously allocated by `memory::malloc`, `memory::calloc`, or `memory::realloc`.
-#[no_mangle]
-pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void { unsafe {
     if ptr.is_null() {
         // If the pointer is null, treat as a malloc
         return malloc(size);
@@ -155,4 +155,4 @@ pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
             new_block_start.add(1) as *mut c_void
         }
     }
-}
+}}
