@@ -20,10 +20,7 @@ use core::mem::{align_of, size_of};
 use core::ptr;
 
 use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
-
-use crate::exit::abort_with_code;
-
-extern crate alloc;
+use hyperlight_guest::exit::abort_with_code;
 
 /*
     C-wrappers for Rust's registered global allocator.

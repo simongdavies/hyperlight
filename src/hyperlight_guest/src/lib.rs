@@ -20,10 +20,8 @@ limitations under the License.
 extern crate alloc;
 
 // Modules
-pub mod exit;
 pub mod error;
-// TODO(danbugs): Move this to hyperlight_guest_bin
-pub mod memory;
+pub mod exit;
 
 pub mod guest_handle {
     pub mod handle;

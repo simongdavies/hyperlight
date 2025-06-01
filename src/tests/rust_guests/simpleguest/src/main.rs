@@ -47,10 +47,10 @@ use hyperlight_common::flatbuffer_wrappers::util::get_flatbuffer_result;
 use hyperlight_common::mem::PAGE_SIZE;
 use hyperlight_guest::error::{HyperlightGuestError, Result};
 use hyperlight_guest::exit::{abort_with_code, abort_with_code_and_message};
-use hyperlight_guest::memory::malloc;
 use hyperlight_guest_bin::guest_function::definition::GuestFunctionDefinition;
 use hyperlight_guest_bin::guest_function::register::register_function;
 use hyperlight_guest_bin::host_comm::{call_host_function, call_host_function_without_returning};
+use hyperlight_guest_bin::memory::malloc;
 use hyperlight_guest_bin::{guest_logger, MIN_STACK_ADDRESS};
 use log::{error, LevelFilter};
 
