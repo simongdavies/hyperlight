@@ -19,8 +19,7 @@ use core::ffi::c_char;
 
 use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
 use hyperlight_common::outb::Exception;
-
-use crate::entrypoint::abort_with_code_and_message;
+use hyperlight_guest::exit::abort_with_code_and_message;
 
 /// Exception handler
 #[unsafe(no_mangle)]

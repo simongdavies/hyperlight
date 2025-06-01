@@ -17,47 +17,16 @@ limitations under the License.
 #![no_std]
 // Deps
 
-use buddy_system_allocator::LockedHeap;
-use guest_function_register::GuestFunctionRegister;
-use hyperlight_common::mem::HyperlightPEB;
-
 extern crate alloc;
 
 // Modules
-pub mod entrypoint;
-pub mod shared_input_data;
-pub mod shared_output_data;
-
-pub mod guest_error;
-pub mod guest_function_call;
-pub mod guest_function_definition;
-pub mod guest_function_register;
-
-pub mod host_function_call;
-
-pub(crate) mod guest_logger;
-pub mod memory;
-pub mod print;
-
+pub mod exit;
 pub mod error;
-#[cfg(target_arch = "x86_64")]
-pub mod exceptions {
-    pub mod gdt;
-    pub mod handlers;
-    pub mod idt;
-    pub mod idtr;
-    pub mod interrupt_entry;
+// TODO(danbugs): Move this to hyperlight_guest_bin
+pub mod memory;
+
+pub mod guest_handle {
+    pub mod handle;
+    pub mod host_comm;
+    pub mod io;
 }
-pub mod logging;
-
-// Globals
-#[global_allocator]
-pub(crate) static HEAP_ALLOCATOR: LockedHeap<32> = LockedHeap::<32>::empty();
-
-pub(crate) static mut P_PEB: Option<*mut HyperlightPEB> = None;
-pub static mut MIN_STACK_ADDRESS: u64 = 0;
-
-pub static mut OS_PAGE_SIZE: u32 = 0;
-
-pub(crate) static mut REGISTERED_GUEST_FUNCTIONS: GuestFunctionRegister =
-    GuestFunctionRegister::new();

@@ -20,8 +20,7 @@ use alloc::vec::Vec;
 
 use hyperlight_common::flatbuffer_wrappers::function_types::{ParameterType, ReturnType};
 use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
-
-use crate::error::{HyperlightGuestError, Result};
+use hyperlight_guest::error::{HyperlightGuestError, Result};
 
 /// The definition of a function exposed from the guest to the host
 #[derive(Debug, Clone, PartialEq, Eq)]

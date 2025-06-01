@@ -32,10 +32,10 @@ use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
 use hyperlight_common::flatbuffer_wrappers::guest_log_level::LogLevel;
 use hyperlight_common::flatbuffer_wrappers::util::get_flatbuffer_result;
 use hyperlight_guest::error::{HyperlightGuestError, Result};
-use hyperlight_guest::guest_function_definition::GuestFunctionDefinition;
-use hyperlight_guest::guest_function_register::register_function;
-use hyperlight_guest::host_function_call::{call_host_function, print_output_with_host_print};
-use hyperlight_guest::logging::log_message;
+use hyperlight_guest_bin::guest_function::definition::GuestFunctionDefinition;
+use hyperlight_guest_bin::guest_function::register::register_function;
+use hyperlight_guest_bin::guest_logger::log_message;
+use hyperlight_guest_bin::host_comm::{call_host_function, print_output_with_host_print};
 
 // TODO(danbugs): this is needed so the panic handler is actually brought in.
 // We can remove it later once more functionality was moved to hyperlight-guest-bin

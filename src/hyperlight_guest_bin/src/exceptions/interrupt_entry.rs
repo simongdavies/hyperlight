@@ -19,7 +19,7 @@ limitations under the License.
 
 use core::arch::global_asm;
 
-use crate::exceptions::handlers::hl_exception_handler;
+use crate::exceptions::handler::hl_exception_handler;
 
 unsafe extern "C" {
     // Exception handlers

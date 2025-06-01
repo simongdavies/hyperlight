@@ -21,7 +21,7 @@ use core::ptr;
 
 use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
 
-use crate::entrypoint::abort_with_code;
+use crate::exit::abort_with_code;
 
 extern crate alloc;
 
