@@ -21,7 +21,6 @@ use hyperlight_guest::exit::halt;
 
 use crate::GUEST_HANDLE;
 
-// TODO(danbugs): move this to `hyperlight_guest_bin`
 /// Exposes a C API to allow the guest to set an error
 ///
 /// # Safety

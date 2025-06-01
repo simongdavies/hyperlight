@@ -1168,9 +1168,6 @@ name = "hyperlight-guest"
 version = "0.5.0"
 dependencies = [
  "anyhow",
- "cc",
- "cfg-if",
- "glob",
  "hyperlight-common",
  "serde_json",
 ]
@@ -1180,6 +1177,9 @@ name = "hyperlight-guest-bin"
 version = "0.4.0"
 dependencies = [
  "buddy_system_allocator",
+ "cc",
+ "cfg-if",
+ "glob",
  "hyperlight-common",
  "hyperlight-guest",
  "log",

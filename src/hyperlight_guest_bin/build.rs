@@ -109,8 +109,7 @@ fn cargo_main() {
             unsafe { env::set_var("AR_x86_64_pc_windows_msvc", "llvm-lib") };
         }
 
-        // TODO(danbugs): update this when I'm done w/ the move.
-        cfg.compile("hyperlight_guest");
+        cfg.compile("hyperlight_guest_bin");
     }
 
     let out_dir = env::var("OUT_DIR").expect("cargo OUT_DIR not set");
