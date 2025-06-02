@@ -16,6 +16,7 @@ limitations under the License.
 
 use std::sync::{Arc, Mutex};
 
+#[cfg(feature = "fuzzing")]
 use hyperlight_common::flatbuffer_wrappers::function_types::{
     ParameterValue, ReturnType, ReturnValue,
 };
