@@ -45,7 +45,9 @@ use hyperlight_guest::error::{HyperlightGuestError, Result};
 use hyperlight_guest::exit::{abort_with_code, abort_with_code_and_message};
 use hyperlight_guest_bin::guest_function::definition::GuestFunctionDefinition;
 use hyperlight_guest_bin::guest_function::register::register_function;
-use hyperlight_guest_bin::host_comm::{call_host_function, call_host_function_without_returning};
+use hyperlight_guest_bin::host_comm::{
+    call_host_function, call_host_function_without_returning_result,
+};
 use hyperlight_guest_bin::memory::malloc;
 use hyperlight_guest_bin::{guest_logger, MIN_STACK_ADDRESS};
 use log::{error, LevelFilter};
@@ -1194,9 +1196,13 @@ fn fuzz_host_function(func: FunctionCall) -> Result<Vec<u8>> {
 
     // Because we do not know at compile time the actual return type of the host function to be called
     // we cannot use the `call_host_function<T>` generic function.
-    // We need to use the `call_host_function_without_returning` function that does not retrieve the return
+    // We need to use the `call_host_function_without_returning_result` function that does not retrieve the return
     // value
-    call_host_function_without_returning(&host_func_name, Some(params), func.expected_return_type)
-        .expect("failed to call host function");
+    call_host_function_without_returning_result(
+        &host_func_name,
+        Some(params),
+        func.expected_return_type,
+    )
+    .expect("failed to call host function");
     Ok(get_flatbuffer_result(()))
 }

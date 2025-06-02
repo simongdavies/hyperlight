@@ -89,7 +89,7 @@ use hyperlight_common::flatbuffer_wrappers::util::get_flatbuffer_result_from_int
 use hyperlight_guest::error::{HyperlightGuestError, Result};
 use hyperlight_guest_bin::guest_function::definition::GuestFunctionDefinition;
 use hyperlight_guest_bin::guest_function::register::register_function;
-use hyperlight_guest_bin::host_comm::{call_host_function, call_host_function_without_returning};
+use hyperlight_guest_bin::host_comm::{call_host_function, call_host_function_without_returning_result};
 
 fn print_output(function_call: &FunctionCall) -> Result<Vec<u8>> {
     if let ParameterValue::String(message) = function_call.parameters.clone().unwrap()[0].clone() {

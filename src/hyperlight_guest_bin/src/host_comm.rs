@@ -44,13 +44,13 @@ where
     handle.call_host_function::<T>(function_name, parameters, return_type)
 }
 
-pub fn call_host_function_without_returning(
+pub fn call_host_function_without_returning_result(
     function_name: &str,
     parameters: Option<Vec<ParameterValue>>,
     return_type: ReturnType,
 ) -> Result<()> {
     let handle = unsafe { GUEST_HANDLE };
-    handle.call_host_function_without_returning(function_name, parameters, return_type)
+    handle.call_host_function_without_returning_result(function_name, parameters, return_type)
 }
 
 pub fn get_host_return_value<T: TryFrom<ReturnValue>>() -> Result<T> {

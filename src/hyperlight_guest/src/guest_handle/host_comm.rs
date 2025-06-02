@@ -58,7 +58,7 @@ impl GuestHandle {
     ///
     /// Note: The function return value must be obtained by calling
     /// `get_host_return_value`.
-    pub fn call_host_function_without_returning(
+    pub fn call_host_function_without_returning_result(
         &self,
         function_name: &str,
         parameters: Option<Vec<ParameterValue>>,
@@ -95,7 +95,7 @@ impl GuestHandle {
         parameters: Option<Vec<ParameterValue>>,
         return_type: ReturnType,
     ) -> Result<T> {
-        self.call_host_function_without_returning(function_name, parameters, return_type)?;
+        self.call_host_function_without_returning_result(function_name, parameters, return_type)?;
         self.get_host_return_value::<T>()
     }
 
