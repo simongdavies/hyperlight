@@ -80,6 +80,14 @@ pub fn callback_guest_as_string() -> Result<String> {
         .ok_or_else(|| anyhow!("couldn't convert callback guest PathBuf to string"))
 }
 
+/// Get a fully-qualified OS-specific path to the witguest elf binary
+pub fn wit_guest_as_string() -> Result<String> {
+    let buf = rust_guest_as_pathbuf("witguest");
+    buf.to_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| anyhow!("couldn't convert callback guest PathBuf to string"))
+}
+
 /// Get a fully qualified OS-specific path to the dummyguest elf binary
 pub fn dummy_guest_as_string() -> Result<String> {
     let buf = rust_guest_as_pathbuf("dummyguest");

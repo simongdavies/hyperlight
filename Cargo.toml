@@ -21,6 +21,7 @@ exclude = [
     "src/tests/rust_guests/callbackguest",
     "src/tests/rust_guests/dummyguest",
     "src/tests/rust_guests/simpleguest",
+    "src/tests/rust_guests/witguest",
 ]
 
 [workspace.package]
