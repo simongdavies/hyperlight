@@ -76,6 +76,7 @@ dependencies = [
  "anyhow",
  "flatbuffers",
  "log",
+ "spin 0.10.0",
 ]
 
 [[package]]

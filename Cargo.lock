@@ -995,6 +995,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf151400ff0baff5465007dd2f3e717f3fe502074ca563069ce3a6629d07b289"
 dependencies = [
  "foldhash",
+ "serde",
 ]
 
 [[package]]
@@ -1145,7 +1146,35 @@ dependencies = [
  "flatbuffers",
  "hyperlight-testing",
  "log",
+ "spin 0.10.0",
  "tracing",
+]
+
+[[package]]
+name = "hyperlight-component-macro"
+version = "0.5.1"
+dependencies = [
+ "env_logger",
+ "hyperlight-component-util",
+ "itertools 0.14.0",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "syn",
+ "wasmparser",
+]
+
+[[package]]
+name = "hyperlight-component-util"
+version = "0.5.1"
+dependencies = [
+ "itertools 0.14.0",
+ "log",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "syn",
+ "wasmparser",
 ]
 
 [[package]]
@@ -1199,6 +1228,7 @@ dependencies = [
  "gdbstub_arch",
  "goblin",
  "hyperlight-common",
+ "hyperlight-component-macro",
  "hyperlight-testing",
  "kvm-bindings",
  "kvm-ioctls",
@@ -1445,6 +1475,7 @@ checksum = "cea70ddb795996207ad57735b50c5982d8844f38ba9ee5f1aedcfb708a2aa11e"
 dependencies = [
  "equivalent",
  "hashbrown",
+ "serde",
 ]
 
 [[package]]
@@ -3621,6 +3652,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1a05d73b933a847d6cccdda8f838a22ff101ad9bf93e33684f39c1f5f0eece3d"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "wasmparser"
+version = "0.224.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04f17a5917c2ddd3819e84c661fae0d6ba29d7b9c1f0e96c708c65a9c4188e11"
+dependencies = [
+ "bitflags 2.9.1",
+ "hashbrown",
+ "indexmap",
+ "semver",
+ "serde",
 ]
 
 [[package]]
