@@ -15,12 +15,12 @@ limitations under the License.
 */
 
 use log::LevelFilter;
-use tracing::{instrument, Span};
+use tracing::{Span, instrument};
 
 use crate::error::HyperlightError::ExecutionCanceledByHost;
 use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags};
 use crate::metrics::METRIC_GUEST_CANCELLATION;
-use crate::{log_then_return, new_error, HyperlightError, Result};
+use crate::{HyperlightError, Result, log_then_return, new_error};
 
 /// Util for handling x87 fpu state
 #[cfg(any(kvm, mshv, target_os = "windows"))]
@@ -457,7 +457,7 @@ pub(crate) mod tests {
     use crate::sandbox::uninitialized::GuestBinary;
     use crate::sandbox::uninitialized_evolve::set_up_hypervisor_partition;
     use crate::sandbox::{SandboxConfiguration, UninitializedSandbox};
-    use crate::{is_hypervisor_present, new_error, Result};
+    use crate::{Result, is_hypervisor_present, new_error};
 
     #[cfg(gdb)]
     struct DbgMemAccessHandler {}

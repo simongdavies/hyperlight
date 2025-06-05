@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 use core::arch::asm;
-use core::ffi::{c_char, CStr};
+use core::ffi::{CStr, c_char};
 
 use hyperlight_common::outb::OutBAction;
 

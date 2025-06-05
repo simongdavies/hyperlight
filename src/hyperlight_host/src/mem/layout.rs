@@ -17,8 +17,8 @@ use std::fmt::Debug;
 use std::mem::{offset_of, size_of};
 
 use hyperlight_common::mem::{GuestStack, HyperlightPEB, PAGE_SIZE_USIZE};
-use rand::{rng, RngCore};
-use tracing::{instrument, Span};
+use rand::{RngCore, rng};
+use tracing::{Span, instrument};
 
 use super::memory_region::MemoryRegionType::{
     Code, GuardPage, Heap, InputData, OutputData, PageTables, Peb, Stack,
@@ -28,7 +28,7 @@ use super::mgr::AMOUNT_OF_MEMORY_PER_PT;
 use super::shared_mem::{ExclusiveSharedMemory, GuestSharedMemory, SharedMemory};
 use crate::error::HyperlightError::{GuestOffsetIsInvalid, MemoryRequestTooBig};
 use crate::sandbox::SandboxConfiguration;
-use crate::{new_error, Result};
+use crate::{Result, new_error};
 
 // +-------------------------------------------+
 // |             Guest (User) Stack            |

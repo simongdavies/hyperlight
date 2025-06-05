@@ -18,12 +18,12 @@ use std::cmp::Ordering;
 use std::sync::{Arc, Mutex};
 
 use hyperlight_common::flatbuffer_wrappers::function_call::{
-    validate_guest_function_call_buffer, FunctionCall,
+    FunctionCall, validate_guest_function_call_buffer,
 };
 use hyperlight_common::flatbuffer_wrappers::function_types::ReturnValue;
 use hyperlight_common::flatbuffer_wrappers::guest_error::GuestError;
 use hyperlight_common::flatbuffer_wrappers::guest_log_data::GuestLogData;
-use tracing::{instrument, Span};
+use tracing::{Span, instrument};
 
 use super::exe::ExeInfo;
 use super::layout::SandboxMemoryLayout;
@@ -34,7 +34,7 @@ use super::shared_mem::{ExclusiveSharedMemory, GuestSharedMemory, HostSharedMemo
 use super::shared_mem_snapshot::SharedMemorySnapshot;
 use crate::error::HyperlightError::NoMemorySnapshot;
 use crate::sandbox::SandboxConfiguration;
-use crate::{log_then_return, new_error, HyperlightError, Result};
+use crate::{HyperlightError, Result, log_then_return, new_error};
 
 /// Paging Flags
 ///

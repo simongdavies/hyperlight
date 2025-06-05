@@ -20,7 +20,7 @@ use crate::error::HyperlightError::{GuestError, StackOverflow};
 use crate::mem::shared_mem::HostSharedMemory;
 use crate::metrics::{METRIC_GUEST_ERROR, METRIC_GUEST_ERROR_LABEL_CODE};
 use crate::sandbox::mem_mgr::MemMgrWrapper;
-use crate::{log_then_return, Result};
+use crate::{Result, log_then_return};
 
 /// Check for a guest error and return an `Err` if one was found,
 /// and `Ok` if one was not found.

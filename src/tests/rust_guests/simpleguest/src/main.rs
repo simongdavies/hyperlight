@@ -49,8 +49,8 @@ use hyperlight_guest_bin::host_comm::{
     call_host_function, call_host_function_without_returning_result,
 };
 use hyperlight_guest_bin::memory::malloc;
-use hyperlight_guest_bin::{guest_logger, MIN_STACK_ADDRESS};
-use log::{error, LevelFilter};
+use hyperlight_guest_bin::{MIN_STACK_ADDRESS, guest_logger};
+use log::{LevelFilter, error};
 
 extern crate hyperlight_guest;
 
@@ -358,7 +358,10 @@ fn print_ten_args(function_call: &FunctionCall) -> Result<Vec<u8>> {
         function_call.parameters.clone().unwrap()[8].clone(),
         function_call.parameters.clone().unwrap()[9].clone(),
     ) {
-        let message = format!("Message: arg1:{} arg2:{} arg3:{} arg4:{} arg5:{} arg6:{} arg7:{} arg8:{} arg9:{} arg10:{}.", arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10);
+        let message = format!(
+            "Message: arg1:{} arg2:{} arg3:{} arg4:{} arg5:{} arg6:{} arg7:{} arg8:{} arg9:{} arg10:{}.",
+            arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10
+        );
         print_output(&message)
     } else {
         Err(HyperlightGuestError::new(
@@ -394,7 +397,10 @@ fn print_eleven_args(function_call: &FunctionCall) -> Result<Vec<u8>> {
         function_call.parameters.clone().unwrap()[9].clone(),
         function_call.parameters.clone().unwrap()[10].clone(),
     ) {
-        let message = format!("Message: arg1:{} arg2:{} arg3:{} arg4:{} arg5:{} arg6:{} arg7:{} arg8:{} arg9:{} arg10:{} arg11:{:.3}.", arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11);
+        let message = format!(
+            "Message: arg1:{} arg2:{} arg3:{} arg4:{} arg5:{} arg6:{} arg7:{} arg8:{} arg9:{} arg10:{} arg11:{:.3}.",
+            arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11
+        );
         print_output(&message)
     } else {
         Err(HyperlightGuestError::new(
@@ -1190,7 +1196,7 @@ fn fuzz_host_function(func: FunctionCall) -> Result<Vec<u8>> {
             return Err(HyperlightGuestError::new(
                 ErrorCode::GuestFunctionParameterTypeMismatch,
                 "Invalid parameters passed to fuzz_host_function".to_string(),
-            ))
+            ));
         }
     };
 

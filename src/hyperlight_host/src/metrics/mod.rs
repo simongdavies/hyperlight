@@ -89,7 +89,7 @@ mod tests {
     use std::time::Duration;
 
     use hyperlight_testing::simple_guest_as_string;
-    use metrics::{with_local_recorder, Key};
+    use metrics::{Key, with_local_recorder};
     use metrics_util::CompositeKey;
 
     use super::*;

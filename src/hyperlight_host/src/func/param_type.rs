@@ -15,11 +15,11 @@ limitations under the License.
 */
 
 use hyperlight_common::flatbuffer_wrappers::function_types::{ParameterType, ParameterValue};
-use tracing::{instrument, Span};
+use tracing::{Span, instrument};
 
 use super::utils::for_each_tuple;
 use crate::HyperlightError::{ParameterValueConversionFailure, UnexpectedNoOfArguments};
-use crate::{log_then_return, Result};
+use crate::{Result, log_then_return};
 
 /// This is a marker trait that is used to indicate that a type is a
 /// valid Hyperlight parameter type.

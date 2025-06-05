@@ -16,9 +16,9 @@ limitations under the License.
 #![allow(clippy::disallowed_macros)]
 use std::thread;
 
+use hyperlight_host::sandbox::SandboxConfiguration;
 #[cfg(gdb)]
 use hyperlight_host::sandbox::config::DebugInfo;
-use hyperlight_host::sandbox::SandboxConfiguration;
 use hyperlight_host::sandbox_state::sandbox::EvolvableSandbox;
 use hyperlight_host::sandbox_state::transition::Noop;
 use hyperlight_host::{MultiUseSandbox, UninitializedSandbox};
@@ -79,7 +79,7 @@ mod tests {
     use std::process::{Command, Stdio};
     use std::time::Duration;
 
-    use hyperlight_host::{new_error, Result};
+    use hyperlight_host::{Result, new_error};
     use io::{BufReader, BufWriter, Read, Write};
 
     use super::*;

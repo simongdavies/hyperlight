@@ -25,7 +25,7 @@ use hyperlight_host::sandbox::SandboxConfiguration;
 use hyperlight_host::sandbox_state::sandbox::EvolvableSandbox;
 use hyperlight_host::sandbox_state::transition::Noop;
 use hyperlight_host::{GuestBinary, HyperlightError, MultiUseSandbox, UninitializedSandbox};
-use hyperlight_testing::simplelogger::{SimpleLogger, LOGGER};
+use hyperlight_testing::simplelogger::{LOGGER, SimpleLogger};
 use hyperlight_testing::{
     c_simple_guest_as_string, callback_guest_as_string, simple_guest_as_string,
 };

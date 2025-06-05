@@ -17,7 +17,7 @@ limitations under the License.
 use core::mem::size_of;
 use core::ptr::addr_of;
 
-use crate::exceptions::idt::{init_idt, IdtEntry, IDT};
+use crate::exceptions::idt::{IDT, IdtEntry, init_idt};
 
 #[repr(C, packed)]
 pub struct Idtr {

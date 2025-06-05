@@ -19,8 +19,8 @@ use hyperlight_host::sandbox_state::sandbox::EvolvableSandbox;
 use hyperlight_host::sandbox_state::transition::Noop;
 use hyperlight_host::{GuestBinary, MultiUseSandbox, Result};
 use hyperlight_testing::simple_guest_as_string;
-use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
 
 // An example of how to get tracy tracing working with hyperlight.
 // Run with:

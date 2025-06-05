@@ -16,7 +16,7 @@ limitations under the License.
 
 use core::convert::TryFrom;
 
-use anyhow::{anyhow, Error};
+use anyhow::{Error, anyhow};
 
 /// Exception codes for the x86 architecture.
 /// These are helpful to identify the type of exception that occurred

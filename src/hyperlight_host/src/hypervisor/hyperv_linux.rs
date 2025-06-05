@@ -25,23 +25,23 @@ extern crate mshv_bindings3 as mshv_bindings;
 extern crate mshv_ioctls3 as mshv_ioctls;
 
 use std::fmt::{Debug, Formatter};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use log::{error, LevelFilter};
+use log::{LevelFilter, error};
 #[cfg(mshv2)]
 use mshv_bindings::hv_message;
-#[cfg(gdb)]
 use mshv_bindings::{
-    hv_intercept_parameters, hv_intercept_type_HV_INTERCEPT_TYPE_EXCEPTION,
-    hv_message_type_HVMSG_X64_EXCEPTION_INTERCEPT, mshv_install_intercept,
-    HV_INTERCEPT_ACCESS_MASK_EXECUTE,
-};
-use mshv_bindings::{
-    hv_message_type, hv_message_type_HVMSG_GPA_INTERCEPT, hv_message_type_HVMSG_UNMAPPED_GPA,
+    FloatingPointUnit, SegmentRegister, SpecialRegisters, StandardRegisters, hv_message_type,
+    hv_message_type_HVMSG_GPA_INTERCEPT, hv_message_type_HVMSG_UNMAPPED_GPA,
     hv_message_type_HVMSG_X64_HALT, hv_message_type_HVMSG_X64_IO_PORT_INTERCEPT, hv_register_assoc,
     hv_register_name_HV_X64_REGISTER_RIP, hv_register_value, mshv_user_mem_region,
-    FloatingPointUnit, SegmentRegister, SpecialRegisters, StandardRegisters,
+};
+#[cfg(gdb)]
+use mshv_bindings::{
+    HV_INTERCEPT_ACCESS_MASK_EXECUTE, hv_intercept_parameters,
+    hv_intercept_type_HV_INTERCEPT_TYPE_EXCEPTION, hv_message_type_HVMSG_X64_EXCEPTION_INTERCEPT,
+    mshv_install_intercept,
 };
 #[cfg(mshv3)]
 use mshv_bindings::{
@@ -49,7 +49,7 @@ use mshv_bindings::{
     hv_partition_synthetic_processor_features,
 };
 use mshv_ioctls::{Mshv, MshvError, VcpuFd, VmFd};
-use tracing::{instrument, Span};
+use tracing::{Span, instrument};
 
 use super::fpu::{FP_CONTROL_WORD_DEFAULT, FP_TAG_WORD_DEFAULT, MXCSR_DEFAULT};
 #[cfg(gdb)]
@@ -58,17 +58,17 @@ use super::gdb::{DebugCommChannel, DebugMsg, DebugResponse, GuestDebug, MshvDebu
 use super::handlers::DbgMemAccessHandlerWrapper;
 use super::handlers::{MemAccessHandlerWrapper, OutBHandlerWrapper};
 use super::{
-    Hypervisor, InterruptHandle, LinuxInterruptHandle, VirtualCPU, CR0_AM, CR0_ET, CR0_MP, CR0_NE,
-    CR0_PE, CR0_PG, CR0_WP, CR4_OSFXSR, CR4_OSXMMEXCPT, CR4_PAE, EFER_LMA, EFER_LME, EFER_NX,
-    EFER_SCE,
+    CR0_AM, CR0_ET, CR0_MP, CR0_NE, CR0_PE, CR0_PG, CR0_WP, CR4_OSFXSR, CR4_OSXMMEXCPT, CR4_PAE,
+    EFER_LMA, EFER_LME, EFER_NX, EFER_SCE, Hypervisor, InterruptHandle, LinuxInterruptHandle,
+    VirtualCPU,
 };
+#[cfg(gdb)]
+use crate::HyperlightError;
 use crate::hypervisor::HyperlightExit;
 use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags};
 use crate::mem::ptr::{GuestPtr, RawPtr};
 use crate::sandbox::SandboxConfiguration;
-#[cfg(gdb)]
-use crate::HyperlightError;
-use crate::{log_then_return, new_error, Result};
+use crate::{Result, log_then_return, new_error};
 
 #[cfg(gdb)]
 mod debug {
@@ -78,7 +78,7 @@ mod debug {
     use super::{HypervLinuxDriver, *};
     use crate::hypervisor::gdb::{DebugMsg, DebugResponse, VcpuStopReason, X86_64Regs};
     use crate::hypervisor::handlers::DbgMemAccessHandlerCaller;
-    use crate::{new_error, Result};
+    use crate::{Result, new_error};
 
     impl HypervLinuxDriver {
         /// Resets the debug information to disable debugging

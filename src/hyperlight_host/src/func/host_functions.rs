@@ -21,7 +21,7 @@ use hyperlight_common::flatbuffer_wrappers::function_types::{ParameterValue, Ret
 use super::utils::for_each_tuple;
 use super::{ParameterTuple, ResultType, SupportedReturnType};
 use crate::sandbox::{ExtraAllowedSyscall, UninitializedSandbox};
-use crate::{log_then_return, new_error, Result};
+use crate::{Result, log_then_return, new_error};
 
 /// A representation of a host function.
 /// This is a thin wrapper around a `Fn(Args) -> Result<Output>`.
