@@ -19,7 +19,7 @@ use std::time::Duration;
 
 #[cfg(target_os = "linux")]
 use libc::c_int;
-use tracing::{instrument, Span};
+use tracing::{Span, instrument};
 
 use crate::mem::exe::ExeInfo;
 

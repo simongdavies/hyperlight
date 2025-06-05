@@ -16,16 +16,16 @@ limitations under the License.
 
 use std::convert::TryFrom;
 use std::fmt::Debug;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 #[cfg(gdb)]
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use kvm_bindings::{kvm_fpu, kvm_regs, kvm_userspace_memory_region, KVM_MEM_READONLY};
+use kvm_bindings::{KVM_MEM_READONLY, kvm_fpu, kvm_regs, kvm_userspace_memory_region};
 use kvm_ioctls::Cap::UserMemory;
 use kvm_ioctls::{Kvm, VcpuExit, VcpuFd, VmFd};
 use log::LevelFilter;
-use tracing::{instrument, Span};
+use tracing::{Span, instrument};
 
 use super::fpu::{FP_CONTROL_WORD_DEFAULT, FP_TAG_WORD_DEFAULT, MXCSR_DEFAULT};
 #[cfg(gdb)]
@@ -34,16 +34,16 @@ use super::gdb::{DebugCommChannel, DebugMsg, DebugResponse, GuestDebug, KvmDebug
 use super::handlers::DbgMemAccessHandlerWrapper;
 use super::handlers::{MemAccessHandlerWrapper, OutBHandlerWrapper};
 use super::{
-    HyperlightExit, Hypervisor, InterruptHandle, LinuxInterruptHandle, VirtualCPU, CR0_AM, CR0_ET,
-    CR0_MP, CR0_NE, CR0_PE, CR0_PG, CR0_WP, CR4_OSFXSR, CR4_OSXMMEXCPT, CR4_PAE, EFER_LMA,
-    EFER_LME, EFER_NX, EFER_SCE,
+    CR0_AM, CR0_ET, CR0_MP, CR0_NE, CR0_PE, CR0_PG, CR0_WP, CR4_OSFXSR, CR4_OSXMMEXCPT, CR4_PAE,
+    EFER_LMA, EFER_LME, EFER_NX, EFER_SCE, HyperlightExit, Hypervisor, InterruptHandle,
+    LinuxInterruptHandle, VirtualCPU,
 };
+#[cfg(gdb)]
+use crate::HyperlightError;
 use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags};
 use crate::mem::ptr::{GuestPtr, RawPtr};
 use crate::sandbox::SandboxConfiguration;
-#[cfg(gdb)]
-use crate::HyperlightError;
-use crate::{log_then_return, new_error, Result};
+use crate::{Result, log_then_return, new_error};
 
 /// Return `true` if the KVM API is available, version 12, and has UserMemory capability, or `false` otherwise
 #[instrument(skip_all, parent = Span::current(), level = "Trace")]
@@ -78,7 +78,7 @@ mod debug {
         DebugMsg, DebugResponse, GuestDebug, KvmDebug, VcpuStopReason, X86_64Regs,
     };
     use crate::hypervisor::handlers::DbgMemAccessHandlerCaller;
-    use crate::{new_error, Result};
+    use crate::{Result, new_error};
 
     impl KVMDriver {
         /// Resets the debug information to disable debugging

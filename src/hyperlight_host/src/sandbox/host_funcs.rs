@@ -19,12 +19,12 @@ use std::io::{IsTerminal, Write};
 
 use hyperlight_common::flatbuffer_wrappers::function_types::{ParameterValue, ReturnValue};
 use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
-use tracing::{instrument, Span};
+use tracing::{Span, instrument};
 
 use super::ExtraAllowedSyscall;
-use crate::func::host_functions::TypeErasedHostFunction;
 use crate::HyperlightError::HostFunctionNotFound;
-use crate::{new_error, Result};
+use crate::func::host_functions::TypeErasedHostFunction;
+use crate::{Result, new_error};
 
 #[derive(Default)]
 /// A Wrapper around details of functions exposed by the Host

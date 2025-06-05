@@ -41,7 +41,7 @@ pub(crate) mod uninitialized_evolve;
 pub use config::SandboxConfiguration;
 /// Re-export for the `MultiUseSandbox` type
 pub use initialized_multi_use::MultiUseSandbox;
-use tracing::{instrument, Span};
+use tracing::{Span, instrument};
 /// Re-export for `GuestBinary` type
 pub use uninitialized::GuestBinary;
 /// Re-export for `UninitializedSandbox` type
@@ -98,7 +98,7 @@ mod tests {
     use crate::sandbox::uninitialized::GuestBinary;
     use crate::sandbox_state::sandbox::EvolvableSandbox;
     use crate::sandbox_state::transition::Noop;
-    use crate::{new_error, MultiUseSandbox, UninitializedSandbox};
+    use crate::{MultiUseSandbox, UninitializedSandbox, new_error};
 
     #[test]
     // TODO: add support for testing on WHP

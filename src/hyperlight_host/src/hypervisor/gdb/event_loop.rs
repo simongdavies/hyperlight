@@ -17,9 +17,9 @@ limitations under the License.
 use gdbstub::common::Signal;
 use gdbstub::conn::ConnectionExt;
 use gdbstub::stub::{
-    run_blocking, BaseStopReason, DisconnectReason, GdbStub, SingleThreadStopReason,
+    BaseStopReason, DisconnectReason, GdbStub, SingleThreadStopReason, run_blocking,
 };
-use libc::{pthread_kill, SIGRTMIN};
+use libc::{SIGRTMIN, pthread_kill};
 
 use super::x86_64_target::HyperlightSandboxTarget;
 use super::{DebugResponse, GdbTargetError, VcpuStopReason};

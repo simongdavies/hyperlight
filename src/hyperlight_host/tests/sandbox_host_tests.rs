@@ -23,7 +23,7 @@ use hyperlight_host::sandbox::SandboxConfiguration;
 use hyperlight_host::sandbox_state::sandbox::EvolvableSandbox;
 use hyperlight_host::sandbox_state::transition::Noop;
 use hyperlight_host::{
-    new_error, GuestBinary, HyperlightError, MultiUseSandbox, Result, UninitializedSandbox,
+    GuestBinary, HyperlightError, MultiUseSandbox, Result, UninitializedSandbox, new_error,
 };
 use hyperlight_testing::simple_guest_as_string;
 #[cfg(target_os = "windows")]
@@ -289,11 +289,13 @@ fn simple_test_helper() -> Result<()> {
         expected_calls
     );
 
-    assert!(messages
-        .try_lock()
-        .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?
-        .iter()
-        .all(|msg| msg == message));
+    assert!(
+        messages
+            .try_lock()
+            .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?
+            .iter()
+            .all(|msg| msg == message)
+    );
     Ok(())
 }
 

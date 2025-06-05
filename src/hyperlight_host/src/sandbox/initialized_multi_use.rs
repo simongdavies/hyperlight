@@ -20,7 +20,7 @@ use hyperlight_common::flatbuffer_wrappers::function_call::{FunctionCall, Functi
 use hyperlight_common::flatbuffer_wrappers::function_types::{
     ParameterValue, ReturnType, ReturnValue,
 };
-use tracing::{instrument, Span};
+use tracing::{Span, instrument};
 
 use super::host_funcs::FunctionRegistry;
 use super::{MemMgrWrapper, WrapperGetter};

@@ -43,7 +43,7 @@ use x86_64_target::HyperlightSandboxTarget;
 
 use crate::hypervisor::handlers::DbgMemAccessHandlerCaller;
 use crate::mem::layout::SandboxMemoryLayout;
-use crate::{new_error, HyperlightError};
+use crate::{HyperlightError, new_error};
 
 #[derive(Debug, Error)]
 pub(crate) enum GdbTargetError {

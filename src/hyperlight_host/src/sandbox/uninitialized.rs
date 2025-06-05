@@ -20,22 +20,22 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use log::LevelFilter;
-use tracing::{instrument, Span};
+use tracing::{Span, instrument};
 
-use super::host_funcs::{default_writer_func, FunctionRegistry};
+use super::host_funcs::{FunctionRegistry, default_writer_func};
 use super::mem_mgr::MemMgrWrapper;
 use super::uninitialized_evolve::evolve_impl_multi_use;
-use crate::func::host_functions::{register_host_function, HostFunction};
+use crate::func::host_functions::{HostFunction, register_host_function};
 use crate::func::{ParameterTuple, SupportedReturnType};
 #[cfg(feature = "build-metadata")]
 use crate::log_build_details;
 use crate::mem::exe::ExeInfo;
-use crate::mem::mgr::{SandboxMemoryManager, STACK_COOKIE_LEN};
+use crate::mem::mgr::{STACK_COOKIE_LEN, SandboxMemoryManager};
 use crate::mem::shared_mem::ExclusiveSharedMemory;
 use crate::sandbox::SandboxConfiguration;
 use crate::sandbox_state::sandbox::EvolvableSandbox;
 use crate::sandbox_state::transition::Noop;
-use crate::{log_then_return, new_error, MultiUseSandbox, Result};
+use crate::{MultiUseSandbox, Result, log_then_return, new_error};
 
 #[cfg(all(target_os = "linux", feature = "seccomp"))]
 const EXTRA_ALLOWED_SYSCALLS_FOR_WRITER_FUNC: &[super::ExtraAllowedSyscall] = &[
@@ -294,7 +294,7 @@ impl UninitializedSandbox {
 // Hyperlight is only supported on Windows 11 and Windows Server 2022 and later
 #[cfg(target_os = "windows")]
 fn check_windows_version() -> Result<()> {
-    use windows_version::{is_server, OsVersion};
+    use windows_version::{OsVersion, is_server};
     const WINDOWS_MAJOR: u32 = 10;
     const WINDOWS_MINOR: u32 = 0;
     const WINDOWS_PACK: u32 = 0;
@@ -317,19 +317,19 @@ fn check_windows_version() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc::channel;
     use std::sync::Arc;
+    use std::sync::mpsc::channel;
     use std::{fs, thread};
 
     use crossbeam_queue::ArrayQueue;
     use hyperlight_common::flatbuffer_wrappers::function_types::{ParameterValue, ReturnValue};
     use hyperlight_testing::simple_guest_as_string;
 
-    use crate::sandbox::uninitialized::GuestBinary;
     use crate::sandbox::SandboxConfiguration;
+    use crate::sandbox::uninitialized::GuestBinary;
     use crate::sandbox_state::sandbox::EvolvableSandbox;
     use crate::sandbox_state::transition::Noop;
-    use crate::{new_error, MultiUseSandbox, Result, UninitializedSandbox};
+    use crate::{MultiUseSandbox, Result, UninitializedSandbox, new_error};
 
     #[test]
     fn test_new_sandbox() {
@@ -767,8 +767,8 @@ mod tests {
         use hyperlight_testing::tracing_subscriber::TracingSubscriber as TestSubscriber;
         use serde_json::{Map, Value};
         use tracing::Level as tracing_level;
-        use tracing_core::callsite::rebuild_interest_cache;
         use tracing_core::Subscriber;
+        use tracing_core::callsite::rebuild_interest_cache;
         use uuid::Uuid;
 
         use crate::testing::log_values::build_metadata_testing::try_to_strings;
@@ -875,7 +875,7 @@ mod tests {
     fn test_log_trace() {
         use std::path::PathBuf;
 
-        use hyperlight_testing::logger::{Logger as TestLogger, LOGGER as TEST_LOGGER};
+        use hyperlight_testing::logger::{LOGGER as TEST_LOGGER, Logger as TestLogger};
         use log::Level;
         use tracing_core::callsite::rebuild_interest_cache;
 
@@ -929,9 +929,11 @@ mod tests {
 
             let logcall = TEST_LOGGER.get_log_call(16).unwrap();
             assert_eq!(Level::Error, logcall.level);
-            assert!(logcall
-                .args
-                .starts_with("error=Error(\"GuestBinary not found:"));
+            assert!(
+                logcall
+                    .args
+                    .starts_with("error=Error(\"GuestBinary not found:")
+            );
             assert_eq!("hyperlight_host::sandbox::uninitialized", logcall.target);
 
             // Log record 18
@@ -981,9 +983,11 @@ mod tests {
 
             let logcall = TEST_LOGGER.get_log_call(1).unwrap();
             assert_eq!(Level::Error, logcall.level);
-            assert!(logcall
-                .args
-                .starts_with("error=Error(\"GuestBinary not found:"));
+            assert!(
+                logcall
+                    .args
+                    .starts_with("error=Error(\"GuestBinary not found:")
+            );
             assert_eq!("hyperlight_host::sandbox::uninitialized", logcall.target);
         }
         {
