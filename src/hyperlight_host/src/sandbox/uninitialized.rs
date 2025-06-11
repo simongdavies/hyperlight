@@ -30,6 +30,7 @@ use crate::func::{ParameterTuple, SupportedReturnType};
 #[cfg(feature = "build-metadata")]
 use crate::log_build_details;
 use crate::mem::exe::ExeInfo;
+use crate::mem::memory_region::MemoryRegionFlags;
 use crate::mem::mgr::{STACK_COOKIE_LEN, SandboxMemoryManager};
 use crate::mem::shared_mem::ExclusiveSharedMemory;
 use crate::sandbox::SandboxConfiguration;
@@ -123,13 +124,60 @@ impl
     }
 }
 
-/// A `GuestBinary` is either a buffer containing the binary or a path to the binary
+/// A `GuestBinary` is either a buffer or the file path to some data (e.g., a guest binary).
 #[derive(Debug)]
 pub enum GuestBinary<'a> {
-    /// A buffer containing the guest binary
+    /// A buffer containing the GuestBinary
     Buffer(&'a [u8]),
-    /// A path to the guest binary
+    /// A path to the GuestBinary
     FilePath(String),
+}
+
+/// A `GuestBlob` containing data and the permissions for its use.
+#[derive(Debug)]
+pub struct GuestBlob<'a> {
+    /// The data contained in the blob.
+    pub data: &'a [u8],
+    /// The permissions for the blob in memory.
+    /// By default, it's READ
+    pub permissions: MemoryRegionFlags,
+}
+
+impl<'a> From<&'a [u8]> for GuestBlob<'a> {
+    fn from(data: &'a [u8]) -> Self {
+        GuestBlob {
+            data,
+            permissions: MemoryRegionFlags::READ,
+        }
+    }
+}
+
+/// A `GuestEnvironment` is a structure that contains the guest binary and an optional GuestBinary.
+#[derive(Debug)]
+pub struct GuestEnvironment<'a, 'b> {
+    /// The guest binary, which can be a file path or a buffer.
+    pub guest_binary: GuestBinary<'a>,
+    /// An optional guest blob, which can be used to provide additional data to the guest.
+    pub init_data: Option<GuestBlob<'b>>,
+}
+
+impl<'a, 'b> GuestEnvironment<'a, 'b> {
+    /// Creates a new `GuestEnvironment` with the given guest binary and an optional guest blob.
+    pub fn new(guest_binary: GuestBinary<'a>, init_data: Option<&'b [u8]>) -> Self {
+        GuestEnvironment {
+            guest_binary,
+            init_data: init_data.map(GuestBlob::from),
+        }
+    }
+}
+
+impl<'a> From<GuestBinary<'a>> for GuestEnvironment<'a, '_> {
+    fn from(guest_binary: GuestBinary<'a>) -> Self {
+        GuestEnvironment {
+            guest_binary,
+            init_data: None,
+        }
+    }
 }
 
 impl UninitializedSandbox {
@@ -142,16 +190,22 @@ impl UninitializedSandbox {
     /// The err attribute is used to emit an error should the Result be an error, it uses the std::`fmt::Debug trait` to print the error.
     #[instrument(
         err(Debug),
-        skip(guest_binary),
+        skip(env),
         parent = Span::current()
     )]
-    pub fn new(guest_binary: GuestBinary, cfg: Option<SandboxConfiguration>) -> Result<Self> {
+    pub fn new<'a, 'b>(
+        env: impl Into<GuestEnvironment<'a, 'b>>,
+        cfg: Option<SandboxConfiguration>,
+    ) -> Result<Self> {
         #[cfg(feature = "build-metadata")]
         log_build_details();
 
         // hyperlight is only supported on Windows 11 and Windows Server 2022 and later
         #[cfg(target_os = "windows")]
         check_windows_version()?;
+
+        let env: GuestEnvironment<'_, '_> = env.into();
+        let guest_binary = env.guest_binary;
 
         // If the guest binary is a file make sure it exists
         let guest_binary = match guest_binary {
