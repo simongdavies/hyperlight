@@ -24,7 +24,12 @@ alias cg := build-and-move-c-guests
 
 # build host library
 build target=default-target:
-    cargo build --profile={{ if target == "debug" { "dev" } else { target } }}
+    cargo build --profile={{ if target == "debug" { "dev" } else { target } }} 
+
+# build host library
+build-with-musl-libc target=default-target:
+    cargo build --profile={{ if target == "debug" { "dev" } else { target } }} --target x86_64-unknown-linux-musl
+
 
 # build testing guest binaries
 guests: build-and-move-rust-guests build-and-move-c-guests
