@@ -24,6 +24,7 @@ use hyperlight_common::flatbuffer_wrappers::function_types::{
     ParameterValue, ReturnType, ReturnValue,
 };
 use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
+use hyperlight_common::flatbuffer_wrappers::host_function_details::HostFunctionDetails;
 use hyperlight_common::flatbuffer_wrappers::util::get_flatbuffer_result;
 use hyperlight_guest::error::{HyperlightGuestError, Result};
 
@@ -56,6 +57,12 @@ pub fn call_host_function_without_returning_result(
 pub fn get_host_return_value<T: TryFrom<ReturnValue>>() -> Result<T> {
     let handle = unsafe { GUEST_HANDLE };
     handle.get_host_return_value::<T>()
+}
+
+pub fn get_host_function_details() -> HostFunctionDetails {
+    let handle = unsafe { GUEST_HANDLE };
+
+    handle.get_host_function_details()
 }
 
 /// Print a message using the host's print function.

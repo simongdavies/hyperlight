@@ -17,13 +17,17 @@ limitations under the License.
 use std::collections::HashMap;
 use std::io::{IsTerminal, Write};
 
-use hyperlight_common::flatbuffer_wrappers::function_types::{ParameterValue, ReturnValue};
+use hyperlight_common::flatbuffer_wrappers::function_types::{
+    ParameterType, ParameterValue, ReturnType, ReturnValue,
+};
 use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
 use tracing::{Span, instrument};
 
 use super::ExtraAllowedSyscall;
 use crate::HyperlightError::HostFunctionNotFound;
 use crate::func::host_functions::TypeErasedHostFunction;
+use crate::mem::mgr::SandboxMemoryManager;
+use crate::mem::shared_mem::ExclusiveSharedMemory;
 use crate::{Result, new_error};
 
 #[derive(Default)]
@@ -35,6 +39,8 @@ pub struct FunctionRegistry {
 pub struct FunctionEntry {
     pub function: TypeErasedHostFunction,
     pub extra_allowed_syscalls: Option<Vec<ExtraAllowedSyscall>>,
+    pub parameter_types: &'static [ParameterType],
+    pub return_type: ReturnType,
 }
 
 impl FunctionRegistry {
@@ -43,22 +49,20 @@ impl FunctionRegistry {
     pub(crate) fn register_host_function(
         &mut self,
         name: String,
-        func: TypeErasedHostFunction,
+        func: FunctionEntry,
+        mgr: &mut SandboxMemoryManager<ExclusiveSharedMemory>,
     ) -> Result<()> {
-        self.register_host_function_helper(name, func, None)
-    }
+        self.functions_map.insert(name, func);
 
-    /// Register a host function with the sandbox, with a list of extra syscalls
-    /// that the function is allowed to make.
-    #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
-    #[cfg(all(feature = "seccomp", target_os = "linux"))]
-    pub(crate) fn register_host_function_with_syscalls(
-        &mut self,
-        name: String,
-        func: TypeErasedHostFunction,
-        extra_allowed_syscalls: Vec<ExtraAllowedSyscall>,
-    ) -> Result<()> {
-        self.register_host_function_helper(name, func, Some(extra_allowed_syscalls))
+        let buffer: Vec<u8> = self.functions_map.try_into().map_err(|e| {
+            new_error!(
+                "Error serializing host function details to flatbuffer: {}",
+                e
+            )
+        })?;
+
+        mgr.write_buffer_host_function_details(&buffer)?;
+        Ok(())
     }
 
     /// Assuming a host function called `"HostPrint"` exists, and takes a
@@ -88,34 +92,13 @@ impl FunctionRegistry {
         self.call_host_func_impl(name, args)
     }
 
-    fn register_host_function_helper(
-        &mut self,
-        name: String,
-        function: TypeErasedHostFunction,
-        extra_allowed_syscalls: Option<Vec<ExtraAllowedSyscall>>,
-    ) -> Result<()> {
-        #[cfg(not(all(feature = "seccomp", target_os = "linux")))]
-        if extra_allowed_syscalls.is_some() {
-            return Err(new_error!(
-                "Extra syscalls are only supported on Linux with seccomp"
-            ));
-        }
-
-        self.functions_map.insert(
-            name,
-            FunctionEntry {
-                function,
-                extra_allowed_syscalls,
-            },
-        );
-        Ok(())
-    }
-
     #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
     fn call_host_func_impl(&self, name: &str, args: Vec<ParameterValue>) -> Result<ReturnValue> {
         let FunctionEntry {
             function,
             extra_allowed_syscalls,
+            parameter_types: _,
+            return_type: _,
         } = self
             .functions_map
             .get(name)

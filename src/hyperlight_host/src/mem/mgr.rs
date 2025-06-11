@@ -23,6 +23,7 @@ use hyperlight_common::flatbuffer_wrappers::function_call::{
 use hyperlight_common::flatbuffer_wrappers::function_types::ReturnValue;
 use hyperlight_common::flatbuffer_wrappers::guest_error::GuestError;
 use hyperlight_common::flatbuffer_wrappers::guest_log_data::GuestLogData;
+use hyperlight_common::flatbuffer_wrappers::host_function_details::HostFunctionDetails;
 use tracing::{Span, instrument};
 
 use super::exe::ExeInfo;
@@ -170,6 +171,8 @@ where
                             MemoryRegionType::InputData => PAGE_PRESENT | PAGE_RW | PAGE_NX,
                             MemoryRegionType::OutputData => PAGE_PRESENT | PAGE_RW | PAGE_NX,
                             MemoryRegionType::Peb => PAGE_PRESENT | PAGE_RW | PAGE_NX,
+                            // Host Function Definitions are readonly in the guest
+                            MemoryRegionType::HostFunctionDefinitions => PAGE_PRESENT | PAGE_NX,
                             MemoryRegionType::PageTables => PAGE_PRESENT | PAGE_RW | PAGE_NX,
                         },
                         // If there is an error then the address isn't mapped so mark it as not present
@@ -310,6 +313,42 @@ impl SandboxMemoryManager<ExclusiveSharedMemory> {
         )?;
 
         Ok(Self::new(layout, shared_mem, load_addr, entrypoint_offset))
+    }
+
+    /// Writes host function details to memory
+    #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
+    pub(crate) fn write_buffer_host_function_details(&mut self, buffer: &[u8]) -> Result<()> {
+        let host_function_details = HostFunctionDetails::try_from(buffer).map_err(|e| {
+            new_error!(
+                "write_buffer_host_function_details: failed to convert buffer to HostFunctionDetails: {}",
+                e
+            )
+        })?;
+
+        let host_function_call_buffer: Vec<u8> = (&host_function_details).try_into().map_err(|_| {
+            new_error!(
+                "write_buffer_host_function_details: failed to convert HostFunctionDetails to Vec<u8>"
+            )
+        })?;
+
+        let buffer_size = {
+            let size_u64 = self
+                .shared_mem
+                .read_u64(self.layout.get_host_function_definitions_size_offset())?;
+            usize::try_from(size_u64)
+        }?;
+
+        if host_function_call_buffer.len() > buffer_size {
+            log_then_return!(
+                "Host Function Details buffer is too big for the host_function_definitions buffer"
+            );
+        }
+
+        self.shared_mem.copy_from_slice(
+            host_function_call_buffer.as_slice(),
+            self.layout.host_function_definitions_buffer_offset,
+        )?;
+        Ok(())
     }
 
     /// Set the stack guard to `cookie` using `layout` to calculate

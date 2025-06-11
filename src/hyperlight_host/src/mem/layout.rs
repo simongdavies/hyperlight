@@ -16,12 +16,12 @@ limitations under the License.
 use std::fmt::Debug;
 use std::mem::{offset_of, size_of};
 
-use hyperlight_common::mem::{GuestStack, HyperlightPEB, PAGE_SIZE_USIZE};
+use hyperlight_common::mem::{GuestMemoryRegion, HyperlightPEB, PAGE_SIZE_USIZE};
 use rand::{RngCore, rng};
 use tracing::{Span, instrument};
 
 use super::memory_region::MemoryRegionType::{
-    Code, GuardPage, Heap, InputData, OutputData, PageTables, Peb, Stack,
+    Code, GuardPage, Heap, HostFunctionDefinitions, InputData, OutputData, PageTables, Peb, Stack,
 };
 use super::memory_region::{MemoryRegion, MemoryRegionFlags, MemoryRegionVecBuilder};
 use super::mgr::AMOUNT_OF_MEMORY_PER_PT;
@@ -41,6 +41,8 @@ use crate::{Result, new_error};
 // +-------------------------------------------+
 // |              Input Data                   |
 // +-------------------------------------------+
+// |        Host Function Definitions          |
+// +-------------------------------------------+
 // |                PEB Struct                 | (HyperlightPEB size)
 // +-------------------------------------------+
 // |               Guest Code                  |
@@ -54,6 +56,10 @@ use crate::{Result, new_error};
 // |                   PML4                    |
 // +-------------------------------------------+ 0x0_000
 
+///
+/// - `HostDefinitions` - the length of this is the `HostFunctionDefinitionSize`
+///   field from `SandboxConfiguration`
+///
 /// - `InputData` -  this is a buffer that is used for input data to the host program.
 ///   the length of this field is `InputDataSize` from `SandboxConfiguration`
 ///
@@ -83,6 +89,7 @@ pub(crate) struct SandboxMemoryLayout {
     peb_security_cookie_seed_offset: usize,
     peb_guest_dispatch_function_ptr_offset: usize, // set by guest in guest entrypoint
     peb_code_pointer_offset: usize,
+    pub(super) peb_host_function_definitions_offset: usize,
     peb_input_data_offset: usize,
     peb_output_data_offset: usize,
     peb_heap_data_offset: usize,
@@ -90,6 +97,7 @@ pub(crate) struct SandboxMemoryLayout {
 
     // The following are the actual values
     // that are written to the PEB struct
+    pub(crate) host_function_definitions_buffer_offset: usize,
     pub(super) input_data_buffer_offset: usize,
     pub(super) output_data_buffer_offset: usize,
     guest_heap_buffer_offset: usize,
@@ -126,7 +134,11 @@ impl Debug for SandboxMemoryLayout {
                 &format_args!("{:#x}", self.peb_guest_dispatch_function_ptr_offset),
             )
             .field(
-                "Code and OutB Pointer Offset",
+                "Host Function Definitions Offset",
+                &format_args!("{:#x}", self.peb_host_function_definitions_offset),
+            )
+            .field(
+                "Code Pointer Offset",
                 &format_args!("{:#x}", self.peb_code_pointer_offset),
             )
             .field(
@@ -144,6 +156,10 @@ impl Debug for SandboxMemoryLayout {
             .field(
                 "Guest Stack Offset",
                 &format_args!("{:#x}", self.peb_guest_stack_data_offset),
+            )
+            .field(
+                "Host Function Definitions Buffer Offset",
+                &format_args!("{:#x}", self.host_function_definitions_buffer_offset),
             )
             .field(
                 "Input Data Buffer Offset",
@@ -230,12 +246,19 @@ impl SandboxMemoryLayout {
         let peb_output_data_offset = peb_offset + offset_of!(HyperlightPEB, output_stack);
         let peb_heap_data_offset = peb_offset + offset_of!(HyperlightPEB, guest_heap);
         let peb_guest_stack_data_offset = peb_offset + offset_of!(HyperlightPEB, guest_stack);
+        let peb_host_function_definitions_offset =
+            peb_offset + offset_of!(HyperlightPEB, host_function_definitions);
 
         // The following offsets are the actual values that relate to memory layout,
         // which are written to PEB struct
         let peb_address = Self::BASE_ADDRESS + peb_offset;
+        // make sure host function definitions buffer starts at 4K boundary
+        let host_function_definitions_buffer_offset = round_up_to(
+            peb_host_function_definitions_offset + size_of::<GuestMemoryRegion>(),
+            PAGE_SIZE_USIZE,
+        );
         let input_data_buffer_offset = round_up_to(
-            peb_guest_stack_data_offset + size_of::<GuestStack>(),
+            host_function_definitions_buffer_offset + cfg.get_host_function_definition_size(),
             PAGE_SIZE_USIZE,
         );
         let output_data_buffer_offset = round_up_to(
@@ -260,12 +283,14 @@ impl SandboxMemoryLayout {
             peb_security_cookie_seed_offset,
             peb_guest_dispatch_function_ptr_offset,
             peb_code_pointer_offset,
+            peb_host_function_definitions_offset,
             peb_input_data_offset,
             peb_output_data_offset,
             peb_heap_data_offset,
             peb_guest_stack_data_offset,
             sandbox_memory_config: cfg,
             code_size,
+            host_function_definitions_buffer_offset,
             input_data_buffer_offset,
             output_data_buffer_offset,
             guest_heap_buffer_offset,
@@ -282,6 +307,22 @@ impl SandboxMemoryLayout {
     pub(super) fn get_output_data_size_offset(&self) -> usize {
         // The size field is the first field in the `OutputData` struct
         self.peb_output_data_offset
+    }
+
+    /// Get the offset in guest memory to the host function definitions
+    /// size
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
+    pub(super) fn get_host_function_definitions_size_offset(&self) -> usize {
+        // The size field is the first field in the `HostFunctions` struct
+        self.peb_host_function_definitions_offset
+    }
+
+    /// Get the offset in guest memory to the host function definitions
+    /// pointer.
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
+    fn get_host_function_definitions_pointer_offset(&self) -> usize {
+        // The size field is the field after the size field in the `HostFunctions` struct which is a u64
+        self.peb_host_function_definitions_offset + size_of::<u64>()
     }
 
     /// Get the offset in guest memory to the minimum guest stack address.
@@ -447,6 +488,8 @@ impl SandboxMemoryLayout {
         let mut total_mapped_memory_size: usize = round_up_to(code_size, PAGE_SIZE_USIZE);
         total_mapped_memory_size += round_up_to(stack_size, PAGE_SIZE_USIZE);
         total_mapped_memory_size += round_up_to(heap_size, PAGE_SIZE_USIZE);
+        total_mapped_memory_size +=
+            round_up_to(cfg.get_host_function_definition_size(), PAGE_SIZE_USIZE);
         total_mapped_memory_size += round_up_to(cfg.get_input_data_size(), PAGE_SIZE_USIZE);
         total_mapped_memory_size += round_up_to(cfg.get_output_data_size(), PAGE_SIZE_USIZE);
         total_mapped_memory_size += round_up_to(size_of::<HyperlightPEB>(), PAGE_SIZE_USIZE);
@@ -526,10 +569,29 @@ impl SandboxMemoryLayout {
         }
 
         // PEB
-        let input_data_offset = builder.push_page_aligned(
+        let host_functions_definitions_offset = builder.push_page_aligned(
             size_of::<HyperlightPEB>(),
             MemoryRegionFlags::READ | MemoryRegionFlags::WRITE,
             Peb,
+        );
+
+        let expected_host_functions_definitions_offset =
+            TryInto::<usize>::try_into(self.host_function_definitions_buffer_offset)?;
+
+        if host_functions_definitions_offset != expected_host_functions_definitions_offset {
+            return Err(new_error!(
+                "Host Function Definitions offset does not match expected Host Function Definitions offset expected:  {}, actual:  {}",
+                expected_host_functions_definitions_offset,
+                host_functions_definitions_offset
+            ));
+        }
+
+        // host function definitions
+        let input_data_offset = builder.push_page_aligned(
+            self.sandbox_memory_config
+                .get_host_function_definition_size(),
+            MemoryRegionFlags::READ,
+            HostFunctionDefinitions,
         );
 
         let expected_input_data_offset = TryInto::<usize>::try_into(self.input_data_buffer_offset)?;
@@ -672,6 +734,16 @@ impl SandboxMemoryLayout {
 
         // Skip guest_dispatch_function_ptr_offset because it is set by the guest
 
+        // Set up Host Function Definition
+        shared_mem.write_u64(
+            self.get_host_function_definitions_size_offset(),
+            self.sandbox_memory_config
+                .get_host_function_definition_size()
+                .try_into()?,
+        )?;
+        let addr = get_address!(host_function_definitions_buffer_offset);
+        shared_mem.write_u64(self.get_host_function_definitions_pointer_offset(), addr)?;
+
         // Skip code, is set when loading binary
         // skip outb and outb context, is set when running in_proc
 
@@ -778,6 +850,8 @@ mod tests {
         expected_size += layout.code_size;
 
         expected_size += round_up_to(size_of::<HyperlightPEB>(), PAGE_SIZE_USIZE);
+
+        expected_size += round_up_to(cfg.get_host_function_definition_size(), PAGE_SIZE_USIZE);
 
         expected_size += round_up_to(cfg.get_input_data_size(), PAGE_SIZE_USIZE);
 
