@@ -20,6 +20,8 @@ use std::io::{IsTerminal, Write};
 use hyperlight_common::flatbuffer_wrappers::function_types::{
     ParameterType, ParameterValue, ReturnType, ReturnValue,
 };
+use hyperlight_common::flatbuffer_wrappers::host_function_definition::HostFunctionDefinition;
+use hyperlight_common::flatbuffer_wrappers::host_function_details::HostFunctionDetails;
 use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
 use tracing::{Span, instrument};
 
@@ -34,6 +36,24 @@ use crate::{Result, new_error};
 /// A Wrapper around details of functions exposed by the Host
 pub struct FunctionRegistry {
     functions_map: HashMap<String, FunctionEntry>,
+}
+
+impl From<&mut FunctionRegistry> for HostFunctionDetails {
+    fn from(registry: &mut FunctionRegistry) -> Self {
+        let host_functions = registry
+            .functions_map
+            .iter()
+            .map(|(name, entry)| HostFunctionDefinition {
+                function_name: name.clone(),
+                parameter_types: Some(entry.parameter_types.to_vec()),
+                return_type: entry.return_type,
+            })
+            .collect();
+
+        HostFunctionDetails {
+            host_functions: Some(host_functions),
+        }
+    }
 }
 
 pub struct FunctionEntry {
@@ -54,7 +74,9 @@ impl FunctionRegistry {
     ) -> Result<()> {
         self.functions_map.insert(name, func);
 
-        let buffer: Vec<u8> = self.functions_map.try_into().map_err(|e| {
+        let hfd = HostFunctionDetails::from(self);
+
+        let buffer: Vec<u8> = (&hfd).try_into().map_err(|e| {
             new_error!(
                 "Error serializing host function details to flatbuffer: {}",
                 e
