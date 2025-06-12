@@ -65,6 +65,11 @@ pub fn get_host_function_details() -> HostFunctionDetails {
     handle.get_host_function_details()
 }
 
+pub fn read_n_bytes_from_user_memory(num: u64) -> Result<Vec<u8>> {
+    let handle = unsafe { GUEST_HANDLE };
+    handle.read_n_bytes_from_user_memory(num)
+}
+
 /// Print a message using the host's print function.
 ///
 /// This function requires memory to be setup to be used. In particular, the

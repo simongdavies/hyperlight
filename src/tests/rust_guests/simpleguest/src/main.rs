@@ -46,7 +46,7 @@ use hyperlight_guest::exit::{abort_with_code, abort_with_code_and_message};
 use hyperlight_guest_bin::guest_function::definition::GuestFunctionDefinition;
 use hyperlight_guest_bin::guest_function::register::register_function;
 use hyperlight_guest_bin::host_comm::{
-    call_host_function, call_host_function_without_returning_result,
+    call_host_function, call_host_function_without_returning_result, read_n_bytes_from_user_memory,
 };
 use hyperlight_guest_bin::memory::malloc;
 use hyperlight_guest_bin::{MIN_STACK_ADDRESS, guest_logger};
@@ -750,8 +750,42 @@ fn large_parameters(function_call: &FunctionCall) -> Result<Vec<u8>> {
     }
 }
 
+fn read_from_user_memory(function_call: &FunctionCall) -> Result<Vec<u8>> {
+    if let (ParameterValue::ULong(num), ParameterValue::VecBytes(expected)) = (
+        function_call.parameters.clone().unwrap()[0].clone(),
+        function_call.parameters.clone().unwrap()[1].clone(),
+    ) {
+        let bytes = read_n_bytes_from_user_memory(num).expect("Failed to read from user memory");
+
+        // verify that the user memory contains the expected data
+        if bytes != expected {
+            error!("User memory does not contain the expected data");
+            return Err(HyperlightGuestError::new(
+                ErrorCode::GuestError,
+                "User memory does not contain the expected data".to_string(),
+            ));
+        }
+
+        Ok(get_flatbuffer_result(&*bytes))
+    } else {
+        Err(HyperlightGuestError::new(
+            ErrorCode::GuestFunctionParameterTypeMismatch,
+            "Invalid parameters passed to read_from_user_memory".to_string(),
+        ))
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn hyperlight_main() {
+    let read_from_user_memory_def = GuestFunctionDefinition::new(
+        "ReadFromUserMemory".to_string(),
+        Vec::from(&[ParameterType::ULong, ParameterType::VecBytes]),
+        ReturnType::VecBytes,
+        read_from_user_memory as usize,
+    );
+
+    register_function(read_from_user_memory_def);
+
     let set_static_def = GuestFunctionDefinition::new(
         "SetStatic".to_string(),
         Vec::new(),

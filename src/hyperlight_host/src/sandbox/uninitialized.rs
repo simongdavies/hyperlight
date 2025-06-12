@@ -432,10 +432,27 @@ mod tests {
     use hyperlight_testing::simple_guest_as_string;
 
     use crate::sandbox::SandboxConfiguration;
-    use crate::sandbox::uninitialized::GuestBinary;
+    use crate::sandbox::uninitialized::{GuestBinary, GuestEnvironment};
     use crate::sandbox_state::sandbox::EvolvableSandbox;
     use crate::sandbox_state::transition::Noop;
     use crate::{MultiUseSandbox, Result, UninitializedSandbox, new_error};
+
+    #[test]
+    fn test_load_extra_blob() {
+        let binary_path = simple_guest_as_string().unwrap();
+        let buffer = [0xde, 0xad, 0xbe, 0xef];
+        let guest_env =
+            GuestEnvironment::new(GuestBinary::FilePath(binary_path.clone()), Some(&buffer));
+
+        let uninitialized_sandbox = UninitializedSandbox::new(guest_env, None).unwrap();
+        let mut sandbox: MultiUseSandbox = uninitialized_sandbox.evolve(Noop::default()).unwrap();
+
+        let res = sandbox
+            .call_guest_function_by_name::<Vec<u8>>("ReadFromUserMemory", (4u64, buffer.to_vec()))
+            .expect("Failed to call ReadFromUserMemory");
+
+        assert_eq!(res, buffer.to_vec());
+    }
 
     #[test]
     fn test_new_sandbox() {
