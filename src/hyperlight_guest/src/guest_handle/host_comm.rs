@@ -34,6 +34,29 @@ use crate::error::{HyperlightGuestError, Result};
 use crate::exit::out32;
 
 impl GuestHandle {
+    /// Get user memory region as bytes.
+    pub fn read_n_bytes_from_user_memory(&self, num: u64) -> Result<Vec<u8>> {
+        let peb_ptr = self.peb().unwrap();
+        let user_memory_region_ptr = unsafe { (*peb_ptr).init_data.ptr as *mut u8 };
+        let user_memory_region_size = unsafe { (*peb_ptr).init_data.size };
+
+        if num > user_memory_region_size {
+            return Err(HyperlightGuestError::new(
+                ErrorCode::GuestError,
+                format!(
+                    "Requested {} bytes from user memory, but only {} bytes are available",
+                    num, user_memory_region_size
+                ),
+            ));
+        } else {
+            let user_memory_region_slice =
+                unsafe { core::slice::from_raw_parts(user_memory_region_ptr, num as usize) };
+            let user_memory_region_bytes = user_memory_region_slice.to_vec();
+
+            Ok(user_memory_region_bytes)
+        }
+    }
+
     /// Get a return value from a host function call.
     /// This usually requires a host function to be called first using
     /// `call_host_function_internal`.

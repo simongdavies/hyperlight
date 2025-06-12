@@ -100,6 +100,7 @@ pub(crate) struct SandboxMemoryLayout {
     pub(super) peb_host_function_definitions_offset: usize,
     peb_input_data_offset: usize,
     peb_output_data_offset: usize,
+    peb_init_data_offset: usize,
     peb_heap_data_offset: usize,
     peb_guest_stack_data_offset: usize,
 
@@ -162,6 +163,10 @@ impl Debug for SandboxMemoryLayout {
             .field(
                 "Output Data Offset",
                 &format_args!("{:#x}", self.peb_output_data_offset),
+            )
+            .field(
+                "Init Data Offset",
+                &format_args!("{:#x}", self.peb_init_data_offset),
             )
             .field(
                 "Guest Heap Offset",
@@ -264,6 +269,7 @@ impl SandboxMemoryLayout {
         let peb_code_pointer_offset = peb_offset + offset_of!(HyperlightPEB, code_ptr);
         let peb_input_data_offset = peb_offset + offset_of!(HyperlightPEB, input_stack);
         let peb_output_data_offset = peb_offset + offset_of!(HyperlightPEB, output_stack);
+        let peb_init_data_offset = peb_offset + offset_of!(HyperlightPEB, init_data);
         let peb_heap_data_offset = peb_offset + offset_of!(HyperlightPEB, guest_heap);
         let peb_guest_stack_data_offset = peb_offset + offset_of!(HyperlightPEB, guest_stack);
         let peb_host_function_definitions_offset =
@@ -307,6 +313,7 @@ impl SandboxMemoryLayout {
             peb_host_function_definitions_offset,
             peb_input_data_offset,
             peb_output_data_offset,
+            peb_init_data_offset,
             peb_heap_data_offset,
             peb_guest_stack_data_offset,
             sandbox_memory_config: cfg,
@@ -349,6 +356,13 @@ impl SandboxMemoryLayout {
         self.peb_host_function_definitions_offset + size_of::<u64>()
     }
 
+    /// Get the offset in guest memory to the init data size
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
+    pub(super) fn get_init_data_size_offset(&self) -> usize {
+        // The init data size is the first field in the `GuestMemoryRegion` struct
+        self.peb_init_data_offset
+    }
+
     /// Get the offset in guest memory to the minimum guest stack address.
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     fn get_min_guest_stack_address_offset(&self) -> usize {
@@ -383,6 +397,14 @@ impl SandboxMemoryLayout {
         // This field is immediately after the output data size field,
         // which is a `u64`.
         self.get_output_data_size_offset() + size_of::<u64>()
+    }
+
+    /// Get the offset in guest memory to the init data pointer.
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
+    pub(super) fn get_init_data_pointer_offset(&self) -> usize {
+        // The init data pointer is immediately after the init data size field,
+        // which is a `u64`.
+        self.get_init_data_size_offset() + size_of::<u64>()
     }
 
     /// Get the offset in guest memory to the start of output data.
@@ -819,6 +841,14 @@ impl SandboxMemoryLayout {
         )?;
         let addr = get_address!(output_data_buffer_offset);
         shared_mem.write_u64(self.get_output_data_pointer_offset(), addr)?;
+
+        // Set up init data pointer
+        shared_mem.write_u64(
+            self.get_init_data_size_offset(),
+            (self.get_unaligned_memory_size() - self.init_data_offset).try_into()?,
+        )?;
+        let addr = get_address!(init_data_offset);
+        shared_mem.write_u64(self.get_init_data_pointer_offset(), addr)?;
 
         // Set up heap buffer pointer
         let addr = get_address!(guest_heap_buffer_offset);
