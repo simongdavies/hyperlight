@@ -49,7 +49,25 @@ fn syscalls_allowlist() -> Result<Vec<(i64, Vec<SeccompRule>)>> {
         // because we don't currently support registering parameterized syscalls.
         (
             libc::SYS_ioctl,
-            or![and![Cond::new(1, ArgLen::Dword, Eq, libc::TCGETS)?]],
+            or![and![Cond::new(
+                1,
+                ArgLen::Dword,
+                Eq,
+                #[cfg(all(
+                    target_arch = "x86_64",
+                    target_vendor = "unknown",
+                    target_os = "linux",
+                    target_env = "musl"
+                ))]
+                libc::TCGETS.try_into()?,
+                #[cfg(not(all(
+                    target_arch = "x86_64",
+                    target_vendor = "unknown",
+                    target_os = "linux",
+                    target_env = "musl"
+                )))]
+                libc::TCGETS,
+            )?]],
         ),
         // `futex` is needed for some tests that run in parallel (`simple_test_parallel`,
         // and `callback_test_parallel`).
