@@ -24,9 +24,11 @@ use windows::core::s;
 use windows_result::HRESULT;
 
 use super::wrappers::HandleWrapper;
+#[cfg(crashdump)]
+use crate::HyperlightError;
 use crate::hypervisor::wrappers::{WHvFPURegisters, WHvGeneralRegisters, WHvSpecialRegisters};
 use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags};
-use crate::{HyperlightError, Result, new_error};
+use crate::{Result, new_error};
 
 /// Interop calls for Windows Hypervisor Platform APIs
 ///
