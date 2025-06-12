@@ -21,15 +21,20 @@ use rand::{RngCore, rng};
 use tracing::{Span, instrument};
 
 use super::memory_region::MemoryRegionType::{
-    Code, GuardPage, Heap, HostFunctionDefinitions, InputData, OutputData, PageTables, Peb, Stack,
+    Code, GuardPage, Heap, HostFunctionDefinitions, InitData, InputData, OutputData, PageTables,
+    Peb, Stack,
 };
-use super::memory_region::{MemoryRegion, MemoryRegionFlags, MemoryRegionVecBuilder};
+use super::memory_region::{
+    DEFAULT_GUEST_BLOB_MEM_FLAGS, MemoryRegion, MemoryRegionFlags, MemoryRegionVecBuilder,
+};
 use super::mgr::AMOUNT_OF_MEMORY_PER_PT;
 use super::shared_mem::{ExclusiveSharedMemory, GuestSharedMemory, SharedMemory};
 use crate::error::HyperlightError::{GuestOffsetIsInvalid, MemoryRequestTooBig};
 use crate::sandbox::SandboxConfiguration;
 use crate::{Result, new_error};
 
+// +-------------------------------------------+
+// |              Init Data                    | (GuestBlob size)
 // +-------------------------------------------+
 // |             Guest (User) Stack            |
 // +-------------------------------------------+
@@ -56,6 +61,8 @@ use crate::{Result, new_error};
 // |                   PML4                    |
 // +-------------------------------------------+ 0x0_000
 
+/// - `InitData` - some extra data that can be loaded onto the sandbox during
+///     initialization.
 ///
 /// - `HostDefinitions` - the length of this is the `HostFunctionDefinitionSize`
 ///   field from `SandboxConfiguration`
@@ -82,6 +89,7 @@ pub(crate) struct SandboxMemoryLayout {
     pub(super) stack_size: usize,
     /// The heap size of this sandbox.
     pub(super) heap_size: usize,
+    init_data_size: usize,
 
     /// The following fields are offsets to the actual PEB struct fields.
     /// They are used when writing the PEB struct itself
@@ -103,6 +111,7 @@ pub(crate) struct SandboxMemoryLayout {
     guest_heap_buffer_offset: usize,
     guard_page_offset: usize,
     guest_user_stack_buffer_offset: usize, // the lowest address of the user stack
+    init_data_offset: usize,
 
     // other
     pub(crate) peb_address: usize,
@@ -111,6 +120,7 @@ pub(crate) struct SandboxMemoryLayout {
     total_page_table_size: usize,
     // The offset in the sandbox memory where the code starts
     guest_code_offset: usize,
+    pub(crate) init_data_permissions: Option<MemoryRegionFlags>,
 }
 
 impl Debug for SandboxMemoryLayout {
@@ -122,6 +132,10 @@ impl Debug for SandboxMemoryLayout {
             )
             .field("Stack Size", &format_args!("{:#x}", self.stack_size))
             .field("Heap Size", &format_args!("{:#x}", self.heap_size))
+            .field(
+                "Init Data Size",
+                &format_args!("{:#x}", self.init_data_size),
+            )
             .field("PEB Address", &format_args!("{:#x}", self.peb_address))
             .field("PEB Offset", &format_args!("{:#x}", self.peb_offset))
             .field("Code Size", &format_args!("{:#x}", self.code_size))
@@ -182,6 +196,10 @@ impl Debug for SandboxMemoryLayout {
                 &format_args!("{:#x}", self.guest_user_stack_buffer_offset),
             )
             .field(
+                "Init Data Offset",
+                &format_args!("{:#x}", self.init_data_offset),
+            )
+            .field(
                 "Page Table Size",
                 &format_args!("{:#x}", self.total_page_table_size),
             )
@@ -231,6 +249,8 @@ impl SandboxMemoryLayout {
         code_size: usize,
         stack_size: usize,
         heap_size: usize,
+        init_data_size: usize,
+        init_data_permissions: Option<MemoryRegionFlags>,
     ) -> Result<Self> {
         let total_page_table_size =
             Self::get_total_page_table_size(cfg, code_size, stack_size, heap_size);
@@ -275,6 +295,7 @@ impl SandboxMemoryLayout {
         let guest_user_stack_buffer_offset = guard_page_offset + PAGE_SIZE_USIZE;
         // round up stack size to page size. This is needed for MemoryRegion
         let stack_size_rounded = round_up_to(stack_size, PAGE_SIZE_USIZE);
+        let init_data_offset = guest_user_stack_buffer_offset + stack_size_rounded;
 
         Ok(Self {
             peb_offset,
@@ -299,6 +320,9 @@ impl SandboxMemoryLayout {
             guard_page_offset,
             total_page_table_size,
             guest_code_offset,
+            init_data_offset,
+            init_data_size,
+            init_data_permissions,
         })
     }
 
@@ -444,7 +468,7 @@ impl SandboxMemoryLayout {
     /// layout.
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     fn get_unaligned_memory_size(&self) -> usize {
-        self.get_top_of_user_stack_offset() + self.stack_size
+        self.init_data_offset + self.init_data_size
     }
 
     /// get the code offset
@@ -682,11 +706,30 @@ impl SandboxMemoryLayout {
         }
 
         // stack
-        let final_offset = builder.push_page_aligned(
+        let init_data_offset = builder.push_page_aligned(
             self.get_guest_stack_size(),
             MemoryRegionFlags::READ | MemoryRegionFlags::WRITE,
             Stack,
         );
+
+        let expected_init_data_offset = TryInto::<usize>::try_into(self.init_data_offset)?;
+
+        if init_data_offset != expected_init_data_offset {
+            return Err(new_error!(
+                "Init Data offset does not match expected Init Data offset expected:  {}, actual:  {}",
+                expected_init_data_offset,
+                init_data_offset
+            ));
+        }
+
+        let final_offset = if self.init_data_size > 0 {
+            let mem_flags = self
+                .init_data_permissions
+                .unwrap_or(DEFAULT_GUEST_BLOB_MEM_FLAGS);
+            builder.push_page_aligned(self.init_data_size, mem_flags, InitData)
+        } else {
+            init_data_offset
+        };
 
         let expected_final_offset = TryInto::<usize>::try_into(self.get_memory_size()?)?;
 
@@ -699,6 +742,16 @@ impl SandboxMemoryLayout {
         }
 
         Ok(builder.build())
+    }
+
+    #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
+    pub(crate) fn write_init_data(
+        &self,
+        shared_mem: &mut ExclusiveSharedMemory,
+        bytes: &[u8],
+    ) -> Result<()> {
+        shared_mem.copy_from_slice(bytes, self.init_data_offset)?;
+        Ok(())
     }
 
     /// Write the finished memory layout to `shared_mem` and return
@@ -869,7 +922,8 @@ mod tests {
     #[test]
     fn test_get_memory_size() {
         let sbox_cfg = SandboxConfiguration::default();
-        let sbox_mem_layout = SandboxMemoryLayout::new(sbox_cfg, 4096, 2048, 4096).unwrap();
+        let sbox_mem_layout =
+            SandboxMemoryLayout::new(sbox_cfg, 4096, 2048, 4096, 0, None).unwrap();
         assert_eq!(
             sbox_mem_layout.get_memory_size().unwrap(),
             get_expected_memory_size(&sbox_mem_layout)

@@ -98,6 +98,15 @@ impl MemMgrWrapper<ExclusiveSharedMemory> {
         let mem_size = shared_mem.mem_size();
         layout.write(shared_mem, SandboxMemoryLayout::BASE_ADDRESS, mem_size)
     }
+
+    #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
+    pub(super) fn write_init_data(&mut self, user_memory: &[u8]) -> Result<()> {
+        let mgr = self.unwrap_mgr_mut();
+        let layout = mgr.layout;
+        let shared_mem = mgr.get_shared_mem_mut();
+        layout.write_init_data(shared_mem, user_memory)?;
+        Ok(())
+    }
 }
 
 impl MemMgrWrapper<HostSharedMemory> {

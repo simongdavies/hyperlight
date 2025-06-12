@@ -241,9 +241,12 @@ mod tests {
 
         let new_mgr = || {
             let mut exe_info = simple_guest_exe_info().unwrap();
-            let mut mgr =
-                SandboxMemoryManager::load_guest_binary_into_memory(sandbox_cfg, &mut exe_info)
-                    .unwrap();
+            let mut mgr = SandboxMemoryManager::load_guest_binary_into_memory(
+                sandbox_cfg,
+                &mut exe_info,
+                None,
+            )
+            .unwrap();
             let mem_size = mgr.get_shared_mem_mut().mem_size();
             let layout = mgr.layout;
             let shared_mem = mgr.get_shared_mem_mut();
@@ -353,9 +356,12 @@ mod tests {
         tracing::subscriber::with_default(subscriber.clone(), || {
             let new_mgr = || {
                 let mut exe_info = simple_guest_exe_info().unwrap();
-                let mut mgr =
-                    SandboxMemoryManager::load_guest_binary_into_memory(sandbox_cfg, &mut exe_info)
-                        .unwrap();
+                let mut mgr = SandboxMemoryManager::load_guest_binary_into_memory(
+                    sandbox_cfg,
+                    &mut exe_info,
+                    None,
+                )
+                .unwrap();
                 let mem_size = mgr.get_shared_mem_mut().mem_size();
                 let layout = mgr.layout;
                 let shared_mem = mgr.get_shared_mem_mut();

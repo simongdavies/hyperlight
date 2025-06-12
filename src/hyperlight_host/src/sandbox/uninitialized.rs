@@ -30,7 +30,7 @@ use crate::func::{ParameterTuple, SupportedReturnType};
 #[cfg(feature = "build-metadata")]
 use crate::log_build_details;
 use crate::mem::exe::ExeInfo;
-use crate::mem::memory_region::MemoryRegionFlags;
+use crate::mem::memory_region::{DEFAULT_GUEST_BLOB_MEM_FLAGS, MemoryRegionFlags};
 use crate::mem::mgr::{STACK_COOKIE_LEN, SandboxMemoryManager};
 use crate::mem::shared_mem::ExclusiveSharedMemory;
 use crate::sandbox::SandboxConfiguration;
@@ -147,7 +147,7 @@ impl<'a> From<&'a [u8]> for GuestBlob<'a> {
     fn from(data: &'a [u8]) -> Self {
         GuestBlob {
             data,
-            permissions: MemoryRegionFlags::READ,
+            permissions: DEFAULT_GUEST_BLOB_MEM_FLAGS,
         }
     }
 }
@@ -206,6 +206,7 @@ impl UninitializedSandbox {
 
         let env: GuestEnvironment<'_, '_> = env.into();
         let guest_binary = env.guest_binary;
+        let guest_blob = env.init_data;
 
         // If the guest binary is a file make sure it exists
         let guest_binary = match guest_binary {
@@ -250,13 +251,23 @@ impl UninitializedSandbox {
         };
 
         let mut mem_mgr_wrapper = {
-            let mut mgr = UninitializedSandbox::load_guest_binary(sandbox_cfg, &guest_binary)?;
+            let mut mgr = UninitializedSandbox::load_guest_binary(
+                sandbox_cfg,
+                &guest_binary,
+                guest_blob.as_ref(),
+            )?;
+
             let stack_guard = Self::create_stack_guard();
             mgr.set_stack_guard(&stack_guard)?;
             MemMgrWrapper::new(mgr, stack_guard)
         };
 
         mem_mgr_wrapper.write_memory_layout()?;
+
+        // if env has a guest blob, load it into shared mem
+        if let Some(blob) = guest_blob {
+            mem_mgr_wrapper.write_init_data(blob.data)?;
+        }
 
         let host_funcs = Arc::new(Mutex::new(FunctionRegistry::default()));
 
@@ -296,13 +307,14 @@ impl UninitializedSandbox {
     pub(super) fn load_guest_binary(
         cfg: SandboxConfiguration,
         guest_binary: &GuestBinary,
+        guest_blob: Option<&GuestBlob>,
     ) -> Result<SandboxMemoryManager<ExclusiveSharedMemory>> {
         let mut exe_info = match guest_binary {
             GuestBinary::FilePath(bin_path_str) => ExeInfo::from_file(bin_path_str)?,
             GuestBinary::Buffer(buffer) => ExeInfo::from_buf(buffer)?,
         };
 
-        SandboxMemoryManager::load_guest_binary_into_memory(cfg, &mut exe_info)
+        SandboxMemoryManager::load_guest_binary_into_memory(cfg, &mut exe_info, guest_blob)
     }
 
     /// Set the max log level to be used by the guest.
@@ -484,8 +496,12 @@ mod tests {
 
         let simple_guest_path = simple_guest_as_string().unwrap();
 
-        UninitializedSandbox::load_guest_binary(cfg, &GuestBinary::FilePath(simple_guest_path))
-            .unwrap();
+        UninitializedSandbox::load_guest_binary(
+            cfg,
+            &GuestBinary::FilePath(simple_guest_path),
+            None.as_ref(),
+        )
+        .unwrap();
     }
 
     #[test]
