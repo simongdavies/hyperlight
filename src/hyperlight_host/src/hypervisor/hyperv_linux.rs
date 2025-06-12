@@ -398,6 +398,19 @@ impl HypervLinuxDriver {
             interrupt_handle: Arc::new(LinuxInterruptHandle {
                 running: AtomicU64::new(0),
                 cancel_requested: AtomicBool::new(false),
+                #[cfg(all(
+                    target_arch = "x86_64",
+                    target_vendor = "unknown",
+                    target_os = "linux",
+                    target_env = "musl"
+                ))]
+                tid: AtomicU64::new(unsafe { libc::pthread_self() as u64 }),
+                #[cfg(not(all(
+                    target_arch = "x86_64",
+                    target_vendor = "unknown",
+                    target_os = "linux",
+                    target_env = "musl"
+                )))]
                 tid: AtomicU64::new(unsafe { libc::pthread_self() }),
                 retry_delay: config.get_interrupt_retry_delay(),
                 sig_rt_min_offset: config.get_interrupt_vcpu_sigrtmin_offset(),
