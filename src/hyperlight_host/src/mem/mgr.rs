@@ -33,7 +33,7 @@ use super::ptr::{GuestPtr, RawPtr};
 use super::ptr_offset::Offset;
 use super::shared_mem::{ExclusiveSharedMemory, GuestSharedMemory, HostSharedMemory, SharedMemory};
 use super::shared_mem_snapshot::SharedMemorySnapshot;
-use crate::error::HyperlightError::NoMemorySnapshot;
+use crate::HyperlightError::NoMemorySnapshot;
 use crate::sandbox::SandboxConfiguration;
 use crate::sandbox::uninitialized::GuestBlob;
 use crate::{HyperlightError, Result, log_then_return, new_error};
@@ -150,11 +150,16 @@ where
             let num_pages: usize = mem_size.div_ceil(AMOUNT_OF_MEMORY_PER_PT);
 
             // Create num_pages PT with 512 PTEs
+            // Pre-allocate buffer for all page table entries to minimize shared memory writes
+            let total_ptes = num_pages * 512;
+            let mut pte_buffer = vec![0u64; total_ptes]; // Pre-allocate u64 buffer directly
+            let mut cached_region_idx: Option<usize> = None; // Cache for optimized region lookup
+            let mut pte_index = 0;
+
             for p in 0..num_pages {
                 for i in 0..512 {
-                    let offset = SandboxMemoryLayout::PT_OFFSET + (p * 4096) + (i * 8);
                     // Each PTE maps a 4KB page
-                    let flags = match Self::get_page_flags(p, i, regions) {
+                    let flags = match Self::get_page_flags(p, i, regions, &mut cached_region_idx) {
                         Ok(region_type) => match region_type {
                             // TODO: We parse and load the exe according to its sections and then
                             // have the correct flags set rather than just marking the entire binary as executable
@@ -185,22 +190,52 @@ where
                         Err(_) => 0,
                     };
                     let val_to_write = ((p << 21) as u64 | (i << 12) as u64) | flags;
-                    shared_mem.write_u64(offset, val_to_write)?;
+                    // Write u64 directly to buffer - more efficient than converting to bytes
+                    pte_buffer[pte_index] = val_to_write.to_le();
+                    pte_index += 1;
                 }
             }
+
+            // Write the entire PTE buffer to shared memory in a single operation
+            // Convert u64 buffer to bytes for writing to shared memory
+            let pte_bytes = unsafe {
+                std::slice::from_raw_parts(pte_buffer.as_ptr() as *const u8, pte_buffer.len() * 8)
+            };
+            shared_mem.copy_from_slice(pte_bytes, SandboxMemoryLayout::PT_OFFSET)?;
             Ok::<(), HyperlightError>(())
         })??;
 
         Ok(rsp)
     }
 
+    /// Optimized page flags getter that maintains state for sequential access patterns
     fn get_page_flags(
         p: usize,
         i: usize,
-        regions: &mut [MemoryRegion],
+        regions: &[MemoryRegion],
+        cached_region_idx: &mut Option<usize>,
     ) -> Result<MemoryRegionType> {
         let addr = (p << 21) + (i << 12);
 
+        // First check if we're still in the cached region
+        if let Some(cached_idx) = *cached_region_idx {
+            if cached_idx < regions.len() && regions[cached_idx].guest_region.contains(&addr) {
+                return Ok(regions[cached_idx].region_type);
+            }
+        }
+
+        // If not in cached region, try adjacent regions first (common for sequential access)
+        if let Some(cached_idx) = *cached_region_idx {
+            // Check next region
+            if cached_idx + 1 < regions.len()
+                && regions[cached_idx + 1].guest_region.contains(&addr)
+            {
+                *cached_region_idx = Some(cached_idx + 1);
+                return Ok(regions[cached_idx + 1].region_type);
+            }
+        }
+
+        // Fall back to binary search for non-sequential access
         let idx = regions.binary_search_by(|region| {
             if region.guest_region.contains(&addr) {
                 std::cmp::Ordering::Equal
@@ -212,7 +247,10 @@ where
         });
 
         match idx {
-            Ok(index) => Ok(regions[index].region_type),
+            Ok(index) => {
+                *cached_region_idx = Some(index);
+                Ok(regions[index].region_type)
+            }
             Err(_) => Err(new_error!("Could not find region for address: {}", addr)),
         }
     }
