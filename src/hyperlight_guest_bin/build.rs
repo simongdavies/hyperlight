@@ -95,7 +95,9 @@ fn cargo_main() {
         cfg.flag("-mstack-probe-size=4096");
         cfg.compiler("clang");
 
-        unsafe { env::set_var("AR_x86_64_unknown_none", "llvm-ar") };
+        if cfg!(windows) {
+            unsafe { env::set_var("AR_x86_64_unknown_none", "llvm-ar") };
+        }
         cfg.compile("hyperlight_guest_bin");
     }
 
