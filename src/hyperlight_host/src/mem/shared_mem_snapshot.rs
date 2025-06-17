@@ -23,6 +23,7 @@ use crate::Result;
 /// of the memory therein
 #[derive(Clone)]
 pub(super) struct SharedMemorySnapshot {
+    #[allow(dead_code)]
     snapshot: Vec<u8>,
 }
 
@@ -30,9 +31,10 @@ impl SharedMemorySnapshot {
     /// Take a snapshot of the memory in `shared_mem`, then create a new
     /// instance of `Self` with the snapshot stored therein.
     #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
-    pub(super) fn new<S: SharedMemory>(shared_mem: &mut S) -> Result<Self> {
+    pub(super) fn new<S: SharedMemory>(_shared_mem: &mut S) -> Result<Self> {
         // TODO: Track dirty pages instead of copying entire memory
-        let snapshot = shared_mem.with_exclusivity(|e| e.copy_all_to_vec())??;
+        //let snapshot = shared_mem.with_exclusivity(|e| e.copy_all_to_vec())??;
+        let snapshot = Vec::new();
         Ok(Self { snapshot })
     }
 

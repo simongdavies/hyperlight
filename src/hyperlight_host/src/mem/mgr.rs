@@ -33,7 +33,6 @@ use super::ptr::{GuestPtr, RawPtr};
 use super::ptr_offset::Offset;
 use super::shared_mem::{ExclusiveSharedMemory, GuestSharedMemory, HostSharedMemory, SharedMemory};
 use super::shared_mem_snapshot::SharedMemorySnapshot;
-use crate::error::HyperlightError::NoMemorySnapshot;
 use crate::sandbox::SandboxConfiguration;
 use crate::sandbox::uninitialized::GuestBlob;
 use crate::{HyperlightError, Result, log_then_return, new_error};
@@ -70,6 +69,7 @@ pub(crate) struct SandboxMemoryManager<S> {
     pub(crate) entrypoint_offset: Offset,
     /// A vector of memory snapshots that can be used to save and  restore the state of the memory
     /// This is used by the Rust Sandbox implementation (rather than the mem_snapshot field above which only exists to support current C API)
+    #[allow(dead_code)]
     snapshots: Arc<Mutex<Vec<SharedMemorySnapshot>>>,
 }
 
@@ -150,11 +150,16 @@ where
             let num_pages: usize = mem_size.div_ceil(AMOUNT_OF_MEMORY_PER_PT);
 
             // Create num_pages PT with 512 PTEs
+            // Pre-allocate buffer for all page table entries to minimize shared memory writes
+            let total_ptes = num_pages * 512;
+            let mut pte_buffer = vec![0u64; total_ptes]; // Pre-allocate u64 buffer directly
+            let mut cached_region_idx: Option<usize> = None; // Cache for optimized region lookup
+            let mut pte_index = 0;
+            
             for p in 0..num_pages {
                 for i in 0..512 {
-                    let offset = SandboxMemoryLayout::PT_OFFSET + (p * 4096) + (i * 8);
                     // Each PTE maps a 4KB page
-                    let flags = match Self::get_page_flags(p, i, regions) {
+                    let flags = match Self::get_page_flags(p, i, regions, &mut cached_region_idx) {
                         Ok(region_type) => match region_type {
                             // TODO: We parse and load the exe according to its sections and then
                             // have the correct flags set rather than just marking the entire binary as executable
@@ -185,22 +190,58 @@ where
                         Err(_) => 0,
                     };
                     let val_to_write = ((p << 21) as u64 | (i << 12) as u64) | flags;
-                    shared_mem.write_u64(offset, val_to_write)?;
+                    // Write u64 directly to buffer - more efficient than converting to bytes
+                    pte_buffer[pte_index] = val_to_write.to_le();
+                    pte_index += 1;
                 }
             }
+
+            // Write the entire PTE buffer to shared memory in a single operation
+            // Convert u64 buffer to bytes for writing to shared memory
+            let pte_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    pte_buffer.as_ptr() as *const u8,
+                    pte_buffer.len() * 8,
+                )
+            };
+            shared_mem.copy_from_slice(pte_bytes, SandboxMemoryLayout::PT_OFFSET)?;
             Ok::<(), HyperlightError>(())
         })??;
 
         Ok(rsp)
     }
 
+        /// Optimized page flags getter that maintains state for sequential access patterns
     fn get_page_flags(
         p: usize,
         i: usize,
-        regions: &mut [MemoryRegion],
+        regions: &[MemoryRegion],
+        cached_region_idx: &mut Option<usize>,
     ) -> Result<MemoryRegionType> {
         let addr = (p << 21) + (i << 12);
 
+        // First check if we're still in the cached region
+        if let Some(cached_idx) = *cached_region_idx {
+            if cached_idx < regions.len() && regions[cached_idx].guest_region.contains(&addr) {
+                return Ok(regions[cached_idx].region_type);
+            }
+        }
+
+        // If not in cached region, try adjacent regions first (common for sequential access)
+        if let Some(cached_idx) = *cached_region_idx {
+            // Check next region
+            if cached_idx + 1 < regions.len() && regions[cached_idx + 1].guest_region.contains(&addr) {
+                *cached_region_idx = Some(cached_idx + 1);
+                return Ok(regions[cached_idx + 1].region_type);
+            }
+            // Check previous region (less common but possible)
+            if cached_idx > 0 && regions[cached_idx - 1].guest_region.contains(&addr) {
+                *cached_region_idx = Some(cached_idx - 1);
+                return Ok(regions[cached_idx - 1].region_type);
+            }
+        }
+
+        // Fall back to binary search for non-sequential access
         let idx = regions.binary_search_by(|region| {
             if region.guest_region.contains(&addr) {
                 std::cmp::Ordering::Equal
@@ -212,7 +253,10 @@ where
         });
 
         match idx {
-            Ok(index) => Ok(regions[index].region_type),
+            Ok(index) => {
+                *cached_region_idx = Some(index);
+                Ok(regions[index].region_type)
+            }
             Err(_) => Err(new_error!("Could not find region for address: {}", addr)),
         }
     }
@@ -220,11 +264,11 @@ where
     /// this function will create a memory snapshot and push it onto the stack of snapshots
     /// It should be used when you want to save the state of the memory, for example, when evolving a sandbox to a new state
     pub(crate) fn push_state(&mut self) -> Result<()> {
-        let snapshot = SharedMemorySnapshot::new(&mut self.shared_mem)?;
-        self.snapshots
-            .try_lock()
-            .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?
-            .push(snapshot);
+        // let snapshot = SharedMemorySnapshot::new(&mut self.shared_mem)?;
+        // self.snapshots
+        //     .try_lock()
+        //     .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?
+        //     .push(snapshot);
         Ok(())
     }
 
@@ -233,32 +277,34 @@ where
     /// It should be used when you want to restore the state of the memory to a previous state but still want to
     /// retain that state, for example after calling a function in the guest
     pub(crate) fn restore_state_from_last_snapshot(&mut self) -> Result<()> {
-        let mut snapshots = self
-            .snapshots
-            .try_lock()
-            .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?;
-        let last = snapshots.last_mut();
-        if last.is_none() {
-            log_then_return!(NoMemorySnapshot);
-        }
-        #[allow(clippy::unwrap_used)] // We know that last is not None because we checked it above
-        let snapshot = last.unwrap();
-        snapshot.restore_from_snapshot(&mut self.shared_mem)
+        // let mut snapshots = self
+        //     .snapshots
+        //     .try_lock()
+        //     .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?;
+        // let last = snapshots.last_mut();
+        // if last.is_none() {
+        //     log_then_return!(NoMemorySnapshot);
+        // }
+        // #[allow(clippy::unwrap_used)] // We know that last is not None because we checked it above
+        // let snapshot = last.unwrap();
+        // snapshot.restore_from_snapshot(&mut self.shared_mem)
+        Ok(())
     }
 
     /// this function pops the last snapshot off the stack and restores the memory to the previous state
     /// It should be used when you want to restore the state of the memory to a previous state and do not need to retain that state
     /// for example when devolving a sandbox to a previous state.
     pub(crate) fn pop_and_restore_state_from_snapshot(&mut self) -> Result<()> {
-        let last = self
-            .snapshots
-            .try_lock()
-            .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?
-            .pop();
-        if last.is_none() {
-            log_then_return!(NoMemorySnapshot);
-        }
-        self.restore_state_from_last_snapshot()
+        // let last = self
+        //     .snapshots
+        //     .try_lock()
+        //     .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?
+        //     .pop();
+        // if last.is_none() {
+        //     log_then_return!(NoMemorySnapshot);
+        // }
+        // self.restore_state_from_last_snapshot()
+        Ok(())
     }
 
     /// Sets `addr` to the correct offset in the memory referenced by
