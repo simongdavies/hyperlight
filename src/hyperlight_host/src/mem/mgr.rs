@@ -33,7 +33,6 @@ use super::ptr::{GuestPtr, RawPtr};
 use super::ptr_offset::Offset;
 use super::shared_mem::{ExclusiveSharedMemory, GuestSharedMemory, HostSharedMemory, SharedMemory};
 use super::shared_mem_snapshot::SharedMemorySnapshot;
-use crate::error::HyperlightError::NoMemorySnapshot;
 use crate::sandbox::SandboxConfiguration;
 use crate::sandbox::uninitialized::GuestBlob;
 use crate::{HyperlightError, Result, log_then_return, new_error};
@@ -70,6 +69,7 @@ pub(crate) struct SandboxMemoryManager<S> {
     pub(crate) entrypoint_offset: Offset,
     /// A vector of memory snapshots that can be used to save and  restore the state of the memory
     /// This is used by the Rust Sandbox implementation (rather than the mem_snapshot field above which only exists to support current C API)
+    #[allow(dead_code)]
     snapshots: Arc<Mutex<Vec<SharedMemorySnapshot>>>,
 }
 
@@ -220,11 +220,11 @@ where
     /// this function will create a memory snapshot and push it onto the stack of snapshots
     /// It should be used when you want to save the state of the memory, for example, when evolving a sandbox to a new state
     pub(crate) fn push_state(&mut self) -> Result<()> {
-        let snapshot = SharedMemorySnapshot::new(&mut self.shared_mem)?;
-        self.snapshots
-            .try_lock()
-            .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?
-            .push(snapshot);
+        // let snapshot = SharedMemorySnapshot::new(&mut self.shared_mem)?;
+        // self.snapshots
+        //     .try_lock()
+        //     .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?
+        //     .push(snapshot);
         Ok(())
     }
 
@@ -233,32 +233,34 @@ where
     /// It should be used when you want to restore the state of the memory to a previous state but still want to
     /// retain that state, for example after calling a function in the guest
     pub(crate) fn restore_state_from_last_snapshot(&mut self) -> Result<()> {
-        let mut snapshots = self
-            .snapshots
-            .try_lock()
-            .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?;
-        let last = snapshots.last_mut();
-        if last.is_none() {
-            log_then_return!(NoMemorySnapshot);
-        }
-        #[allow(clippy::unwrap_used)] // We know that last is not None because we checked it above
-        let snapshot = last.unwrap();
-        snapshot.restore_from_snapshot(&mut self.shared_mem)
+        // let mut snapshots = self
+        //     .snapshots
+        //     .try_lock()
+        //     .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?;
+        // let last = snapshots.last_mut();
+        // if last.is_none() {
+        //     log_then_return!(NoMemorySnapshot);
+        // }
+        // #[allow(clippy::unwrap_used)] // We know that last is not None because we checked it above
+        // let snapshot = last.unwrap();
+        // snapshot.restore_from_snapshot(&mut self.shared_mem)
+        Ok(())
     }
 
     /// this function pops the last snapshot off the stack and restores the memory to the previous state
     /// It should be used when you want to restore the state of the memory to a previous state and do not need to retain that state
     /// for example when devolving a sandbox to a previous state.
     pub(crate) fn pop_and_restore_state_from_snapshot(&mut self) -> Result<()> {
-        let last = self
-            .snapshots
-            .try_lock()
-            .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?
-            .pop();
-        if last.is_none() {
-            log_then_return!(NoMemorySnapshot);
-        }
-        self.restore_state_from_last_snapshot()
+        // let last = self
+        //     .snapshots
+        //     .try_lock()
+        //     .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?
+        //     .pop();
+        // if last.is_none() {
+        //     log_then_return!(NoMemorySnapshot);
+        // }
+        // self.restore_state_from_last_snapshot()
+        Ok(())
     }
 
     /// Sets `addr` to the correct offset in the memory referenced by
