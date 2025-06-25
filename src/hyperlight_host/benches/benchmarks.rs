@@ -153,9 +153,143 @@ fn sandbox_benchmark(c: &mut Criterion) {
     group.finish();
 }
 
+fn sandbox_heap_size_benchmark(c: &mut Criterion) {
+    let mut group = c.benchmark_group("sandbox_heap_sizes");
+
+    // Helper function to create sandbox with specific heap size
+    let create_sandbox_with_heap_size = |heap_size_mb: Option<u64>| {
+        let path = simple_guest_as_string().unwrap();
+        let config = if let Some(size_mb) = heap_size_mb {
+            let mut config = SandboxConfiguration::default();
+            config.set_heap_size(size_mb * 1024 * 1024); // Convert MB to bytes
+            Some(config)
+        } else {
+            None
+        };
+
+        let uninit_sandbox =
+            UninitializedSandbox::new(GuestBinary::FilePath(path), config).unwrap();
+        uninit_sandbox.evolve(Noop::default()).unwrap()
+    };
+
+    // Benchmark sandbox creation with default heap size
+    group.bench_function("create_sandbox_default_heap", |b| {
+        b.iter_with_large_drop(|| create_sandbox_with_heap_size(None));
+    });
+
+    // Benchmark sandbox creation with 50MB heap
+    group.bench_function("create_sandbox_50mb_heap", |b| {
+        b.iter_with_large_drop(|| create_sandbox_with_heap_size(Some(50)));
+    });
+
+    // Benchmark sandbox creation with 100MB heap
+    group.bench_function("create_sandbox_100mb_heap", |b| {
+        b.iter_with_large_drop(|| create_sandbox_with_heap_size(Some(100)));
+    });
+
+    // Benchmark sandbox creation with 250MB heap
+    group.bench_function("create_sandbox_250mb_heap", |b| {
+        b.iter_with_large_drop(|| create_sandbox_with_heap_size(Some(250)));
+    });
+
+    // Benchmark sandbox creation with 500MB heap
+    group.bench_function("create_sandbox_500mb_heap", |b| {
+        b.iter_with_large_drop(|| create_sandbox_with_heap_size(Some(500)));
+    });
+
+    // Benchmark sandbox creation with 995MB heap (close to the limit of 1GB for a Sandbox )
+    group.bench_function("create_sandbox_995mb_heap", |b| {
+        b.iter_with_large_drop(|| create_sandbox_with_heap_size(Some(995)));
+    });
+
+    group.finish();
+}
+
+fn guest_call_heap_size_benchmark(c: &mut Criterion) {
+    let mut group = c.benchmark_group("guest_call_heap_sizes");
+
+    // Helper function to create sandbox with specific heap size
+    let create_sandbox_with_heap_size = |heap_size_mb: Option<u64>| {
+        let path = simple_guest_as_string().unwrap();
+        let config = if let Some(size_mb) = heap_size_mb {
+            let mut config = SandboxConfiguration::default();
+            config.set_heap_size(size_mb * 1024 * 1024); // Convert MB to bytes
+            Some(config)
+        } else {
+            None
+        };
+
+        let uninit_sandbox =
+            UninitializedSandbox::new(GuestBinary::FilePath(path), config).unwrap();
+        uninit_sandbox.evolve(Noop::default()).unwrap()
+    };
+
+    // Benchmark guest function call with default heap size
+    group.bench_function("guest_call_default_heap", |b| {
+        let mut sandbox = create_sandbox_with_heap_size(None);
+        b.iter(|| {
+            sandbox
+                .call_guest_function_by_name::<String>("Echo", "hello\n".to_string())
+                .unwrap()
+        });
+    });
+
+    // Benchmark guest function call with 50MB heap
+    group.bench_function("guest_call_50mb_heap", |b| {
+        let mut sandbox = create_sandbox_with_heap_size(Some(50));
+        b.iter(|| {
+            sandbox
+                .call_guest_function_by_name::<String>("Echo", "hello\n".to_string())
+                .unwrap()
+        });
+    });
+
+    // Benchmark guest function call with 100MB heap
+    group.bench_function("guest_call_100mb_heap", |b| {
+        let mut sandbox = create_sandbox_with_heap_size(Some(100));
+        b.iter(|| {
+            sandbox
+                .call_guest_function_by_name::<String>("Echo", "hello\n".to_string())
+                .unwrap()
+        });
+    });
+
+    // Benchmark guest function call with 250MB heap
+    group.bench_function("guest_call_250mb_heap", |b| {
+        let mut sandbox = create_sandbox_with_heap_size(Some(250));
+        b.iter(|| {
+            sandbox
+                .call_guest_function_by_name::<String>("Echo", "hello\n".to_string())
+                .unwrap()
+        });
+    });
+
+    // Benchmark guest function call with 500MB heap
+    group.bench_function("guest_call_500mb_heap", |b| {
+        let mut sandbox = create_sandbox_with_heap_size(Some(500));
+        b.iter(|| {
+            sandbox
+                .call_guest_function_by_name::<String>("Echo", "hello\n".to_string())
+                .unwrap()
+        });
+    });
+
+    // Benchmark guest function call with 995MB heap
+    group.bench_function("guest_call_995mb_heap", |b| {
+        let mut sandbox = create_sandbox_with_heap_size(Some(995));
+        b.iter(|| {
+            sandbox
+                .call_guest_function_by_name::<String>("Echo", "hello\n".to_string())
+                .unwrap()
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default();
-    targets = guest_call_benchmark, sandbox_benchmark, guest_call_benchmark_large_param
+    targets = guest_call_benchmark, sandbox_benchmark, sandbox_heap_size_benchmark, guest_call_benchmark_large_param, guest_call_heap_size_benchmark
 }
 criterion_main!(benches);
