@@ -79,37 +79,65 @@ fn guest_call_benchmark(c: &mut Criterion) {
     group.finish();
 }
 
-fn guest_call_benchmark_large_param(c: &mut Criterion) {
+fn guest_call_benchmark_large_params(c: &mut Criterion) {
     let mut group = c.benchmark_group("guest_functions_with_large_parameters");
     #[cfg(target_os = "windows")]
     group.sample_size(10); // This benchmark is very slow on Windows, so we reduce the sample size to avoid long test runs.
 
-    // This benchmark includes time to first clone a vector and string, so it is not a "pure' benchmark of the guest call, but it's still useful
-    group.bench_function("guest_call_with_large_parameters", |b| {
-        const SIZE: usize = 50 * 1024 * 1024; // 50 MB
-        let large_vec = vec![0u8; SIZE];
-        let large_string = unsafe { String::from_utf8_unchecked(large_vec.clone()) }; // Safety: indeed above vec is valid utf8
+    // Helper function to create a benchmark for a specific size
+    let create_benchmark = |group: &mut criterion::BenchmarkGroup<_>, size_mb: usize| {
+        let benchmark_name = format!("guest_call_with_2_large_parameters_{}mb each", size_mb);
+        group.bench_function(&benchmark_name, |b| {
+            let size = size_mb * 1024 * 1024; // Convert MB to bytes
+            let large_vec = vec![0u8; size];
+            let large_string = unsafe { String::from_utf8_unchecked(large_vec.clone()) }; // Safety: indeed above vec is valid utf8
 
-        let mut config = SandboxConfiguration::default();
-        config.set_input_data_size(2 * SIZE + (1024 * 1024)); // 2 * SIZE + 1 MB, to allow 1MB for the rest of the serialized function call
-        config.set_heap_size(SIZE as u64 * 15);
+            let mut config = SandboxConfiguration::default();
+            config.set_input_data_size(2 * size + (1024 * 1024));
 
-        let sandbox = UninitializedSandbox::new(
-            GuestBinary::FilePath(simple_guest_as_string().unwrap()),
-            Some(config),
-        )
-        .unwrap();
-        let mut sandbox = sandbox.evolve(Noop::default()).unwrap();
+            if size < 50 * 1024 * 1024 {
+                config.set_heap_size(size as u64 * 16);
+            } else {
+                config.set_heap_size(size as u64 * 11); // Set to 1GB for larger sizes
+            }
 
-        b.iter(|| {
-            sandbox
-                .call_guest_function_by_name::<()>(
-                    "LargeParameters",
-                    (large_vec.clone(), large_string.clone()),
-                )
-                .unwrap()
+            let sandbox = UninitializedSandbox::new(
+                GuestBinary::FilePath(simple_guest_as_string().unwrap()),
+                Some(config),
+            )
+            .unwrap();
+            let mut sandbox = sandbox.evolve(Noop::default()).unwrap();
+
+            b.iter_custom(|iters| {
+                let mut total_duration = std::time::Duration::new(0, 0);
+
+                for _ in 0..iters {
+                    // Clone the data (not measured)
+                    let vec_clone = large_vec.clone();
+                    let string_clone = large_string.clone();
+
+                    // Measure only the guest function call
+                    let start = std::time::Instant::now();
+                    sandbox
+                        .call_guest_function_by_name::<()>(
+                            "LargeParameters",
+                            (vec_clone, string_clone),
+                        )
+                        .unwrap();
+                    total_duration += start.elapsed();
+                }
+
+                total_duration
+            });
         });
-    });
+    };
+
+    // Create benchmarks for different sizes
+    create_benchmark(&mut group, 5); // 5MB
+    create_benchmark(&mut group, 10); // 10MB
+    create_benchmark(&mut group, 20); // 20MB
+    create_benchmark(&mut group, 40); // 40MB
+    create_benchmark(&mut group, 60); // 60MB
 
     group.finish();
 }
@@ -290,6 +318,6 @@ fn guest_call_heap_size_benchmark(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default();
-    targets = guest_call_benchmark, sandbox_benchmark, sandbox_heap_size_benchmark, guest_call_benchmark_large_param, guest_call_heap_size_benchmark
+    targets = guest_call_benchmark, sandbox_benchmark, sandbox_heap_size_benchmark, guest_call_benchmark_large_params, guest_call_heap_size_benchmark
 }
 criterion_main!(benches);
