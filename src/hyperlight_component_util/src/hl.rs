@@ -653,14 +653,13 @@ pub fn emit_hl_unmarshal_param(s: &mut State, id: Ident, pt: &Value) -> TokenStr
 ///
 /// Precondition: the result type must only be a named result if there
 /// are no names in it (i.e. a unit type)
-pub fn emit_hl_unmarshal_result(s: &mut State, id: Ident, rt: &etypes::Result) -> TokenStream {
+pub fn emit_hl_unmarshal_result(s: &mut State, id: Ident, rt: &etypes::Result<'_>) -> TokenStream {
     match rt {
-        etypes::Result::Named(rs) if rs.is_empty() => quote! { () },
-        etypes::Result::Unnamed(vt) => {
+        Some(vt) => {
             let toks = emit_hl_unmarshal_value(s, id, vt);
             quote! { { #toks }.0 }
         }
-        _ => panic!("named results not supported"),
+        None => quote! { () },
     }
 }
 
@@ -680,11 +679,10 @@ pub fn emit_hl_marshal_param(s: &mut State, id: Ident, pt: &Value) -> TokenStrea
 /// are no names in it (a unit type)
 pub fn emit_hl_marshal_result(s: &mut State, id: Ident, rt: &etypes::Result) -> TokenStream {
     match rt {
-        etypes::Result::Named(rs) if rs.is_empty() => quote! { ::alloc::vec::Vec::new() },
-        etypes::Result::Unnamed(vt) => {
+        None => quote! { ::alloc::vec::Vec::new() },
+        Some(vt) => {
             let toks = emit_hl_marshal_value(s, id, vt);
             quote! { { #toks } }
         }
-        _ => panic!("named results not supported"),
     }
 }

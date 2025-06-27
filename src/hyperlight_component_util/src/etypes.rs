@@ -136,11 +136,7 @@ pub struct Param<'a> {
     pub ty: Value<'a>,
 }
 
-#[derive(Debug, Clone)]
-pub enum Result<'a> {
-    Unnamed(Value<'a>),
-    Named(Vec<Param<'a>>),
-}
+pub type Result<'a> = Option<Value<'a>>;
 
 /// functype_e in the specification
 #[derive(Debug, Clone)]
