@@ -429,11 +429,11 @@ impl<'p, 'a> Ctx<'p, 'a> {
                 Defined::Handleable(h) => Ok(Value::Borrow(h.clone())),
                 _ => Err(Error::HandleToNonResource),
             },
+            ComponentDefinedType::FixedSizeList(vt, size) => {
+                Ok(Value::FixList(Box::new(self.elab_value(vt)?), *size))
+            }
             ComponentDefinedType::Future(_) | ComponentDefinedType::Stream(_) => {
                 panic!("async not yet supported")
-            }
-            ComponentDefinedType::FixedSizeList(vt, _) => {
-                Ok(Value::List(Box::new(self.elab_value(vt)?)))
             }
         }
     }
@@ -450,10 +450,11 @@ impl<'p, 'a> Ctx<'p, 'a> {
                     })
                 })
                 .collect::<Result<Vec<_>, Error<'a>>>()?,
-            result: match &ft.result {
-                Some(vt) => Some(self.elab_value(vt)?),
-                None => None,
-            },
+            result: ft
+                .result
+                .as_ref()
+                .map(|vt| self.elab_value(vt))
+                .transpose()?,
         })
     }
 
