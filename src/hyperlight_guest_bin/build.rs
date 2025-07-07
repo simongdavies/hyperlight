@@ -88,6 +88,10 @@ fn cargo_main() {
         //   targets will eventually show up.
         cfg.flag("--target=x86_64-unknown-linux-none");
 
+        // We don't use a different stack for all interrupts, so there
+        // can be no red zone
+        cfg.flag("-mno-red-zone");
+
         // We don't support stack protectors at the moment, but Arch Linux clang
         // auto-enables them for -linux platforms, so explicitly disable them.
         cfg.flag("-fno-stack-protector");
@@ -245,6 +249,7 @@ fn main() -> std::process::ExitCode {
                     "-fno-stack-protector",
                     "-fstack-clash-protection",
                     "-mstack-probe-size=4096",
+                    "-mno-red-zone",
                 ])
                 .arg("-nostdinc")
                 .arg("-isystem")
