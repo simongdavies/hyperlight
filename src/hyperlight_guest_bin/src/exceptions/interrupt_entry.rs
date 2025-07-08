@@ -67,9 +67,19 @@ macro_rules! context_save {
             "    push r13\n",
             "    push r14\n",
             "    push r15\n",
-            // Save segment registers
+            // Save one of the segment registers to get 16-byte alignment for
+            // FXSAVE. TODO: consider packing the segment registers
             "    mov rax, ds\n",
             "    push rax\n",
+            // Save floating-point/SSE registers
+            // TODO: Don't do this unconditionally: get the exn
+            //       handlers compiled without sse
+            // TODO: Check if we ever generate code with ymm/zmm in
+            //       the handlers and save/restore those as well
+            "    sub rsp, 512\n",
+            "    mov rax, rsp\n",
+            "    fxsave [rax]\n",
+            // Save the rest of the segment registers
             "    mov rax, es\n",
             "    push rax\n",
             "    mov rax, fs\n",
@@ -83,13 +93,18 @@ macro_rules! context_save {
 macro_rules! context_restore {
     () => {
         concat!(
-            // Restore segment registers
+            // Restore most segment registers
             "    pop rax\n",
             "    mov gs, rax\n",
             "    pop rax\n",
             "    mov fs, rax\n",
             "    pop rax\n",
             "    mov es, rax\n",
+            // Restore floating-point/SSE registers
+            "    mov rax, rsp\n",
+            "    fxrstor [rax]\n",
+            "    add rsp, 512\n",
+            // Restore the last segment register
             "    pop rax\n",
             "    mov ds, rax\n",
             // Restore general-purpose registers
