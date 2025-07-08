@@ -14,6 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
+#[cfg(unix)]
+use std::os::linux::fs::MetadataExt;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use hyperlight_common::flatbuffer_wrappers::function_call::{FunctionCall, FunctionCallType};
@@ -31,12 +36,15 @@ use crate::func::{ParameterTuple, SupportedReturnType};
 use crate::hypervisor::handlers::DbgMemAccessHandlerWrapper;
 use crate::hypervisor::handlers::{MemAccessHandlerCaller, OutBHandlerCaller};
 use crate::hypervisor::{Hypervisor, InterruptHandle};
+#[cfg(unix)]
+use crate::mem::memory_region::MemoryRegionType;
+use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags};
 use crate::mem::ptr::RawPtr;
 use crate::mem::shared_mem::HostSharedMemory;
 use crate::metrics::maybe_time_and_emit_guest_call;
 use crate::sandbox_state::sandbox::{DevolvableSandbox, EvolvableSandbox, Sandbox};
 use crate::sandbox_state::transition::{MultiUseContextCallback, Noop};
-use crate::{HyperlightError, Result};
+use crate::{HyperlightError, Result, log_then_return};
 
 /// A sandbox that supports being used Multiple times.
 /// The implication of being used multiple times is two-fold:
@@ -173,6 +181,75 @@ impl MultiUseSandbox {
         })
     }
 
+    /// Map a region of host memory into the sandbox.
+    ///
+    /// Depending on the host platform, there are likely alignment
+    /// requirements of at least one page for base and len.
+    ///
+    /// `rgn.region_type` is ignored, since guest PTEs are not created
+    /// for the new memory.
+    ///
+    /// It is the caller's responsibility to ensure that the host side
+    /// of the region remains intact and is not written to until this
+    /// mapping is removed, either due to the destruction of the
+    /// sandbox or due to a state rollback
+    #[instrument(err(Debug), skip(self, rgn), parent = Span::current())]
+    pub unsafe fn map_region(&mut self, rgn: &MemoryRegion) -> Result<()> {
+        if rgn.flags.contains(MemoryRegionFlags::STACK_GUARD) {
+            // Stack guard pages are an internal implementation detail
+            // (which really should be moved into the guest)
+            log_then_return!("Cannot map host memory as a stack guard page");
+        }
+        if rgn.flags.contains(MemoryRegionFlags::WRITE) {
+            // TODO: Implement support for writable mappings, which
+            // need to be registered with the memory manager so that
+            // writes can be rolled back when necessary.
+            log_then_return!("TODO: Writable mappings not yet supported");
+        }
+        unsafe { self.vm.map_region(rgn) }?;
+        self.mem_mgr.unwrap_mgr_mut().mapped_rgns += 1;
+        Ok(())
+    }
+
+    /// Map the contents of a file into the guest at a particular address
+    ///
+    /// Returns the length of the mapping
+    #[instrument(err(Debug), skip(self, _fp, _guest_base), parent = Span::current())]
+    pub(crate) fn map_file_cow(&mut self, _fp: &Path, _guest_base: u64) -> Result<u64> {
+        #[cfg(windows)]
+        log_then_return!("mmap'ing a file into the guest is not yet supported on Windows");
+        #[cfg(unix)]
+        unsafe {
+            let file = std::fs::File::options().read(true).write(true).open(_fp)?;
+            let file_size = file.metadata()?.st_size();
+            let page_size = page_size::get();
+            let size = (file_size as usize).div_ceil(page_size) * page_size;
+            let base = libc::mmap(
+                std::ptr::null_mut(),
+                size,
+                libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+                libc::MAP_PRIVATE,
+                file.as_raw_fd(),
+                0,
+            );
+            if base == libc::MAP_FAILED {
+                log_then_return!("mmap error: {:?}", std::io::Error::last_os_error());
+            }
+
+            if let Err(err) = self.map_region(&MemoryRegion {
+                host_region: base as usize..base.wrapping_add(size) as usize,
+                guest_region: _guest_base as usize.._guest_base as usize + size,
+                flags: MemoryRegionFlags::READ | MemoryRegionFlags::EXECUTE,
+                region_type: MemoryRegionType::Heap,
+            }) {
+                libc::munmap(base, size);
+                return Err(err);
+            };
+
+            Ok(size as u64)
+        }
+    }
+
     /// This function is kept here for fuzz testing the parameter and return types
     #[cfg(feature = "fuzzing")]
     #[instrument(err(Debug), skip(self, args), parent = Span::current())]
@@ -193,7 +270,9 @@ impl MultiUseSandbox {
     #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
     pub(crate) fn restore_state(&mut self) -> Result<()> {
         let mem_mgr = self.mem_mgr.unwrap_mgr_mut();
-        mem_mgr.restore_state_from_last_snapshot()
+        let rgns_to_unmap = mem_mgr.restore_state_from_last_snapshot()?;
+        unsafe { self.vm.unmap_regions(rgns_to_unmap)? };
+        Ok(())
     }
 
     pub(crate) fn call_guest_function_by_name_no_reset(
@@ -275,9 +354,11 @@ impl DevolvableSandbox<MultiUseSandbox, MultiUseSandbox, Noop<MultiUseSandbox, M
     /// The devolve can be used to return the MultiUseSandbox to the state before the code was loaded. Thus avoiding initialisation overhead
     #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
     fn devolve(mut self, _tsn: Noop<MultiUseSandbox, MultiUseSandbox>) -> Result<MultiUseSandbox> {
-        self.mem_mgr
+        let rgns_to_unmap = self
+            .mem_mgr
             .unwrap_mgr_mut()
             .pop_and_restore_state_from_snapshot()?;
+        unsafe { self.vm.unmap_regions(rgns_to_unmap)? };
         Ok(self)
     }
 }

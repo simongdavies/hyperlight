@@ -132,6 +132,15 @@ pub(crate) trait Hypervisor: Debug + Sync + Send {
         #[cfg(gdb)] dbg_mem_access_fn: DbgMemAccessHandlerWrapper,
     ) -> Result<()>;
 
+    /// Map a region of host memory into the sandbox.
+    ///
+    /// Depending on the host platform, there are likely alignment
+    /// requirements of at least one page for base and len.
+    unsafe fn map_region(&mut self, rgn: &MemoryRegion) -> Result<()>;
+
+    /// Unmap the most recent `n` regions mapped by `map_region`
+    unsafe fn unmap_regions(&mut self, n: u64) -> Result<()>;
+
     /// Dispatch a call from the host to the guest using the given pointer
     /// to the dispatch function _in the guest's address space_.
     ///

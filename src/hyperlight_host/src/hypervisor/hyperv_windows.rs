@@ -36,8 +36,8 @@ use {
         DebugCommChannel, DebugMsg, DebugResponse, GuestDebug, HypervDebug, VcpuStopReason,
     },
     super::handlers::DbgMemAccessHandlerWrapper,
+    crate::HyperlightError,
     crate::hypervisor::handlers::DbgMemAccessHandlerCaller,
-    crate::{HyperlightError, log_then_return},
     std::sync::Mutex,
 };
 
@@ -59,7 +59,7 @@ use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags};
 use crate::mem::ptr::{GuestPtr, RawPtr};
 #[cfg(crashdump)]
 use crate::sandbox::uninitialized::SandboxRuntimeConfig;
-use crate::{Result, debug, new_error};
+use crate::{Result, debug, log_then_return, new_error};
 
 #[cfg(gdb)]
 mod debug {
@@ -603,6 +603,21 @@ impl Hypervisor for HypervWindowsDriver {
             dbg_mem_access_hdl,
         )?;
 
+        Ok(())
+    }
+
+    #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
+    unsafe fn map_region(&mut self, _rgn: &MemoryRegion) -> Result<()> {
+        log_then_return!("Mapping host memory into the guest not yet supported on this platform");
+    }
+
+    #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
+    unsafe fn unmap_regions(&mut self, n: u64) -> Result<()> {
+        if n > 0 {
+            log_then_return!(
+                "Mapping host memory into the guest not yet supported on this platform"
+            );
+        }
         Ok(())
     }
 

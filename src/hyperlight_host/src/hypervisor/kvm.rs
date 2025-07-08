@@ -494,6 +494,21 @@ impl Hypervisor for KVMDriver {
     }
 
     #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
+    unsafe fn map_region(&mut self, _rgn: &MemoryRegion) -> Result<()> {
+        log_then_return!("Mapping host memory into the guest not yet supported on this platform");
+    }
+
+    #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
+    unsafe fn unmap_regions(&mut self, n: u64) -> Result<()> {
+        if n > 0 {
+            log_then_return!(
+                "Mapping host memory into the guest not yet supported on this platform"
+            );
+        }
+        Ok(())
+    }
+
+    #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
     fn dispatch_call_from_host(
         &mut self,
         dispatch_func_addr: RawPtr,

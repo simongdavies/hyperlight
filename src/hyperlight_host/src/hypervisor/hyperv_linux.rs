@@ -297,6 +297,7 @@ pub(crate) fn is_hypervisor_present() -> bool {
 /// called the Microsoft Hypervisor (MSHV)
 pub(crate) struct HypervLinuxDriver {
     _mshv: Mshv,
+    page_size: usize,
     vm_fd: VmFd,
     vcpu_fd: VcpuFd,
     entrypoint: u64,
@@ -424,6 +425,7 @@ impl HypervLinuxDriver {
         #[allow(unused_mut)]
         let mut hv = Self {
             _mshv: mshv,
+            page_size: 0,
             vm_fd,
             vcpu_fd,
             mem_regions,
@@ -525,6 +527,8 @@ impl Hypervisor for HypervLinuxDriver {
         max_guest_log_level: Option<LevelFilter>,
         #[cfg(gdb)] dbg_mem_access_fn: DbgMemAccessHandlerWrapper,
     ) -> Result<()> {
+        self.page_size = page_size as usize;
+
         let max_guest_log_level: u64 = match max_guest_log_level {
             Some(level) => level as u64,
             None => self.get_max_log_level().into(),
@@ -553,6 +557,37 @@ impl Hypervisor for HypervLinuxDriver {
             dbg_mem_access_fn,
         )?;
 
+        Ok(())
+    }
+
+    #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
+    unsafe fn map_region(&mut self, rgn: &MemoryRegion) -> Result<()> {
+        if [
+            rgn.guest_region.start,
+            rgn.guest_region.end,
+            rgn.host_region.start,
+            rgn.host_region.end,
+        ]
+        .iter()
+        .any(|x| x % self.page_size != 0)
+        {
+            log_then_return!("region is not page-aligned");
+        }
+        let mshv_region: mshv_user_mem_region = rgn.to_owned().into();
+        self.vm_fd.map_user_memory(mshv_region)?;
+        self.mem_regions.push(rgn.to_owned());
+        Ok(())
+    }
+
+    #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
+    unsafe fn unmap_regions(&mut self, n: u64) -> Result<()> {
+        for rgn in self
+            .mem_regions
+            .split_off(self.mem_regions.len() - n as usize)
+        {
+            let mshv_region: mshv_user_mem_region = rgn.to_owned().into();
+            self.vm_fd.unmap_user_memory(mshv_region)?;
+        }
         Ok(())
     }
 

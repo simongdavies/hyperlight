@@ -73,6 +73,8 @@ pub(crate) struct SandboxMemoryManager<S> {
     pub(crate) load_addr: RawPtr,
     /// Offset for the execution entrypoint from `load_addr`
     pub(crate) entrypoint_offset: Offset,
+    /// How many memory regions were mapped after sandbox creation
+    pub(crate) mapped_rgns: u64,
     /// A vector of memory snapshots that can be used to save and  restore the state of the memory
     /// This is used by the Rust Sandbox implementation (rather than the mem_snapshot field above which only exists to support current C API)
     snapshots: Arc<Mutex<Vec<SharedMemorySnapshot>>>,
@@ -95,6 +97,7 @@ where
             shared_mem,
             load_addr,
             entrypoint_offset,
+            mapped_rgns: 0,
             snapshots: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -265,7 +268,7 @@ where
     /// this function will create a memory snapshot and push it onto the stack of snapshots
     /// It should be used when you want to save the state of the memory, for example, when evolving a sandbox to a new state
     pub(crate) fn push_state(&mut self) -> Result<()> {
-        let snapshot = SharedMemorySnapshot::new(&mut self.shared_mem)?;
+        let snapshot = SharedMemorySnapshot::new(&mut self.shared_mem, self.mapped_rgns)?;
         self.snapshots
             .try_lock()
             .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?
@@ -277,7 +280,11 @@ where
     /// off the stack
     /// It should be used when you want to restore the state of the memory to a previous state but still want to
     /// retain that state, for example after calling a function in the guest
-    pub(crate) fn restore_state_from_last_snapshot(&mut self) -> Result<()> {
+    ///
+    /// Returns the number of memory regions mapped into the sandbox
+    /// that need to be unmapped in order for the restore to be
+    /// completed.
+    pub(crate) fn restore_state_from_last_snapshot(&mut self) -> Result<u64> {
         let mut snapshots = self
             .snapshots
             .try_lock()
@@ -288,13 +295,15 @@ where
         }
         #[allow(clippy::unwrap_used)] // We know that last is not None because we checked it above
         let snapshot = last.unwrap();
-        snapshot.restore_from_snapshot(&mut self.shared_mem)
+        let old_rgns = self.mapped_rgns;
+        self.mapped_rgns = snapshot.restore_from_snapshot(&mut self.shared_mem)?;
+        Ok(old_rgns - self.mapped_rgns)
     }
 
     /// this function pops the last snapshot off the stack and restores the memory to the previous state
     /// It should be used when you want to restore the state of the memory to a previous state and do not need to retain that state
     /// for example when devolving a sandbox to a previous state.
-    pub(crate) fn pop_and_restore_state_from_snapshot(&mut self) -> Result<()> {
+    pub(crate) fn pop_and_restore_state_from_snapshot(&mut self) -> Result<u64> {
         let last = self
             .snapshots
             .try_lock()
@@ -430,6 +439,7 @@ impl SandboxMemoryManager<ExclusiveSharedMemory> {
                 layout: self.layout,
                 load_addr: self.load_addr.clone(),
                 entrypoint_offset: self.entrypoint_offset,
+                mapped_rgns: 0,
                 snapshots: Arc::new(Mutex::new(Vec::new())),
             },
             SandboxMemoryManager {
@@ -437,6 +447,7 @@ impl SandboxMemoryManager<ExclusiveSharedMemory> {
                 layout: self.layout,
                 load_addr: self.load_addr.clone(),
                 entrypoint_offset: self.entrypoint_offset,
+                mapped_rgns: 0,
                 snapshots: Arc::new(Mutex::new(Vec::new())),
             },
         )
