@@ -123,7 +123,8 @@ macro_rules! generate_exceptions {
             "    mov rdi, rsp\n",
             "    call {hl_exception_handler}\n",
             context_restore!(),
-            "    iretq\n", // iretq is used to return from exception in x86_64
+            "    add rsp, 8\n", // error code
+            "    iretq\n",      // iretq is used to return from exception in x86_64
             generate_excp!(0, pusherrcode),
             generate_excp!(1, pusherrcode),
             generate_excp!(2, pusherrcode),
