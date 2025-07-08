@@ -1427,6 +1427,7 @@ dependencies = [
  "goblin",
  "hyperlight-common",
  "hyperlight-component-macro",
+ "hyperlight-guest-tracing",
  "hyperlight-testing",
  "kvm-bindings",
  "kvm-ioctls",
