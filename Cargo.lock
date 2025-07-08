@@ -1385,6 +1385,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyperlight-guest-tracing"
+version = "0.7.0"
+dependencies = [
+ "hyperlight-common",
+ "spin 0.10.0",
+]
+
+[[package]]
+name = "hyperlight-guest-tracing-macro"
+version = "0.7.0"
+dependencies = [
+ "hyperlight-guest-tracing",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.104",
+]
+
+[[package]]
 name = "hyperlight-host"
 version = "0.7.0"
 dependencies = [
