@@ -182,13 +182,13 @@ pub enum MemoryRegionType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryRegion {
     /// the range of guest memory addresses
-    pub(crate) guest_region: Range<usize>,
+    pub guest_region: Range<usize>,
     /// the range of host memory addresses
-    pub(crate) host_region: Range<usize>,
+    pub host_region: Range<usize>,
     /// memory access flags for the given region
-    pub(crate) flags: MemoryRegionFlags,
+    pub flags: MemoryRegionFlags,
     /// the type of memory region
-    pub(crate) region_type: MemoryRegionType,
+    pub region_type: MemoryRegionType,
 }
 
 pub(crate) struct MemoryRegionVecBuilder {

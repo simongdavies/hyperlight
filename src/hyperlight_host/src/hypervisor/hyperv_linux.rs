@@ -775,6 +775,8 @@ impl Hypervisor for HypervLinuxDriver {
                 }
                 other => {
                     crate::debug!("mshv Other Exit: Exit: {:#?} \n {:#?}", other, &self);
+                    #[cfg(crashdump)]
+                    let _ = crashdump::generate_crashdump(self);
                     log_then_return!("unknown Hyper-V run message type {:?}", other);
                 }
             },
