@@ -35,9 +35,9 @@ use spin::Once;
 
 // === Modules ===
 #[cfg(target_arch = "x86_64")]
-mod exceptions {
+pub mod exceptions {
     pub(super) mod gdt;
-    mod handler;
+    pub mod handler;
     mod idt;
     pub(super) mod idtr;
     mod interrupt_entry;
