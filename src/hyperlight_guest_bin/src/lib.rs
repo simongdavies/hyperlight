@@ -52,6 +52,7 @@ pub mod guest_function {
 pub mod guest_logger;
 pub mod host_comm;
 pub mod memory;
+pub mod paging;
 
 // === Globals ===
 #[global_allocator]

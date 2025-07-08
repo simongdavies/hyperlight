@@ -100,6 +100,17 @@ fn internal_dispatch_function() -> Result<()> {
 // which if it were included in the internal_dispatch_function cause the epilogue to not be called because the halt() would not return
 // when running in the hypervisor.
 pub(crate) extern "C" fn dispatch_function() {
+    // The hyperlight host likes to use one partition and reset it in
+    // various ways; if that has happened, there might stale TLB
+    // entries hanging around from the former user of the
+    // partition. Flushing the TLB here is not quite the right thing
+    // to do, since incorrectly cached entries could make even this
+    // code not exist, but regrettably there is not a simple way for
+    // the host to trigger flushing when it ought to happen, so for
+    // now this works in practice, since the text segment is always
+    // part of the big identity-mapped region at the base of the
+    // guest.
+    crate::paging::flush_tlb();
     let _ = internal_dispatch_function();
     halt();
 }
