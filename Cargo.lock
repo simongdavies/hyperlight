@@ -1367,6 +1367,8 @@ version = "0.7.0"
 dependencies = [
  "anyhow",
  "hyperlight-common",
+ "hyperlight-guest-tracing",
+ "hyperlight-guest-tracing-macro",
  "serde_json",
 ]
 
@@ -1380,6 +1382,8 @@ dependencies = [
  "glob",
  "hyperlight-common",
  "hyperlight-guest",
+ "hyperlight-guest-tracing",
+ "hyperlight-guest-tracing-macro",
  "log",
  "spin 0.10.0",
 ]
