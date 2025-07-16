@@ -346,7 +346,8 @@ impl SandboxMemoryManager<ExclusiveSharedMemory> {
         #[allow(clippy::let_unit_value)]
         let load_info = exe_info.load(
             load_addr.clone().try_into()?,
-            &mut shared_mem.as_mut_slice()[layout.get_guest_code_offset()..],
+            layout.get_guest_code_offset(),
+            &mut shared_mem,
         )?;
 
         Ok((
