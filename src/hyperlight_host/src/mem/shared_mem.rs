@@ -634,6 +634,7 @@ impl ExclusiveSharedMemory {
 
     /// Copy the entire contents of `self` into a `Vec<u8>`, then return it
     #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
+    #[cfg(test)]
     pub(crate) fn copy_all_to_vec(&self) -> Result<Vec<u8>> {
         let data = self.as_slice();
         Ok(data.to_vec())
