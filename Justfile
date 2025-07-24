@@ -91,7 +91,56 @@ test-like-ci config=default-target hypervisor="kvm":
     just test-rust-crashdump {{config}}
 
     @# test the tracing related features
-    just test-rust-tracing {{config}} {{ if hypervisor == "mshv3" {"mshv3"} else {""} }}
+    {{ if os() == "linux" { "just test-rust-tracing " + config + " " + if hypervisor == "mshv" { "mshv2" } else if hypervisor == "mshv3" { "mshv3" } else { "kvm" } } else { "" } }}
+
+like-ci config=default-target hypervisor="kvm":
+    @# Ensure up-to-date Cargo.lock
+    cargo fetch --locked
+
+    @# fmt
+    just fmt-check
+
+    @# clippy
+    {{ if os() == "windows" { "just clippy " + config } else { "" } }}
+    {{ if os() == "windows" { "just clippy-guests " + config } else { "" } }}
+
+    @# clippy exhaustive check
+    {{ if os() == "linux" { "just clippy-exhaustive " + config } else { "" } }}
+
+    @# Verify MSRV
+    ./dev/verify-msrv.sh hyperlight-host hyperlight-guest hyperlight-guest-bin hyperlight-common
+
+    @# Build and move Rust guests
+    just build-rust-guests {{config}}
+    just move-rust-guests {{config}}
+
+    @# Build c guests
+    just build-c-guests {{config}}
+    just move-c-guests {{config}}
+
+    @# Build
+    just build {{config}}
+
+    @# Run Rust tests
+    just test-like-ci {{config}} {{hypervisor}}
+
+    @# Run Rust examples - Windows
+    {{ if os() == "windows" { "just run-rust-examples " + config } else { "" } }}
+
+    @# Run Rust examples - linux
+    {{ if os() == "linux" { "just run-rust-examples-linux " + config + " " + if hypervisor == "mshv" { "mshv2" } else if hypervisor == "mshv3" { "mshv3" } else { "kvm" } } else { "" } }}
+
+    @# Run Rust Gdb tests - linux
+    {{ if os() == "linux" { "just test-rust-gdb-debugging " + config + " " + if hypervisor == "mshv" { "mshv2" } else if hypervisor == "mshv3" { "mshv3" } else { "kvm" } } else { "" } }}
+
+    @# Run Rust Crashdump tests
+    just test-rust-crashdump {{config}} {{ if hypervisor == "mshv" { "mshv2" } else if hypervisor == "mshv3" { "mshv3" } else { "kvm" } }}
+
+    @# Run Rust Tracing tests - linux
+    {{ if os() == "linux" { "just test-rust-tracing " + config + " " + if hypervisor == "mshv" { "mshv2" } else if hypervisor == "mshv3" { "mshv3" } else { "kvm" } } else { "" } }}
+
+    @# Run benchmarks
+    just bench-ci main {{config}} {{ if hypervisor == "mshv" { "mshv2" } else if hypervisor == "mshv3" { "mshv3" } else { "kvm" } }}
 
 # runs all tests
 test target=default-target features="": (test-unit target features) (test-isolated target features) (test-integration "rust" target features) (test-integration "c" target features) (test-seccomp target features)
