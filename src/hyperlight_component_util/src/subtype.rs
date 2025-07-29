@@ -36,7 +36,7 @@ pub enum Error<'r> {
     /// A value type was present, but incompatible with its expected type
     MismatchedValue(Value<'r>, Value<'r>),
     /// A defined type was present, but incompatible with its expected type
-    MismatchedDefined(Defined<'r>, Defined<'r>),
+    MismatchedDefined(Box<Defined<'r>>, Box<Defined<'r>>),
     /// A resource was present, but was not the same resource as was expected
     MismatchedResources(ResourceId, ResourceId),
     /// A type variable could not be resolved to be the same as the
@@ -239,7 +239,10 @@ impl<'p, 'a> Ctx<'p, 'a> {
                 self.subtype_qualified_instance(it1, it2)
             }
             (Defined::Component(ct1), Defined::Component(ct2)) => self.subtype_component(ct1, ct2),
-            _ => Err(Error::MismatchedDefined(dt1.clone(), dt2.clone())),
+            _ => Err(Error::MismatchedDefined(
+                Box::new(dt1.clone()),
+                Box::new(dt2.clone()),
+            )),
         }
     }
     pub fn subtype_handleable_is_resource<'r>(&self, ht: &'r Handleable) -> Result<(), Error<'a>> {

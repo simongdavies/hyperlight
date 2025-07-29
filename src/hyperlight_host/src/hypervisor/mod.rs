@@ -373,8 +373,8 @@ pub trait InterruptHandle: Debug + Send + Sync {
     ///
     /// - If this is called while the vcpu is running, then it will interrupt the vcpu and return `true`.
     /// - If this is called while the vcpu is not running, (for example during a host call), the
-    ///     vcpu will not immediately be interrupted, but will prevent the vcpu from running **the next time**
-    ///     it's scheduled, and returns `false`.
+    ///   vcpu will not immediately be interrupted, but will prevent the vcpu from running **the next time**
+    ///   it's scheduled, and returns `false`.
     ///
     /// # Note
     /// This function will block for the duration of the time it takes for the vcpu thread to be interrupted.
@@ -384,8 +384,8 @@ pub trait InterruptHandle: Debug + Send + Sync {
     ///
     /// - If this is called while the vcpu is running, then it will interrupt the vcpu and return `true`.
     /// - If this is called while the vcpu is not running, (for example during a host call), the
-    ///     vcpu will not immediately be interrupted, but will prevent the vcpu from running **the next time**
-    ///     it's scheduled, and returns `false`.
+    ///   vcpu will not immediately be interrupted, but will prevent the vcpu from running **the next time**
+    ///   it's scheduled, and returns `false`.
     ///
     /// # Note
     /// This function will block for the duration of the time it takes for the vcpu thread to be interrupted.
@@ -407,7 +407,7 @@ pub(super) struct LinuxInterruptHandle {
     /// 1. The VCPU is running (generation N),
     /// 2. It gets cancelled,
     /// 3. Then quickly restarted (generation N+1),
-    ///     before the original thread has observed that it was cancelled.
+    ///    before the original thread has observed that it was cancelled.
     ///
     /// Without this generation counter, the interrupt logic might assume the VCPU is still
     /// in the *original* run (generation N), see that it's `running`, and re-send the signal.
@@ -423,9 +423,9 @@ pub(super) struct LinuxInterruptHandle {
     /// `kill()` is called, and cleared when the vcpu is no longer running.
     /// This is used to
     /// 1. make sure stale signals do not interrupt the
-    ///     the wrong vcpu (a vcpu may only be interrupted iff `cancel_requested` is true),
+    ///    the wrong vcpu (a vcpu may only be interrupted iff `cancel_requested` is true),
     /// 2. ensure that if a vm is killed while a host call is running,
-    ///     the vm will not re-enter the guest after the host call returns.
+    ///    the vm will not re-enter the guest after the host call returns.
     cancel_requested: AtomicBool,
     /// True when the debugger has requested the VM to be interrupted. Set immediately when
     /// `kill_from_debugger()` is called, and cleared when the vcpu is no longer running.

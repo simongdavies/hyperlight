@@ -64,7 +64,7 @@ use crate::{Result, new_error};
 // +-------------------------------------------+ 0x0_000
 
 /// - `InitData` - some extra data that can be loaded onto the sandbox during
-///     initialization.
+///   initialization.
 ///
 /// - `HostDefinitions` - the length of this is the `HostFunctionDefinitionSize`
 ///   field from `SandboxConfiguration`

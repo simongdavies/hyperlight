@@ -785,7 +785,7 @@ impl HostSharedMemory {
     /// patterns
     pub fn read<T: AllValid>(&self, offset: usize) -> Result<T> {
         bounds_check!(offset, std::mem::size_of::<T>(), self.mem_size());
-        let ret = unsafe {
+        unsafe {
             let mut ret: core::mem::MaybeUninit<T> = core::mem::MaybeUninit::uninit();
             {
                 let slice: &mut [u8] = core::slice::from_raw_parts_mut(
@@ -795,8 +795,7 @@ impl HostSharedMemory {
                 self.copy_to_slice(slice, offset)?;
             }
             Ok(ret.assume_init())
-        };
-        ret
+        }
     }
 
     /// Write a value of type T, whose representation is the same

@@ -50,7 +50,7 @@ pub mod hypervisor;
 /// present and code length will be zero;
 ///
 /// - The pointer passed to the Entrypoint in the Guest application is the size of page table + size of code,
-///     at this address structs below are laid out in this order
+///   at this address structs below are laid out in this order
 pub mod mem;
 /// Metric definitions and helpers
 pub mod metrics;
