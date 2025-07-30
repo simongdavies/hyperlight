@@ -19,16 +19,19 @@ use std::sync::{Arc, Mutex};
 
 use tracing::{Span, instrument};
 
+#[cfg(gdb)]
 use super::mem_mgr::MemMgrWrapper;
 use crate::error::HyperlightError::StackOverflow;
+use crate::hypervisor::Hypervisor;
 #[cfg(gdb)]
 use crate::hypervisor::handlers::{DbgMemAccessHandlerCaller, DbgMemAccessHandlerWrapper};
+#[cfg(gdb)]
 use crate::mem::shared_mem::HostSharedMemory;
 use crate::{Result, log_then_return};
 
 #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
-pub(crate) fn handle_mem_access(wrapper: &MemMgrWrapper<HostSharedMemory>) -> Result<()> {
-    if !wrapper.check_stack_guard()? {
+pub(crate) fn handle_mem_access(hv: &dyn Hypervisor) -> Result<()> {
+    if !hv.check_stack_guard()? {
         log_then_return!(StackOverflow());
     }
 

@@ -230,7 +230,6 @@ impl MultiUseSandbox {
 
             self.vm.dispatch_call_from_host(
                 self.dispatch_ptr.clone(),
-                &self.mem_mgr,
                 #[cfg(gdb)]
                 self.dbg_mem_access_fn.clone(),
             )?;

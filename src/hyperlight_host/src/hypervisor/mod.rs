@@ -170,7 +170,6 @@ pub(crate) trait Hypervisor: Debug + Send {
     fn dispatch_call_from_host(
         &mut self,
         dispatch_func_addr: RawPtr,
-        mem_mgr: &MemMgrWrapper<HostSharedMemory>,
         #[cfg(gdb)] dbg_mem_access_fn: DbgMemAccessHandlerWrapper,
     ) -> Result<()>;
 
@@ -269,6 +268,9 @@ pub(crate) trait Hypervisor: Debug + Send {
         unimplemented!()
     }
 
+    /// Check stack guard to see if the stack is still valid
+    fn check_stack_guard(&self) -> Result<bool>;
+
     /// Read a register for trace/unwind purposes
     #[cfg(feature = "trace_guest")]
     fn read_trace_reg(&self, reg: TraceRegister) -> Result<u64>;
@@ -289,7 +291,6 @@ impl VirtualCPU {
     #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
     pub(crate) fn run(
         hv: &mut dyn Hypervisor,
-        mem_mgr: &MemMgrWrapper<HostSharedMemory>,
         #[cfg(gdb)] dbg_mem_access_fn: Arc<Mutex<dyn DbgMemAccessHandlerCaller>>,
     ) -> Result<()> {
         loop {
@@ -311,7 +312,7 @@ impl VirtualCPU {
                     #[cfg(crashdump)]
                     crashdump::generate_crashdump(hv)?;
 
-                    handle_mem_access(mem_mgr)?;
+                    handle_mem_access(hv)?;
 
                     log_then_return!("MMIO access address {:#x}", addr);
                 }

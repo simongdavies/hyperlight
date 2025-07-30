@@ -609,24 +609,11 @@ impl Hypervisor for HypervLinuxDriver {
         };
         self.vcpu_fd.set_regs(&regs)?;
 
-        // Extract mem_mgr to avoid borrowing conflicts
-        let mem_mgr = self
-            .mem_mgr
-            .take()
-            .ok_or_else(|| new_error!("mem_mgr should be initialized"))?;
-
-        let result = VirtualCPU::run(
+        VirtualCPU::run(
             self.as_mut_hypervisor(),
-            &mem_mgr,
             #[cfg(gdb)]
             dbg_mem_access_fn,
-        );
-
-        // Put mem_mgr back
-        self.mem_mgr = Some(mem_mgr);
-        result?;
-
-        Ok(())
+        )
     }
 
     #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
@@ -664,7 +651,6 @@ impl Hypervisor for HypervLinuxDriver {
     fn dispatch_call_from_host(
         &mut self,
         dispatch_func_addr: RawPtr,
-        mem_mgr: &MemMgrWrapper<HostSharedMemory>,
         #[cfg(gdb)] dbg_mem_access_fn: DbgMemAccessHandlerWrapper,
     ) -> Result<()> {
         // Reset general purpose registers, then set RIP and RSP
@@ -688,7 +674,6 @@ impl Hypervisor for HypervLinuxDriver {
         // run
         VirtualCPU::run(
             self.as_mut_hypervisor(),
-            mem_mgr,
             #[cfg(gdb)]
             dbg_mem_access_fn,
         )?;
@@ -1160,6 +1145,14 @@ impl Hypervisor for HypervLinuxDriver {
         }
 
         Ok(())
+    }
+
+    fn check_stack_guard(&self) -> Result<bool> {
+        if let Some(mgr) = self.mem_mgr.as_ref() {
+            mgr.check_stack_guard()
+        } else {
+            Err(new_error!("Memory manager is not initialized"))
+        }
     }
 
     #[cfg(feature = "trace_guest")]
