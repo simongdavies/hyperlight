@@ -175,7 +175,7 @@ jobs:
         env:
           CARGO_TERM_COLOR: always
           RUST_LOG: debug
-        run: just test-rust-tracing ${{ matrix.config }} ${{ matrix.hypervisor == 'mshv2' && 'mshv2' || ''}}
+        run: just test-rust-tracing ${{ matrix.config }} ${{ matrix.hypervisor == 'mshv' && 'mshv2' || ''}}
 
       - name: Download benchmarks from "latest"
         run: just bench-download ${{ runner.os }} ${{ matrix.hypervisor }} ${{ matrix.cpu}} dev-latest # compare to prerelease
