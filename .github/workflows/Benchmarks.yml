@@ -30,7 +30,7 @@ jobs:
 
       - uses: hyperlight-dev/ci-setup-workflow@v1.5.0
         with:
-          rust-toolchain: "1.85"
+          rust-toolchain: "1.86"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
