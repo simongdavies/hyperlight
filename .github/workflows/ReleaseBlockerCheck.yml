@@ -1,0 +1,38 @@
+name: Release Blocker Check
+
+on:
+  workflow_call:
+    inputs:
+      repository:
+        description: "Repository to check in format 'owner/repo'"
+        required: false
+        type: string
+        default: ${{ github.repository }}
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: "Repository to check in format 'owner/repo'"
+        required: false
+        type: string
+
+permissions:
+  issues: read
+  contents: read
+
+jobs:
+  check-blockers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Check for Release Blocking Issues
+        run: |
+          REPO="${{ inputs.repository || github.repository }}"
+          echo "Checking repository: $REPO"
+          
+          if ! ./dev/check-release-blockers.sh "$REPO"; then
+            echo "::error::Release blocked by open issues with 'release-blocker' label"
+            exit 1
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

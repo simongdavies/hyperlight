@@ -39,6 +39,7 @@ In addition to lifecycle labels, we use the following labels to further categori
 - **good-first-issue** - The issue is suitable for new contributors or those looking for a simple task to start with.
 - **help-wanted** - The issue is a request for help or assistance.
 - **question** - The issue is a question or request for information.
+- **release-blocker** - Critical issues that must be resolved before the next release can be made. The presence of this label on any open issue will prevent releases being created by the release workflow
 
 ---
 

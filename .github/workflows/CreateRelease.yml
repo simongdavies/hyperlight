@@ -13,10 +13,19 @@ permissions:
 
 jobs:
 
+  release-blocker-check:
+    # see https://github.com/orgs/community/discussions/26286#discussioncomment-3251208 for why we need to check the ref
+    if: ${{ contains(github.ref, 'refs/heads/release/') }} ||  ${{ github.ref=='refs/heads/main' }}
+    uses: ./.github/workflows/ReleaseBlockerCheck.yml
+    with:
+      repository: ${{ github.repository }}
+    secrets: inherit
+
   build-rust-ubuntu:
     # see https://github.com/orgs/community/discussions/26286#discussioncomment-3251208 for why we need to check the ref
     if: ${{ contains(github.ref, 'refs/heads/release/') }} ||  ${{ github.ref=='refs/heads/main' }}
     runs-on: [self-hosted, Linux, X64, "1ES.Pool=hld-kvm-amd"]
+    needs: [release-blocker-check]
 
     steps:
       - uses: actions/checkout@v4
@@ -37,6 +46,7 @@ jobs:
     # see https://github.com/orgs/community/discussions/26286#discussioncomment-3251208 for why we need to check the ref
     if: ${{ contains(github.ref, 'refs/heads/release/') }} ||  ${{ github.ref=='refs/heads/main' }}
     runs-on: windows-2022
+    needs: [release-blocker-check]
 
     steps:
       - uses: actions/checkout@v4
@@ -56,6 +66,7 @@ jobs:
   build-guest-binaries:
     uses: ./.github/workflows/dep_build_guest_binaries.yml
     secrets: inherit
+    needs: [release-blocker-check]
 
   benchmarks:
     needs: [build-guest-binaries]
