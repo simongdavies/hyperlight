@@ -63,6 +63,9 @@ pub struct MultiUseSandbox {
     dispatch_ptr: RawPtr,
     #[cfg(gdb)]
     dbg_mem_access_fn: DbgMemAccessHandlerWrapper,
+    /// If the current state of the sandbox has been captured in a snapshot,
+    /// that snapshot is stored here.
+    snapshot: Option<Snapshot>,
 }
 
 impl MultiUseSandbox {
@@ -87,6 +90,7 @@ impl MultiUseSandbox {
             dispatch_ptr,
             #[cfg(gdb)]
             dbg_mem_access_fn,
+            snapshot: None,
         }
     }
 
@@ -115,15 +119,19 @@ impl MultiUseSandbox {
     /// ```
     #[instrument(err(Debug), skip_all, parent = Span::current())]
     pub fn snapshot(&mut self) -> Result<Snapshot> {
+        if let Some(snapshot) = &self.snapshot {
+            return Ok(snapshot.clone());
+        }
         let mapped_regions_iter = self.vm.get_mapped_regions();
         let mapped_regions_vec: Vec<MemoryRegion> = mapped_regions_iter.cloned().collect();
         let memory_snapshot = self
             .mem_mgr
             .unwrap_mgr_mut()
             .snapshot(self.id, mapped_regions_vec)?;
-        Ok(Snapshot {
-            inner: memory_snapshot,
-        })
+        let inner = Arc::new(memory_snapshot);
+        let snapshot = Snapshot { inner };
+        self.snapshot = Some(snapshot.clone());
+        Ok(snapshot)
     }
 
     /// Restores the sandbox's memory to a previously captured snapshot state.
@@ -159,6 +167,13 @@ impl MultiUseSandbox {
     /// ```
     #[instrument(err(Debug), skip_all, parent = Span::current())]
     pub fn restore(&mut self, snapshot: &Snapshot) -> Result<()> {
+        if let Some(snap) = &self.snapshot {
+            if Arc::ptr_eq(&snap.inner, &snapshot.inner) {
+                // If the snapshot is already the current one, no need to restore
+                return Ok(());
+            }
+        }
+
         if self.id != snapshot.inner.sandbox_id() {
             return Err(SnapshotSandboxMismatch);
         }
@@ -181,12 +196,15 @@ impl MultiUseSandbox {
             unsafe { self.vm.map_region(region)? };
         }
 
+        // The restored snapshot is now our most current snapshot
+        self.snapshot = Some(snapshot.clone());
+
         Ok(())
     }
 
     /// Calls a guest function by name with the specified arguments.
     ///
-    /// Changes made to the sandbox during execution are persisted.
+    /// Changes made to the sandbox during execution are *not* persisted.
     ///
     /// # Examples
     ///
@@ -215,12 +233,62 @@ impl MultiUseSandbox {
     /// # Ok(())
     /// # }
     /// ```
+    #[doc(hidden)]
+    #[deprecated(
+        since = "0.8.0",
+        note = "Deprecated in favour of call and snapshot/restore."
+    )]
     #[instrument(err(Debug), skip(self, args), parent = Span::current())]
     pub fn call_guest_function_by_name<Output: SupportedReturnType>(
         &mut self,
         func_name: &str,
         args: impl ParameterTuple,
     ) -> Result<Output> {
+        let snapshot = self.snapshot()?;
+        let res = self.call(func_name, args);
+        self.restore(&snapshot)?;
+        res
+    }
+
+    /// Calls a guest function by name with the specified arguments.
+    ///
+    /// Changes made to the sandbox during execution are persisted.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use hyperlight_host::{MultiUseSandbox, UninitializedSandbox, GuestBinary};
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut sandbox: MultiUseSandbox = UninitializedSandbox::new(
+    ///     GuestBinary::FilePath("guest.bin".into()),
+    ///     None
+    /// )?.evolve()?;
+    ///
+    /// // Call function with no arguments
+    /// let result: i32 = sandbox.call("GetCounter", ())?;
+    ///
+    /// // Call function with single argument
+    /// let doubled: i32 = sandbox.call("Double", 21)?;
+    /// assert_eq!(doubled, 42);
+    ///
+    /// // Call function with multiple arguments
+    /// let sum: i32 = sandbox.call("Add", (10, 32))?;
+    /// assert_eq!(sum, 42);
+    ///
+    /// // Call function returning string
+    /// let message: String = sandbox.call("Echo", "Hello, World!".to_string())?;
+    /// assert_eq!(message, "Hello, World!");
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[instrument(err(Debug), skip(self, args), parent = Span::current())]
+    pub fn call<Output: SupportedReturnType>(
+        &mut self,
+        func_name: &str,
+        args: impl ParameterTuple,
+    ) -> Result<Output> {
+        // Reset snapshot since we are mutating the sandbox state
+        self.snapshot = None;
         maybe_time_and_emit_guest_call(func_name, || {
             let ret = self.call_guest_function_by_name_no_reset(
                 func_name,
@@ -254,6 +322,8 @@ impl MultiUseSandbox {
             // writes can be rolled back when necessary.
             log_then_return!("TODO: Writable mappings not yet supported");
         }
+        // Reset snapshot since we are mutating the sandbox state
+        self.snapshot = None;
         unsafe { self.vm.map_region(rgn) }?;
         self.mem_mgr.unwrap_mgr_mut().mapped_rgns += 1;
         Ok(())
@@ -397,7 +467,7 @@ impl Callable for MultiUseSandbox {
         func_name: &str,
         args: impl ParameterTuple,
     ) -> Result<Output> {
-        self.call_guest_function_by_name(func_name, args)
+        self.call(func_name, args)
     }
 }
 
@@ -429,8 +499,34 @@ mod tests {
     use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags, MemoryRegionType};
     #[cfg(target_os = "linux")]
     use crate::mem::shared_mem::{ExclusiveSharedMemory, GuestSharedMemory, SharedMemory as _};
-    use crate::sandbox::{Callable, SandboxConfiguration};
+    use crate::sandbox::SandboxConfiguration;
     use crate::{GuestBinary, HyperlightError, MultiUseSandbox, Result, UninitializedSandbox};
+
+    /// Tests that call_guest_function_by_name restores the state correctly
+    #[test]
+    fn test_call_guest_function_by_name() {
+        let mut sbox: MultiUseSandbox = {
+            let path = simple_guest_as_string().unwrap();
+            let u_sbox = UninitializedSandbox::new(GuestBinary::FilePath(path), None).unwrap();
+            u_sbox.evolve()
+        }
+        .unwrap();
+
+        let snapshot = sbox.snapshot().unwrap();
+
+        let _ = sbox.call::<i32>("AddToStatic", 5i32).unwrap();
+        let res: i32 = sbox.call("GetStatic", ()).unwrap();
+        assert_eq!(res, 5);
+
+        sbox.restore(&snapshot).unwrap();
+        #[allow(deprecated)]
+        let _ = sbox
+            .call_guest_function_by_name::<i32>("AddToStatic", 5i32)
+            .unwrap();
+        #[allow(deprecated)]
+        let res: i32 = sbox.call_guest_function_by_name("GetStatic", ()).unwrap();
+        assert_eq!(res, 0);
+    }
 
     // Tests to ensure that many (1000) function calls can be made in a call context with a small stack (1K) and heap(14K).
     // This test effectively ensures that the stack is being properly reset after each call and we are not leaking memory in the Guest.
@@ -481,15 +577,13 @@ mod tests {
 
         let snapshot = sbox.snapshot().unwrap();
 
-        let _ = sbox
-            .call_guest_function_by_name::<i32>("AddToStatic", 5i32)
-            .unwrap();
+        let _ = sbox.call::<i32>("AddToStatic", 5i32).unwrap();
 
-        let res: i32 = sbox.call_guest_function_by_name("GetStatic", ()).unwrap();
+        let res: i32 = sbox.call("GetStatic", ()).unwrap();
         assert_eq!(res, 5);
 
         sbox.restore(&snapshot).unwrap();
-        let res: i32 = sbox.call_guest_function_by_name("GetStatic", ()).unwrap();
+        let res: i32 = sbox.call("GetStatic", ()).unwrap();
         assert_eq!(res, 0);
     }
 
@@ -515,7 +609,7 @@ mod tests {
 
             let mut sbox: MultiUseSandbox = usbox.evolve()?;
 
-            let res: Result<u64> = sbox.call_guest_function_by_name("ViolateSeccompFilters", ());
+            let res: Result<u64> = sbox.call("ViolateSeccompFilters", ());
 
             #[cfg(feature = "seccomp")]
             match res {
@@ -551,7 +645,7 @@ mod tests {
 
             let mut sbox: MultiUseSandbox = usbox.evolve()?;
 
-            let res: Result<u64> = sbox.call_guest_function_by_name("ViolateSeccompFilters", ());
+            let res: Result<u64> = sbox.call("ViolateSeccompFilters", ());
 
             match res {
                 Ok(_) => {}
@@ -605,7 +699,7 @@ mod tests {
 
             let mut sbox = ubox.evolve().unwrap();
             let host_func_result = sbox
-                .call_guest_function_by_name::<i64>(
+                .call::<i64>(
                     "CallGivenParamlessHostFuncThatReturnsI64",
                     "Openat_Hostfunc".to_string(),
                 )
@@ -634,8 +728,8 @@ mod tests {
                 [libc::SYS_openat],
             )?;
             let mut sbox = ubox.evolve().unwrap();
-            let host_func_result = sbox
-                .call_guest_function_by_name::<i64>(
+            let host_func_result: i64 = sbox
+                .call::<i64>(
                     "CallGivenParamlessHostFuncThatReturnsI64",
                     "Openat_Hostfunc".to_string(),
                 )
@@ -658,7 +752,7 @@ mod tests {
 
         let mut multi_use_sandbox: MultiUseSandbox = usbox.evolve().unwrap();
 
-        let res: Result<()> = multi_use_sandbox.call_guest_function_by_name("TriggerException", ());
+        let res: Result<()> = multi_use_sandbox.call("TriggerException", ());
 
         assert!(res.is_err());
 
@@ -698,9 +792,7 @@ mod tests {
 
                     let mut multi_use_sandbox: MultiUseSandbox = usbox.evolve().unwrap();
 
-                    let res: i32 = multi_use_sandbox
-                        .call_guest_function_by_name("GetStatic", ())
-                        .unwrap();
+                    let res: i32 = multi_use_sandbox.call("GetStatic", ()).unwrap();
 
                     assert_eq!(res, 0);
                 }
@@ -742,7 +834,7 @@ mod tests {
 
         let _guard = map_mem.lock.try_read().unwrap();
         let actual: Vec<u8> = sbox
-            .call_guest_function_by_name(
+            .call(
                 "ReadMappedBuffer",
                 (guest_base as u64, expected.len() as u64),
             )
@@ -780,7 +872,7 @@ mod tests {
 
         // Execute should pass since memory is executable
         let succeed = sbox
-            .call_guest_function_by_name::<bool>(
+            .call::<bool>(
                 "ExecMappedBuffer",
                 (guest_base as u64, expected.len() as u64),
             )
@@ -789,7 +881,7 @@ mod tests {
 
         // write should fail because the memory is mapped as read-only
         let err = sbox
-            .call_guest_function_by_name::<bool>(
+            .call::<bool>(
                 "WriteMappedBuffer",
                 (guest_base as u64, expected.len() as u64),
             )
