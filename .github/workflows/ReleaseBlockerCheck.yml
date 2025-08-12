@@ -30,9 +30,15 @@ jobs:
           REPO="${{ inputs.repository || github.repository }}"
           echo "Checking repository: $REPO"
           
-          if ! ./dev/check-release-blockers.sh "$REPO"; then
-            echo "::error::Release blocked by open issues with 'release-blocker' label"
-            exit 1
+          # Only check for release blockers on release branches
+          if [[ "${{ github.ref }}" == *"refs/heads/release/"* ]]; then
+            echo "Release branch detected - checking for release blockers..."
+            if ! ./dev/check-release-blockers.sh "$REPO"; then
+              echo "::error::Release blocked by open issues with 'release-blocker' label"
+              exit 1
+            fi
+          else
+            echo "Non-release branch - skipping release blocker check"
           fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
