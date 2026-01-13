@@ -1488,6 +1488,7 @@ dependencies = [
  "framehop",
  "gdbstub",
  "gdbstub_arch",
+ "glob",
  "goblin",
  "hyperlight-common",
  "hyperlight-component-macro",

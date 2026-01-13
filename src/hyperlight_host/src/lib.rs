@@ -54,6 +54,8 @@ pub(crate) mod built_info {
 pub mod error;
 /// Wrappers for host and guest functions.
 pub mod func;
+/// Zero-copy filesystem passthrough for mapping host files into guests.
+pub mod hyperlight_fs;
 /// Wrappers for hypervisor implementations
 pub mod hypervisor;
 /// Functionality to establish and manage an individual sandbox's
