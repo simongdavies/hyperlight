@@ -139,6 +139,27 @@ fn validate_guest_dir_prefix(path: &str) -> Result<String> {
     }
 }
 
+/// Normalize a guest path by removing duplicate slashes and `.` components.
+///
+/// This is used for paths built via Path::join which may not be clean.
+/// Does not validate - use validate_guest_file_path for user input.
+fn normalize_guest_path(path: &str) -> String {
+    let p = Path::new(path);
+    let parts: Vec<_> = p
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(s) => Some(s.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect();
+
+    if parts.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", parts.join("/"))
+    }
+}
+
 /// Internal representation of a file to be mapped.
 #[derive(Debug, Clone)]
 pub(super) struct MappedFile {
@@ -528,10 +549,11 @@ impl DirectoryBuilder {
             } else if metadata.is_file() {
                 // Check if file matches patterns
                 if self.matches(&rel_path_str) {
-                    let guest_path = Path::new(&self.guest_prefix)
-                        .join(rel_path)
-                        .to_string_lossy()
-                        .to_string();
+                    let guest_path = normalize_guest_path(
+                        &Path::new(&self.guest_prefix)
+                            .join(rel_path)
+                            .to_string_lossy(),
+                    );
 
                     info!(
                         host = %path.display(),
@@ -591,7 +613,7 @@ impl DirectoryBuilder {
         for dir_path in new_dirs.into_iter().rev() {
             results.push(MappedFile {
                 host_path: PathBuf::new(), // No host path for synthetic dirs
-                guest_path: dir_path.to_string_lossy().to_string(),
+                guest_path: normalize_guest_path(&dir_path.to_string_lossy()),
                 size: 0,
                 is_dir: true,
             });
@@ -933,7 +955,11 @@ mod tests {
         // but should be excluded by the exclude pattern
         let secret_dir = tmp.path().join("secret");
         std::fs::create_dir(&secret_dir).unwrap();
-        std::fs::write(secret_dir.join("credentials.json"), b"{\"key\": \"secret\"}").unwrap();
+        std::fs::write(
+            secret_dir.join("credentials.json"),
+            b"{\"key\": \"secret\"}",
+        )
+        .unwrap();
         std::fs::write(secret_dir.join("password.txt"), b"hunter2").unwrap();
 
         let builder = HyperlightFSBuilder::new()

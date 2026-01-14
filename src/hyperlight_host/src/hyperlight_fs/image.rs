@@ -84,6 +84,8 @@ unsafe impl Sync for FileMapping {}
 
 /// Internal representation of an inode before guest addresses are assigned.
 #[derive(Debug, Clone)]
+// TODO(Phase 3): Remove this allow when HyperlightFSImage is integrated with Sandbox
+#[allow(dead_code)]
 struct InodeEntry {
     /// Type of inode (file or directory)
     is_dir: bool,
@@ -105,6 +107,8 @@ struct InodeEntry {
 ///
 /// This struct is `Send + Sync` and can be shared across multiple sandboxes.
 /// The underlying mmaps share physical pages via the OS page cache.
+// TODO(Phase 3): Remove this allow when HyperlightFSImage is integrated with Sandbox
+#[allow(dead_code)]
 pub struct HyperlightFSImage {
     /// Inode entries (files and directories)
     inode_entries: Vec<InodeEntry>,
@@ -115,6 +119,8 @@ pub struct HyperlightFSImage {
     mapped_files_region_size: usize,
 }
 
+// TODO(Phase 3): Remove this allow when HyperlightFSImage is integrated with Sandbox
+#[allow(dead_code)]
 impl HyperlightFSImage {
     /// Generate a manifest with final guest addresses.
     ///
@@ -142,7 +148,8 @@ impl HyperlightFSImage {
                     // Compute the final guest address from current offset
                     let guest_address = mapped_files_region_base + current_offset;
                     // Advance offset by page-aligned size for next file
-                    let aligned_size = ((entry.size as usize + PAGE_SIZE_USIZE - 1) & !(PAGE_SIZE_USIZE - 1)) as u64;
+                    let aligned_size = ((entry.size as usize + PAGE_SIZE_USIZE - 1)
+                        & !(PAGE_SIZE_USIZE - 1)) as u64;
                     current_offset += aligned_size;
                     InodeData::file(entry.path.clone(), entry.parent, guest_address, entry.size)
                 }
@@ -179,7 +186,9 @@ impl HyperlightFSImage {
     /// The caller must not write to this memory.
     #[cfg(all(unix, test))]
     pub fn file_data_ptr(&self, index: usize) -> Option<*const u8> {
-        self.file_mappings.get(index).map(|m| m.mmap_ptr as *const u8)
+        self.file_mappings
+            .get(index)
+            .map(|m| m.mmap_ptr as *const u8)
     }
 }
 

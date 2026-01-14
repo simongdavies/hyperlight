@@ -23,6 +23,7 @@ extern crate alloc;
 // Modules
 pub mod error;
 pub mod exit;
+pub mod fs;
 
 pub mod guest_handle {
     pub mod handle;
