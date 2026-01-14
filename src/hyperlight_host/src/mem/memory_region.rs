@@ -135,6 +135,8 @@ pub enum MemoryRegionType {
     GuardPage,
     /// The region contains the Stack
     Stack,
+    /// The region contains the HyperlightFS mapped files (read-only, no execute)
+    HyperlightFS,
 }
 
 /// A trait that distinguishes between different kinds of memory region representations.

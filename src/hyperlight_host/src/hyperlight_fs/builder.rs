@@ -371,6 +371,122 @@ impl HyperlightFSBuilder {
         })
     }
 
+    /// Create a builder from a TOML configuration.
+    ///
+    /// This applies all file and directory mappings from the config
+    /// to a new builder.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - The parsed TOML configuration
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any mapping in the config is invalid (e.g.,
+    /// host file doesn't exist, invalid paths, duplicate guest paths).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use hyperlight_host::hyperlight_fs::{HyperlightFSBuilder, HyperlightFsConfig};
+    ///
+    /// let config = HyperlightFsConfig::from_toml_file("hyperlight-fs.toml")?;
+    /// let fs = HyperlightFSBuilder::from_config(&config)?.build()?;
+    /// ```
+    pub fn from_config(config: &super::config::HyperlightFsConfig) -> Result<Self> {
+        let mut builder = Self::new();
+
+        // Add individual file mappings
+        for file in &config.file {
+            builder = builder.add_file(&file.host, &file.guest)?;
+        }
+
+        // Add directory mappings
+        for dir in &config.directory {
+            let mut dir_builder = builder.add_dir(&dir.host, &dir.guest)?;
+
+            // Add include patterns (default to "**/*" if none specified)
+            if dir.include.is_empty() {
+                dir_builder = dir_builder.include("**/*");
+            } else {
+                for pattern in &dir.include {
+                    dir_builder = dir_builder.include(pattern);
+                }
+            }
+
+            // Add exclude patterns
+            for pattern in &dir.exclude {
+                dir_builder = dir_builder.exclude(pattern);
+            }
+
+            builder = dir_builder.done()?;
+        }
+
+        Ok(builder)
+    }
+
+    /// Create a builder from a TOML string.
+    ///
+    /// Convenience method that parses the TOML and creates a builder.
+    ///
+    /// # Arguments
+    ///
+    /// * `toml_content` - TOML configuration as a string
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The TOML is malformed
+    /// - Any mapping in the config is invalid
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    ///
+    /// let toml = r#"
+    /// [[file]]
+    /// host = "/etc/config.json"
+    /// guest = "/config.json"
+    /// "#;
+    ///
+    /// let fs = HyperlightFSBuilder::from_toml(toml)?.build()?;
+    /// ```
+    pub fn from_toml(toml_content: &str) -> Result<Self> {
+        let config = super::config::HyperlightFsConfig::from_toml(toml_content)
+            .map_err(|e| HyperlightError::Error(format!("Failed to parse TOML config: {}", e)))?;
+        Self::from_config(&config)
+    }
+
+    /// Create a builder from a TOML file.
+    ///
+    /// Convenience method that reads and parses a TOML file.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the TOML configuration file
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The file cannot be read
+    /// - The TOML is malformed
+    /// - Any mapping in the config is invalid
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    ///
+    /// let fs = HyperlightFSBuilder::from_toml_file("/path/to/hyperlight-fs.toml")?.build()?;
+    /// ```
+    pub fn from_toml_file(path: &str) -> Result<Self> {
+        let config = super::config::HyperlightFsConfig::from_toml_file(path).map_err(|e| {
+            HyperlightError::Error(format!("Failed to load config file '{}': {}", path, e))
+        })?;
+        Self::from_config(&config)
+    }
+
     /// Build the HyperlightFS image.
     ///
     /// This creates memory mappings for all files. On Linux, files are
@@ -991,5 +1107,182 @@ mod tests {
         assert!(!file_names.iter().any(|p| p.contains("secret")));
         assert!(!file_names.iter().any(|p| p.contains("credentials")));
         assert!(!file_names.iter().any(|p| p.contains("password")));
+    }
+
+    #[test]
+    fn test_from_config_single_file() {
+        let tmp = TempDir::new().unwrap();
+        let file_path = tmp.path().join("config.json");
+        std::fs::write(&file_path, b"{\"key\": \"value\"}").unwrap();
+
+        let toml = format!(
+            r#"
+[[file]]
+host = "{}"
+guest = "/config.json"
+"#,
+            file_path.display()
+        );
+
+        let builder = HyperlightFSBuilder::from_toml(&toml).unwrap();
+        let manifest = builder.list().unwrap();
+
+        assert_eq!(manifest.files.iter().filter(|f| !f.is_dir).count(), 1);
+        assert_eq!(manifest.files[0].guest_path, "/config.json");
+    }
+
+    #[test]
+    fn test_from_config_multiple_files() {
+        let tmp = TempDir::new().unwrap();
+        let file1 = tmp.path().join("file1.txt");
+        let file2 = tmp.path().join("file2.txt");
+        std::fs::write(&file1, b"one").unwrap();
+        std::fs::write(&file2, b"two").unwrap();
+
+        let toml = format!(
+            r#"
+[[file]]
+host = "{}"
+guest = "/a/file1.txt"
+
+[[file]]
+host = "{}"
+guest = "/b/file2.txt"
+"#,
+            file1.display(),
+            file2.display()
+        );
+
+        let builder = HyperlightFSBuilder::from_toml(&toml).unwrap();
+        let manifest = builder.list().unwrap();
+
+        let file_count = manifest.files.iter().filter(|f| !f.is_dir).count();
+        assert_eq!(file_count, 2);
+    }
+
+    #[test]
+    fn test_from_config_directory_default_include() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), b"aaa").unwrap();
+        std::fs::write(tmp.path().join("b.json"), b"{}").unwrap();
+
+        // No include patterns = default to **/*
+        let toml = format!(
+            r#"
+[[directory]]
+host = "{}"
+guest = "/data"
+"#,
+            tmp.path().display()
+        );
+
+        let builder = HyperlightFSBuilder::from_toml(&toml).unwrap();
+        let manifest = builder.list().unwrap();
+
+        let file_names: Vec<_> = manifest
+            .files
+            .iter()
+            .filter(|f| !f.is_dir)
+            .map(|f| f.guest_path.clone())
+            .collect();
+
+        // Should include all files
+        assert!(file_names.iter().any(|p| p.ends_with("a.txt")));
+        assert!(file_names.iter().any(|p| p.ends_with("b.json")));
+    }
+
+    #[test]
+    fn test_from_config_directory_with_patterns() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("include.txt"), b"yes").unwrap();
+        std::fs::write(tmp.path().join("exclude.txt"), b"no").unwrap();
+        std::fs::write(tmp.path().join("other.bin"), b"binary").unwrap();
+
+        let toml = format!(
+            r#"
+[[directory]]
+host = "{}"
+guest = "/assets"
+include = ["**/*.txt"]
+exclude = ["**/exclude*"]
+"#,
+            tmp.path().display()
+        );
+
+        let builder = HyperlightFSBuilder::from_toml(&toml).unwrap();
+        let manifest = builder.list().unwrap();
+
+        let file_names: Vec<_> = manifest
+            .files
+            .iter()
+            .filter(|f| !f.is_dir)
+            .map(|f| f.guest_path.clone())
+            .collect();
+
+        // Should include .txt files except excluded ones
+        assert!(file_names.iter().any(|p| p.ends_with("include.txt")));
+        assert!(!file_names.iter().any(|p| p.contains("exclude")));
+        assert!(!file_names.iter().any(|p| p.ends_with(".bin")));
+    }
+
+    #[test]
+    fn test_from_config_mixed() {
+        let tmp = TempDir::new().unwrap();
+        let single_file = tmp.path().join("single.json");
+        std::fs::write(&single_file, b"{}").unwrap();
+
+        let dir = tmp.path().join("dir");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("nested.txt"), b"nested").unwrap();
+
+        let toml = format!(
+            r#"
+[[file]]
+host = "{}"
+guest = "/config.json"
+
+[[directory]]
+host = "{}"
+guest = "/data"
+"#,
+            single_file.display(),
+            dir.display()
+        );
+
+        let builder = HyperlightFSBuilder::from_toml(&toml).unwrap();
+        let manifest = builder.list().unwrap();
+
+        let file_names: Vec<_> = manifest
+            .files
+            .iter()
+            .filter(|f| !f.is_dir)
+            .map(|f| f.guest_path.clone())
+            .collect();
+
+        assert!(file_names.iter().any(|p| p == "/config.json"));
+        assert!(file_names.iter().any(|p| p.ends_with("nested.txt")));
+    }
+
+    #[test]
+    fn test_from_config_invalid_toml() {
+        let result = HyperlightFSBuilder::from_toml("not valid toml {{{{");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_from_config_invalid_host_path() {
+        let toml = r#"
+[[file]]
+host = "/nonexistent/path/file.txt"
+guest = "/file.txt"
+"#;
+        let result = HyperlightFSBuilder::from_toml(toml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_from_toml_file_not_found() {
+        let result = HyperlightFSBuilder::from_toml_file("/nonexistent/config.toml");
+        assert!(result.is_err());
     }
 }

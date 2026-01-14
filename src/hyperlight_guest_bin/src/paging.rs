@@ -137,6 +137,48 @@ pub unsafe fn map_region(phys_base: u64, virt_base: *mut u8, len: u64) {
     }
 }
 
+/// Map a single page as read-only with no execute permission.
+///
+/// Used for HyperlightFS file data pages mapped on demand during page fault handling.
+/// The page is identity-mapped (phys_addr == virt_addr in the current memory model).
+///
+/// # Safety
+///
+/// Same safety requirements as `map_region`:
+/// - No locking is performed before touching page table data structures
+/// - Caller must ensure addresses are page-aligned
+/// - Should not be called concurrently with other page table operations
+/// - TLB invalidation is NOT performed; caller should use `invlpg` afterwards
+pub unsafe fn map_page_readonly(phys_addr: u64, virt_addr: u64) {
+    use hyperlight_common::vmem;
+    unsafe {
+        vmem::map(
+            &GuestMappingOperations::new(),
+            vmem::Mapping {
+                phys_base: phys_addr,
+                virt_base: virt_addr,
+                len: hyperlight_common::mem::PAGE_SIZE,
+                kind: vmem::MappingKind::BasicMapping(vmem::BasicMapping {
+                    readable: true,
+                    writable: false,
+                    executable: false,
+                }),
+            },
+        );
+    }
+}
+
+/// Invalidate the TLB entry for a single virtual address.
+///
+/// More efficient than a full TLB flush when only one page mapping changed.
+/// Should be called after creating a new PTE to ensure the CPU uses the updated mapping.
+#[inline(always)]
+pub fn invlpg(virt_addr: u64) {
+    unsafe {
+        asm!("invlpg [{}]", in(reg) virt_addr, options(nostack, preserves_flags));
+    }
+}
+
 /// Allocate n contiguous physical pages and return the physical
 /// addresses of the pages in question.
 /// # Safety

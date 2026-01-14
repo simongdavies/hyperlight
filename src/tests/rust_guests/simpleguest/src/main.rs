@@ -45,6 +45,7 @@ use hyperlight_common::flatbuffer_wrappers::util::get_flatbuffer_result;
 use hyperlight_common::mem::PAGE_SIZE;
 use hyperlight_guest::error::{HyperlightGuestError, Result};
 use hyperlight_guest::exit::{abort_with_code, abort_with_code_and_message};
+use hyperlight_guest::{Read, Seek, SeekFrom, fs};
 use hyperlight_guest_bin::exceptions::handler::{Context, ExceptionInfo};
 use hyperlight_guest_bin::guest_function::definition::GuestFunctionDefinition;
 use hyperlight_guest_bin::guest_function::register::register_function;
@@ -74,6 +75,122 @@ fn set_static() -> i32 {
         *val = 1;
     }
     bigarray.len() as i32
+}
+
+/// Reads a file from HyperlightFS and returns its contents.
+/// Returns empty vec if file not found or FS not initialized.
+#[guest_function("ReadFile")]
+fn read_file(path: String) -> Vec<u8> {
+    if !fs::is_initialized() {
+        return Vec::new();
+    }
+    match fs::open(&path) {
+        Ok(mut file) => file.read_to_vec().unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Returns 1 if HyperlightFS is initialized, 0 otherwise.
+#[guest_function("IsFsInitialized")]
+fn is_fs_initialized() -> i32 {
+    if fs::is_initialized() { 1 } else { 0 }
+}
+
+/// Randomly reads 10 chunks of 256 bytes from a file and returns them with their offsets.
+///
+/// Uses RDTSC-seeded LCG for random number generation (RDRAND not available in VM).
+///
+/// Arguments:
+/// - path: The file path to read from
+///
+/// Returns a Vec<u8> where each sample is:
+/// - 8 bytes: offset (little-endian u64)
+/// - 256 bytes: data read at that offset
+/// Total: 10 samples * 264 bytes = 2640 bytes
+///
+/// Returns empty vec if file not found or FS not initialized.
+#[guest_function("RandomReadChunks")]
+fn random_read_chunks(path: String) -> Vec<u8> {
+    const NUM_SAMPLES: usize = 10;
+    const CHUNK_SIZE: usize = 256;
+    const SAMPLE_SIZE: usize = 8 + CHUNK_SIZE; // offset + data
+
+    if !fs::is_initialized() {
+        return Vec::new();
+    }
+
+    let mut file = match fs::open(&path) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
+    };
+
+    // Get file size from metadata
+    let file_size = match file.size() {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+
+    // Get timestamp counter for seeding RNG
+    fn rdtsc() -> u64 {
+        let lo: u32;
+        let hi: u32;
+        unsafe {
+            core::arch::asm!(
+                "rdtsc",
+                out("eax") lo,
+                out("edx") hi,
+                options(nostack, nomem)
+            );
+        }
+        ((hi as u64) << 32) | (lo as u64)
+    }
+
+    // Simple LCG random number generator
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            // LCG parameters from Numerical Recipes
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+            self.0
+        }
+    }
+
+    let mut rng = Lcg(rdtsc());
+
+    let mut result = vec![0u8; NUM_SAMPLES * SAMPLE_SIZE];
+
+    // Maximum valid offset (leaving room for CHUNK_SIZE bytes)
+    let max_offset = file_size.saturating_sub(CHUNK_SIZE as u64);
+
+    for i in 0..NUM_SAMPLES {
+        // Get random offset
+        let random_val = rng.next();
+        let offset = if max_offset > 0 {
+            random_val % max_offset
+        } else {
+            0
+        };
+
+        // Seek to offset
+        if file.seek(SeekFrom::Start(offset)).is_err() {
+            return Vec::new();
+        }
+
+        // Write offset to result (little-endian)
+        let sample_start = i * SAMPLE_SIZE;
+        result[sample_start..sample_start + 8].copy_from_slice(&offset.to_le_bytes());
+
+        // Read chunk data
+        let data_start = sample_start + 8;
+        if file
+            .read(&mut result[data_start..data_start + CHUNK_SIZE])
+            .is_err()
+        {
+            return Vec::new();
+        }
+    }
+
+    result
 }
 
 #[guest_function("EchoDouble")]

@@ -14,16 +14,19 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-//! HyperlightFS image with zero-copy memory mappings.
+//! HyperlightFS image with file metadata for guest memory setup.
 //!
-//! This module provides the runtime representation of a HyperlightFS image,
-//! with file data memory-mapped directly from the host filesystem.
+//! This module provides the runtime representation of a HyperlightFS image.
+//! File mappings store host paths and metadata; actual memory mapping is done
+//! at sandbox initialization time using `map_file_cow`.
 //!
 //! # Guest Address Assignment
 //!
 //! Guest addresses (GVA/GPA) are not known until sandbox creation time.
 //! This image computes file offsets on-demand and generates the final FlatBuffer
 //! manifest with actual guest addresses when the mapped files region base is known.
+
+use std::path::PathBuf;
 
 use hyperlight_common::flatbuffer_wrappers::hyperlight_fs::{HyperlightFSData, InodeData};
 use hyperlight_common::mem::PAGE_SIZE_USIZE;
@@ -33,18 +36,17 @@ use super::builder::MappedFile;
 use crate::Result;
 use crate::error::HyperlightError;
 
-/// A memory-mapped file with metadata for guest memory setup.
+/// File metadata for guest memory setup.
+///
+/// This struct stores the host path and metadata for a file that will be
+/// mapped into guest memory at sandbox initialization time.
 pub struct FileMapping {
     /// Guest path of the file
     guest_path: String,
+    /// Host path of the file (used by `map_file_cow` at sandbox init)
+    host_path: PathBuf,
     /// Size of the file in bytes
     size: u64,
-    /// Pointer to the mapped memory
-    #[cfg(unix)]
-    mmap_ptr: *mut libc::c_void,
-    /// Size of the mapping (page-aligned)
-    #[cfg(unix)]
-    mmap_len: usize,
 }
 
 impl FileMapping {
@@ -53,34 +55,16 @@ impl FileMapping {
         &self.guest_path
     }
 
+    /// Get the host path of this file.
+    pub fn host_path(&self) -> &PathBuf {
+        &self.host_path
+    }
+
     /// Get the size of the file in bytes.
     pub fn size(&self) -> u64 {
         self.size
     }
 }
-
-#[cfg(unix)]
-impl Drop for FileMapping {
-    fn drop(&mut self) {
-        if !self.mmap_ptr.is_null() && self.mmap_len > 0 {
-            // SAFETY: mmap_ptr and mmap_len were created by mmap and are valid
-            unsafe {
-                libc::munmap(self.mmap_ptr, self.mmap_len);
-            }
-        }
-    }
-}
-
-// SAFETY: FileMapping contains only a pointer to OS-managed read-only memory.
-// The underlying memory is managed by the kernel and is safe to access from
-// any thread.
-#[cfg(unix)]
-unsafe impl Send for FileMapping {}
-
-// SAFETY: FileMapping is Sync because the underlying memory is read-only
-// and managed by the kernel. Multiple threads can safely read from it.
-#[cfg(unix)]
-unsafe impl Sync for FileMapping {}
 
 /// Internal representation of an inode before guest addresses are assigned.
 #[derive(Debug, Clone)]
@@ -170,35 +154,40 @@ impl HyperlightFSImage {
         self.mapped_files_region_size
     }
 
+    /// Estimate the size of the manifest in bytes (page-aligned).
+    ///
+    /// This is used to compute where file data should be placed in guest memory.
+    /// The estimate is conservative (may be slightly larger than actual).
+    pub(crate) fn estimate_manifest_size(&self) -> usize {
+        // FlatBuffer overhead estimate:
+        // - Root table: ~32 bytes (header, version, vector offset)
+        // - Per inode: ~48 bytes base + path length + alignment padding
+        const ROOT_OVERHEAD: usize = 64;
+        const PER_INODE_OVERHEAD: usize = 64;
+
+        let inodes_size: usize = self
+            .inode_entries
+            .iter()
+            .map(|entry| PER_INODE_OVERHEAD + entry.path.len())
+            .sum();
+
+        let total = ROOT_OVERHEAD + inodes_size;
+
+        // Round up to page size
+        (total + PAGE_SIZE_USIZE - 1) & !(PAGE_SIZE_USIZE - 1)
+    }
+
     /// Get the file mappings for wiring into guest memory.
     #[cfg(unix)]
     pub(crate) fn file_mappings(&self) -> &[FileMapping] {
         &self.file_mappings
     }
-
-    /// Get a pointer to a file's mapped data (zero-copy).
-    ///
-    /// Returns `None` if the index is out of bounds.
-    ///
-    /// # Safety
-    ///
-    /// The returned pointer is valid for the lifetime of this `HyperlightFSImage`.
-    /// The caller must not write to this memory.
-    #[cfg(all(unix, test))]
-    pub fn file_data_ptr(&self, index: usize) -> Option<*const u8> {
-        self.file_mappings
-            .get(index)
-            .map(|m| m.mmap_ptr as *const u8)
-    }
 }
 
-/// Build a HyperlightFS image with zero-copy file mappings.
+/// Build a HyperlightFS image with file metadata.
 #[cfg(unix)]
 pub(super) fn build_image(mut files: Vec<MappedFile>) -> Result<HyperlightFSImage> {
     use std::collections::HashMap;
-    use std::fs::File;
-    use std::os::unix::fs::MetadataExt;
-    use std::os::unix::io::AsRawFd;
 
     // Sort files by guest path for consistent ordering
     files.sort_by(|a, b| a.guest_path.cmp(&b.guest_path));
@@ -243,61 +232,37 @@ pub(super) fn build_image(mut files: Vec<MappedFile>) -> Result<HyperlightFSImag
         "Built HyperlightFS inode entries"
     );
 
-    // Memory-map file data (zero-copy!)
+    // Collect file mappings (actual mmap happens at sandbox init via map_file_cow)
     let mut file_mappings: Vec<FileMapping> = Vec::new();
 
     for file in &files {
         if !file.is_dir && !file.host_path.as_os_str().is_empty() {
-            let f = File::open(&file.host_path).map_err(|e| {
-                HyperlightError::Error(format!("Failed to open {:?}: {}", file.host_path, e))
+            // Verify file exists and get size
+            let metadata = std::fs::metadata(&file.host_path).map_err(|e| {
+                HyperlightError::Error(format!("Failed to stat {:?}: {}", file.host_path, e))
             })?;
 
-            let file_size = f.metadata()?.size() as usize;
+            let file_size = metadata.len();
             if file_size == 0 {
                 // Can't mmap empty files, skip
                 info!(
                     guest = %file.guest_path,
-                    "Skipping empty file (cannot mmap)"
+                    "Skipping empty file (cannot map)"
                 );
                 continue;
-            }
-
-            let mmap_size = (file_size + PAGE_SIZE_USIZE - 1) & !(PAGE_SIZE_USIZE - 1);
-
-            // SAFETY: mmap with MAP_PRIVATE | PROT_READ is safe for read-only access.
-            // The kernel ensures the mapping is valid.
-            let ptr = unsafe {
-                libc::mmap(
-                    std::ptr::null_mut(),
-                    mmap_size,
-                    libc::PROT_READ,
-                    libc::MAP_PRIVATE,
-                    f.as_raw_fd(),
-                    0,
-                )
-            };
-
-            if ptr == libc::MAP_FAILED {
-                return Err(HyperlightError::Error(format!(
-                    "mmap failed for {:?}: {}",
-                    file.host_path,
-                    std::io::Error::last_os_error()
-                )));
             }
 
             info!(
                 guest = %file.guest_path,
                 host = %file.host_path.display(),
-                size = file.size,
-                mmap_size = mmap_size,
-                "Memory-mapped file (zero-copy)"
+                size = file_size,
+                "Added file mapping (will be mapped at sandbox init)"
             );
 
             file_mappings.push(FileMapping {
                 guest_path: file.guest_path.clone(),
-                size: file.size,
-                mmap_ptr: ptr,
-                mmap_len: mmap_size,
+                host_path: file.host_path.clone(),
+                size: file_size,
             });
         }
     }
@@ -306,7 +271,7 @@ pub(super) fn build_image(mut files: Vec<MappedFile>) -> Result<HyperlightFSImag
         inode_count = inode_entries.len(),
         file_count = file_mappings.len(),
         total_data_size = total_data_size,
-        "HyperlightFS image built with zero-copy mmaps"
+        "HyperlightFS image built"
     );
 
     Ok(HyperlightFSImage {
@@ -388,7 +353,7 @@ mod tests {
         std::fs::write(&file_path, b"hello world").unwrap();
 
         let files = vec![MappedFile {
-            host_path: file_path,
+            host_path: file_path.clone(),
             guest_path: "/test.txt".to_string(),
             size: 11,
             is_dir: false,
@@ -400,10 +365,8 @@ mod tests {
         assert_eq!(image.file_mappings()[0].guest_path(), "/test.txt");
         assert_eq!(image.file_mappings()[0].size(), 11);
 
-        // Verify we can read the mapped data
-        let ptr = image.file_data_ptr(0).unwrap();
-        let data = unsafe { std::slice::from_raw_parts(ptr, 11) };
-        assert_eq!(data, b"hello world");
+        // Verify host_path is stored correctly
+        assert_eq!(image.file_mappings()[0].host_path(), &file_path);
 
         // Generate manifest and verify
         let manifest = image.generate_manifest(0x2000_0000).unwrap();

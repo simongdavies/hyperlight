@@ -100,7 +100,11 @@ limitations under the License.
 //! - **Windows**: Not yet supported (returns error)
 
 mod builder;
+mod config;
 mod image;
 
 pub use builder::{BuildManifest, DirectoryBuilder, HyperlightFSBuilder, ManifestEntry};
+pub use config::{
+    ConfigError, DirectoryMapping, FileMapping as ConfigFileMapping, HyperlightFsConfig,
+};
 pub use image::{FileMapping, HyperlightFSImage};

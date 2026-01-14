@@ -48,11 +48,14 @@ thiserror = "2.0.17"
 chrono = { version = "0.4", optional = true }
 anyhow = "1.0"
 metrics = "0.24.3"
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+toml = "0.8"
 elfcore = "2.0"
 uuid = { version = "1.19.0", features = ["v4"] }
 glob = "0.3"
 tempfile = { version = "3.19", optional = true }
+clap = { version = "4.5", features = ["derive"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [

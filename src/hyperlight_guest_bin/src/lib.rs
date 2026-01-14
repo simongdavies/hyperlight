@@ -244,6 +244,45 @@ pub extern "C" fn entrypoint(peb_address: u64, seed: u64, ops: u64, max_log_leve
                 registration();
             }
 
+            // Initialize HyperlightFS if manifest is available in PEB
+            let manifest = (*peb_ptr).guest_fs_manifest;
+            if manifest.size > 0 && manifest.ptr != 0 {
+                // Map PTEs for manifest pages before reading.
+                // The manifest is in memory mapped by the host, but the guest page tables
+                // don't have entries for it yet. We create them here before fs::init reads
+                // the manifest data.
+                let manifest_start = manifest.ptr as u64;
+                let manifest_end = manifest_start + manifest.size;
+                let page_size = hyperlight_common::mem::PAGE_SIZE;
+                let manifest_start_page = manifest_start & !0xFFF;
+                let manifest_end_page = (manifest_end + page_size - 1) & !0xFFF;
+                let manifest_len = manifest_end_page - manifest_start_page;
+
+                // Map manifest pages as read/write (paging::map_region default)
+                // SAFETY: Host guarantees the memory is valid and properly aligned.
+                // Page tables are not being concurrently accessed at this point.
+                // Note: The outer `unsafe` block covers this call.
+                paging::map_region(
+                    manifest_start_page,
+                    manifest_start_page as *mut u8,
+                    manifest_len,
+                );
+                // Invalidate TLB for the newly mapped pages
+                for page_addr in
+                    (manifest_start_page..manifest_end_page).step_by(page_size as usize)
+                {
+                    paging::invlpg(page_addr);
+                }
+
+                // SAFETY: Host guarantees manifest memory is valid and read-only
+                if let Err(e) =
+                    hyperlight_guest::fs::init(manifest.ptr as *const u8, manifest.size as usize)
+                {
+                    // Log error but don't panic - FS is optional
+                    log::error!("Failed to initialize HyperlightFS: {:?}", e);
+                }
+            }
+
             hyperlight_main();
         }
     });

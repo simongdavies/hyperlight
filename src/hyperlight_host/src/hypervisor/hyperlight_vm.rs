@@ -263,6 +263,13 @@ impl HyperlightVm {
     /// Depending on the host platform, there are likely alignment
     /// requirements of at least one page for base and len.
     pub(crate) unsafe fn map_region(&mut self, region: &MemoryRegion) -> Result<()> {
+        // Use the constant PAGE_SIZE_USIZE directly instead of self.page_size because
+        // this function may be called before initialise() sets self.page_size.
+        // This is safe because self.page_size is ultimately initialized from this
+        // same constant (via page_size::get() which returns PAGE_SIZE_USIZE on all
+        // supported platforms).
+        use hyperlight_common::mem::PAGE_SIZE_USIZE;
+
         if [
             region.guest_region.start,
             region.guest_region.end,
@@ -270,11 +277,11 @@ impl HyperlightVm {
             region.host_region.end,
         ]
         .iter()
-        .any(|x| x % self.page_size != 0)
+        .any(|x| x % PAGE_SIZE_USIZE != 0)
         {
             log_then_return!(
                 "region is not page-aligned {:x}, {region:?}",
-                self.page_size
+                PAGE_SIZE_USIZE
             );
         }
 

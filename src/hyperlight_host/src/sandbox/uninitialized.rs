@@ -27,6 +27,7 @@ use super::snapshot::Snapshot;
 use super::uninitialized_evolve::evolve_impl_multi_use;
 use crate::func::host_functions::{HostFunction, register_host_function};
 use crate::func::{ParameterTuple, SupportedReturnType};
+use crate::hyperlight_fs::HyperlightFSImage;
 #[cfg(feature = "build-metadata")]
 use crate::log_build_details;
 use crate::mem::memory_region::{DEFAULT_GUEST_BLOB_MEM_FLAGS, MemoryRegionFlags};
@@ -67,6 +68,9 @@ pub struct UninitializedSandbox {
     #[cfg(any(crashdump, gdb))]
     pub(crate) rt_cfg: SandboxRuntimeConfig,
     pub(crate) load_info: crate::mem::exe::LoadInfo,
+    /// Optional HyperlightFS image for zero-copy file access in the guest.
+    /// When set, files will be mapped into guest memory during sandbox evolution.
+    pub(crate) hyperlight_fs: Option<Arc<HyperlightFSImage>>,
 }
 
 impl Debug for UninitializedSandbox {
@@ -211,6 +215,7 @@ impl UninitializedSandbox {
             #[cfg(any(crashdump, gdb))]
             rt_cfg,
             load_info: snapshot.load_info(),
+            hyperlight_fs: None,
         };
 
         // If we were passed a writer for host print register it otherwise use the default.
@@ -268,6 +273,41 @@ impl UninitializedSandbox {
     /// defaulting to [`LevelFilter::Error`] if unset.
     pub fn set_max_guest_log_level(&mut self, log_level: LevelFilter) {
         self.max_guest_log_level = Some(log_level);
+    }
+
+    /// Sets the HyperlightFS image for zero-copy file access in the guest.
+    ///
+    /// When set, the files in the image will be mapped into guest memory during
+    /// sandbox evolution. The guest can then access file contents directly without
+    /// any host calls or data copying.
+    ///
+    /// # Arguments
+    ///
+    /// * `fs_image` - The HyperlightFS image containing files to map into the guest.
+    ///   The image is wrapped in an `Arc` to allow sharing across multiple sandboxes.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    /// use std::sync::Arc;
+    ///
+    /// // Build the FS image once and wrap in Arc for sharing
+    /// let fs_image = Arc::new(
+    ///     HyperlightFSBuilder::new()
+    ///         .add_file("/app/config.json", "/guest/config.json")?
+    ///         .build()?
+    /// );
+    ///
+    /// // Share the same FS image across multiple sandboxes
+    /// let mut sandbox1 = UninitializedSandbox::new(guest_binary1, None)?;
+    /// sandbox1.set_hyperlight_fs(fs_image.clone());
+    ///
+    /// let mut sandbox2 = UninitializedSandbox::new(guest_binary2, None)?;
+    /// sandbox2.set_hyperlight_fs(fs_image.clone());
+    /// ```
+    pub fn set_hyperlight_fs(&mut self, fs_image: Arc<HyperlightFSImage>) {
+        self.hyperlight_fs = Some(fs_image);
     }
 
     /// Registers a host function that the guest can call.
@@ -1258,5 +1298,42 @@ mod tests {
 
             let _evolved: MultiUseSandbox = sandbox.evolve().expect("Failed to evolve sandbox");
         }
+    }
+
+    #[test]
+    fn test_set_hyperlight_fs() {
+        use std::io::Write;
+
+        use tempfile::tempdir;
+
+        use crate::hyperlight_fs::HyperlightFSBuilder;
+
+        let binary_path = simple_guest_as_string().unwrap();
+
+        // Create a temporary directory with a test file
+        let temp_dir = tempdir().unwrap();
+        let test_file_path = temp_dir.path().join("test.txt");
+        let mut file = fs::File::create(&test_file_path).unwrap();
+        file.write_all(b"Hello, HyperlightFS!").unwrap();
+
+        // Build a HyperlightFS image
+        let fs_image = HyperlightFSBuilder::new()
+            .add_file(&test_file_path, "/test.txt")
+            .unwrap()
+            .build()
+            .unwrap();
+
+        // Create sandbox and set the FS image
+        let mut sandbox =
+            UninitializedSandbox::new(GuestBinary::FilePath(binary_path), None).unwrap();
+
+        assert!(sandbox.hyperlight_fs.is_none());
+
+        sandbox.set_hyperlight_fs(Arc::new(fs_image));
+
+        assert!(sandbox.hyperlight_fs.is_some());
+
+        // Verify we can still evolve the sandbox
+        let _evolved: MultiUseSandbox = sandbox.evolve().unwrap();
     }
 }

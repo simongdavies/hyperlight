@@ -20,7 +20,8 @@ use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
 use hyperlight_common::outb::Exception;
 use hyperlight_guest::exit::write_abort;
 
-use crate::HyperlightAbortWriter;
+use crate::paging::{invlpg, map_page_readonly};
+use crate::{GUEST_HANDLE, HyperlightAbortWriter};
 
 /// Exception information pushed onto the stack by the CPU during an excpection.
 ///
@@ -125,6 +126,37 @@ pub(crate) extern "C" fn hl_exception_handler(
 
     let saved_rip = unsafe { (&raw const (*exn_info).rip).read_volatile() };
     let error_code = unsafe { (&raw const (*exn_info).error_code).read_volatile() };
+
+    // Handle HyperlightFS page faults (vector 14 = page fault)
+    // We create PTEs on-demand for the FS files region to avoid pre-mapping all pages.
+    // Note: The manifest region has PTEs created statically by the host since it's
+    // always accessed during initialization and is small.
+    if exception_number == 14 {
+        // Only handle "page not present" faults (error code bit 0 = 0).
+        // If the page is present, this is a permission violation, not a missing PTE.
+        if (error_code & 1) == 0 {
+            // Check if we have an FS files region configured in the PEB
+            let handle = unsafe { GUEST_HANDLE };
+            if let Some(peb) = handle.peb() {
+                let fs_region = unsafe { (*peb).guest_fs_region };
+                // Short-circuit if no FS configured (size == 0)
+                if fs_region.size > 0 {
+                    let fs_base = fs_region.ptr;
+                    let fs_end = fs_base + fs_region.size;
+                    // Check if the faulting address is within the FS files region
+                    if page_fault_address >= fs_base && page_fault_address < fs_end {
+                        // Map the faulting page (page-aligned, identity mapped, read-only, no execute)
+                        let page_addr = page_fault_address & !0xFFF;
+                        unsafe {
+                            map_page_readonly(page_addr, page_addr);
+                            invlpg(page_addr);
+                        }
+                        return; // Handled successfully, resume guest execution
+                    }
+                }
+            }
+        }
+    }
 
     // Check for registered user handlers (only for architecture-defined vectors 0-30)
     if exception_number < 31 {

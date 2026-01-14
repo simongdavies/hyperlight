@@ -39,9 +39,9 @@ use crate::HyperlightError::{self, SnapshotSandboxMismatch};
 use crate::func::{ParameterTuple, SupportedReturnType};
 use crate::hypervisor::InterruptHandle;
 use crate::hypervisor::hyperlight_vm::HyperlightVm;
-use crate::mem::memory_region::MemoryRegion;
 #[cfg(unix)]
-use crate::mem::memory_region::{MemoryRegionFlags, MemoryRegionType};
+use crate::mem::memory_region::MemoryRegionType;
+use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags};
 use crate::mem::mgr::SandboxMemoryManager;
 use crate::mem::ptr::RawPtr;
 use crate::mem::shared_mem::HostSharedMemory;
@@ -473,7 +473,7 @@ impl MultiUseSandbox {
     /// for the lifetime of `self`.
     #[instrument(err(Debug), skip(self, rgn), parent = Span::current())]
     #[cfg(target_os = "linux")]
-    unsafe fn map_region(&mut self, rgn: &MemoryRegion) -> Result<()> {
+    pub(crate) unsafe fn map_region(&mut self, rgn: &MemoryRegion) -> Result<()> {
         if self.poisoned {
             return Err(crate::HyperlightError::PoisonedSandbox);
         }
@@ -495,16 +495,31 @@ impl MultiUseSandbox {
         Ok(())
     }
 
-    /// Map the contents of a file into the guest at a particular address
+    /// Map the contents of a file into the guest at a particular address.
     ///
-    /// Returns the length of the mapping in bytes.
+    /// The file is memory-mapped with copy-on-write semantics and made visible
+    /// to the guest at the specified address with the given permission flags.
+    ///
+    /// Returns the length of the mapping in bytes (page-aligned).
+    ///
+    /// # Arguments
+    ///
+    /// * `fp` - Path to the file to map
+    /// * `guest_base` - Guest address where the file should be mapped
+    /// * `flags` - Memory permission flags for the guest mapping
     ///
     /// ## Poisoned Sandbox
     ///
     /// This method will return [`crate::HyperlightError::PoisonedSandbox`] if the sandbox
     /// is currently poisoned. Use [`restore()`](Self::restore) to recover from a poisoned state.
-    #[instrument(err(Debug), skip(self, _fp, _guest_base), parent = Span::current())]
-    pub fn map_file_cow(&mut self, _fp: &Path, _guest_base: u64) -> Result<u64> {
+    #[cfg_attr(windows, allow(unused_variables))]
+    #[instrument(err(Debug), skip(self, fp, guest_base, flags), parent = Span::current())]
+    pub fn map_file_cow(
+        &mut self,
+        fp: &Path,
+        guest_base: u64,
+        flags: MemoryRegionFlags,
+    ) -> Result<u64> {
         if self.poisoned {
             return Err(crate::HyperlightError::PoisonedSandbox);
         }
@@ -512,14 +527,23 @@ impl MultiUseSandbox {
         log_then_return!("mmap'ing a file into the guest is not yet supported on Windows");
         #[cfg(unix)]
         unsafe {
-            let file = std::fs::File::options().read(true).write(true).open(_fp)?;
+            // Determine host mmap protection based on guest flags
+            let mut prot = libc::PROT_READ;
+            if flags.contains(MemoryRegionFlags::WRITE) {
+                prot |= libc::PROT_WRITE;
+            }
+            if flags.contains(MemoryRegionFlags::EXECUTE) {
+                prot |= libc::PROT_EXEC;
+            }
+
+            let file = std::fs::File::options().read(true).open(fp)?;
             let file_size = file.metadata()?.st_size();
             let page_size = page_size::get();
             let size = (file_size as usize).div_ceil(page_size) * page_size;
             let base = libc::mmap(
                 std::ptr::null_mut(),
                 size,
-                libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+                prot,
                 libc::MAP_PRIVATE,
                 file.as_raw_fd(),
                 0,
@@ -530,9 +554,9 @@ impl MultiUseSandbox {
 
             if let Err(err) = self.map_region(&MemoryRegion {
                 host_region: base as usize..base.wrapping_add(size) as usize,
-                guest_region: _guest_base as usize.._guest_base as usize + size,
-                flags: MemoryRegionFlags::READ | MemoryRegionFlags::EXECUTE,
-                region_type: MemoryRegionType::Heap,
+                guest_region: guest_base as usize..guest_base as usize + size,
+                flags,
+                region_type: MemoryRegionType::HyperlightFS,
             }) {
                 libc::munmap(base, size);
                 return Err(err);
@@ -842,7 +866,9 @@ mod tests {
         #[cfg(target_os = "linux")]
         {
             let temp_file = std::env::temp_dir().join("test_poison_map_file.bin");
-            let res = sbox.map_file_cow(&temp_file, 0x0).unwrap_err();
+            let res = sbox
+                .map_file_cow(&temp_file, 0x0, MemoryRegionFlags::READ)
+                .unwrap_err();
             assert!(matches!(res, HyperlightError::PoisonedSandbox));
             std::fs::remove_file(&temp_file).ok(); // Clean up
         }

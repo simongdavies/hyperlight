@@ -49,4 +49,10 @@ pub struct HyperlightPEB {
     pub guest_heap: GuestMemoryRegion,
     pub guest_stack: GuestStack,
     pub host_function_definitions: GuestMemoryRegion,
+    /// The HyperlightFS mapped files region (read-only, no execute).
+    /// If size is 0, no filesystem is available.
+    pub guest_fs_region: GuestMemoryRegion,
+    /// The HyperlightFS manifest (FlatBuffer metadata for file lookup).
+    /// If size is 0, no manifest is available (use with guest_fs_region).
+    pub guest_fs_manifest: GuestMemoryRegion,
 }

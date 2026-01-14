@@ -111,6 +111,8 @@ pub(crate) struct SandboxMemoryLayout {
     peb_init_data_offset: usize,
     peb_heap_data_offset: usize,
     peb_guest_stack_data_offset: usize,
+    peb_guest_fs_region_offset: usize,
+    peb_guest_fs_manifest_offset: usize,
 
     // The following are the actual values
     // that are written to the PEB struct
@@ -214,6 +216,14 @@ impl Debug for SandboxMemoryLayout {
                 "Guest Code Offset",
                 &format_args!("{:#x}", self.guest_code_offset),
             )
+            .field(
+                "Guest FS Region Offset",
+                &format_args!("{:#x}", self.peb_guest_fs_region_offset),
+            )
+            .field(
+                "Guest FS Manifest Offset",
+                &format_args!("{:#x}", self.peb_guest_fs_manifest_offset),
+            )
             .finish()
     }
 }
@@ -258,6 +268,9 @@ impl SandboxMemoryLayout {
         let peb_guest_stack_data_offset = peb_offset + offset_of!(HyperlightPEB, guest_stack);
         let peb_host_function_definitions_offset =
             peb_offset + offset_of!(HyperlightPEB, host_function_definitions);
+        let peb_guest_fs_region_offset = peb_offset + offset_of!(HyperlightPEB, guest_fs_region);
+        let peb_guest_fs_manifest_offset =
+            peb_offset + offset_of!(HyperlightPEB, guest_fs_manifest);
 
         // The following offsets are the actual values that relate to memory layout,
         // which are written to PEB struct
@@ -300,6 +313,8 @@ impl SandboxMemoryLayout {
             peb_init_data_offset,
             peb_heap_data_offset,
             peb_guest_stack_data_offset,
+            peb_guest_fs_region_offset,
+            peb_guest_fs_manifest_offset,
             sandbox_memory_config: cfg,
             code_size,
             host_function_definitions_buffer_offset,
@@ -432,6 +447,86 @@ impl SandboxMemoryLayout {
         // The userStackAddress is immediately after the
         // minUserStackAddress (top of user stack) field in the `GuestStackData` struct which is a `u64`.
         self.get_min_guest_stack_address_offset() + size_of::<u64>()
+    }
+
+    /// Get the offset in guest memory to the guest FS region size.
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
+    fn get_guest_fs_region_size_offset(&self) -> usize {
+        // The size is the first field in the `GuestMemoryRegion` struct
+        self.peb_guest_fs_region_offset
+    }
+
+    /// Get the offset in guest memory to the guest FS region pointer.
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
+    pub(crate) fn get_guest_fs_region_pointer_offset(&self) -> usize {
+        // The pointer is immediately after the size field in `GuestMemoryRegion` which is a `u64`.
+        self.get_guest_fs_region_size_offset() + size_of::<u64>()
+    }
+
+    /// Write the guest FS region (pointer and size) to the PEB.
+    ///
+    /// This is called during sandbox evolution when HyperlightFS is configured.
+    /// The guest can read this region from the PEB to locate the mapped files.
+    ///
+    /// # Arguments
+    ///
+    /// * `shared_mem` - The shared memory to write to (must support exclusivity)
+    /// * `guest_address` - The guest address where the FS region starts
+    /// * `size` - The total size of the FS region in bytes
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
+    pub(crate) fn set_guest_fs_region<S: SharedMemory>(
+        &self,
+        shared_mem: &mut S,
+        guest_address: u64,
+        size: u64,
+    ) -> Result<()> {
+        let size_offset = self.get_guest_fs_region_size_offset();
+        let ptr_offset = self.get_guest_fs_region_pointer_offset();
+        shared_mem.with_exclusivity(|excl| {
+            excl.write_u64(size_offset, size)?;
+            excl.write_u64(ptr_offset, guest_address)?;
+            Ok(())
+        })?
+    }
+
+    /// Get the offset in guest memory to the guest FS manifest size.
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
+    pub(crate) fn get_guest_fs_manifest_size_offset(&self) -> usize {
+        // The size is the first field in the `GuestMemoryRegion` struct
+        self.peb_guest_fs_manifest_offset
+    }
+
+    /// Get the offset in guest memory to the guest FS manifest pointer.
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
+    pub(crate) fn get_guest_fs_manifest_pointer_offset(&self) -> usize {
+        // The pointer is immediately after the size field in `GuestMemoryRegion` which is a `u64`.
+        self.get_guest_fs_manifest_size_offset() + size_of::<u64>()
+    }
+
+    /// Write the guest FS manifest (pointer and size) to the PEB.
+    ///
+    /// This is called during sandbox evolution when HyperlightFS is configured.
+    /// The guest can read this to locate the FlatBuffer manifest with file metadata.
+    ///
+    /// # Arguments
+    ///
+    /// * `shared_mem` - The shared memory to write to (must support exclusivity)
+    /// * `guest_address` - The guest address where the manifest is stored
+    /// * `size` - The size of the manifest in bytes
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
+    pub(crate) fn set_guest_fs_manifest<S: SharedMemory>(
+        &self,
+        shared_mem: &mut S,
+        guest_address: u64,
+        size: u64,
+    ) -> Result<()> {
+        let size_offset = self.get_guest_fs_manifest_size_offset();
+        let ptr_offset = self.get_guest_fs_manifest_pointer_offset();
+        shared_mem.with_exclusivity(|excl| {
+            excl.write_u64(size_offset, size)?;
+            excl.write_u64(ptr_offset, guest_address)?;
+            Ok(())
+        })?
     }
 
     /// Get the total size of guest memory in `self`'s memory
@@ -805,6 +900,15 @@ impl SandboxMemoryLayout {
             get_address!(guest_user_stack_buffer_offset) + self.stack_size as u64;
 
         shared_mem.write_u64(self.get_user_stack_pointer_offset(), start_of_user_stack)?;
+
+        // Set up guest FS region (initialized to zero - no FS by default)
+        // The actual address/size will be written later if HyperlightFS is configured
+        shared_mem.write_u64(self.get_guest_fs_region_size_offset(), 0)?;
+        shared_mem.write_u64(self.get_guest_fs_region_pointer_offset(), 0)?;
+
+        // Set up guest FS manifest (initialized to zero - no FS by default)
+        shared_mem.write_u64(self.get_guest_fs_manifest_size_offset(), 0)?;
+        shared_mem.write_u64(self.get_guest_fs_manifest_pointer_offset(), 0)?;
 
         // End of setting up the PEB
 

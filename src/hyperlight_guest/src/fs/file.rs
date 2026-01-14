@@ -124,7 +124,7 @@ impl Read for File {
 
         // SAFETY: The host has mapped file data at guest_address.
         // We trust that the manifest contains valid addresses and sizes.
-        // If these are corrupted then the guest may crash or read invalid data but it cannot access data in 
+        // If these are corrupted then the guest may crash or read invalid data but it cannot access data in
         //the host that hasn't been explicitly mapped and we dont allow dynamic allocations so this is safe.
         // The guest is single-threaded so no data races.
         unsafe {
