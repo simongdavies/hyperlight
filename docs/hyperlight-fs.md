@@ -128,7 +128,11 @@ let fs = builder.build()?;
 
 ## Guest API
 
-The guest filesystem API is in `hyperlight_guest::fs`:
+The guest filesystem API is available in both Rust and C.
+
+### Rust API
+
+The Rust guest filesystem API is in `hyperlight_guest::fs`:
 
 ```rust
 use hyperlight_guest::fs;
@@ -153,6 +157,50 @@ if fs::is_initialized() {
     }
 }
 ```
+
+### C API
+
+The C guest API provides libc-compatible functions via `hyperlight_guest.h`:
+
+```c
+#include "hyperlight_guest.h"
+
+// Check if filesystem is available
+if (hl_fs_initialized()) {
+    // Open a file (read-only only)
+    int fd = open("/config.json", O_RDONLY);
+    if (fd >= 0) {
+        // Get file size via lseek
+        int64_t size = lseek(fd, 0, SEEK_END);
+        lseek(fd, 0, SEEK_SET);
+        
+        // Read file contents
+        uint8_t *buf = malloc(size);
+        int64_t bytes_read = read(fd, buf, size);
+        
+        close(fd);
+        free(buf);
+    }
+    
+    // Get file metadata
+    hl_Stat st;
+    if (stat("/config.json", &st) == 0) {
+        // st.size contains the file size
+    }
+}
+```
+
+**Available C functions:**
+
+| Function | Description |
+|----------|-------------|
+| `open(path, flags)` | Open file (flags must be `O_RDONLY`) |
+| `close(fd)` | Close file descriptor |
+| `read(fd, buf, n)` | Read up to n bytes |
+| `lseek(fd, off, whence)` | Seek (`SEEK_SET`, `SEEK_CUR`, `SEEK_END`) |
+| `fstat(fd, st)` | Get metadata by fd |
+| `stat(path, st)` | Get metadata by path |
+| `hl_fs_initialized()` | Check if FS is available |
 
 The filesystem is automatically initialized during guest startup if the host configured HyperlightFS.
 
@@ -230,6 +278,29 @@ Options:
 - `-v, --verbose` — Include directory entries in output
 - `-h, --help` — Show usage information
 
+### Stress Test
+
+Run a stress test with large files and random reads:
+
+```bash
+# Default: 1GB file with Rust guest
+cargo run --release --example hyperlight_fs_stress
+
+# 512MB file with C guest
+cargo run --release --example hyperlight_fs_stress -- --size 512 --guest c
+
+# Verbose output showing each read verification
+cargo run --release --example hyperlight_fs_stress -- --size 64 --verbose
+```
+
+Options:
+- `-s, --size <MB>` — Test file size in megabytes (default: 1024)
+- `-g, --guest <TYPE>` — Guest type: `rust` or `c` (default: rust)
+- `-k, --keep` — Keep test file after completion
+- `-v, --verbose` — Show each chunk verification
+
+The stress test creates a file with random data, maps it into a sandbox, then has the guest read 10 random 256-byte chunks. Each chunk's offset is selected using an RDTSC-seeded LCG, and the host verifies that the data matches.
+
 ## Path Requirements
 
 ### Host Paths
@@ -284,6 +355,13 @@ HyperlightFSBuilder::new()
 |----------|--------|
 | Linux | ✅ Full support |
 | Windows | ❌ Not yet implemented |
+
+### Guest Language Support
+
+| Language | Status |
+|----------|--------|
+| Rust | ✅ Full support (`hyperlight_guest::fs`) |
+| C | ✅ Full support (libc-compatible API) |
 
 ### File Types
 

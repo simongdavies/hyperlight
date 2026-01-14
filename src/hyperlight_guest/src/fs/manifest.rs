@@ -140,16 +140,6 @@ pub fn lookup_file(path: &str) -> Result<(usize, &'static InodeData), FsError> {
     Ok((idx, inode))
 }
 
-/// Look up a directory by guest path.
-#[cfg(test)]
-pub fn lookup_dir(path: &str) -> Result<(usize, &'static InodeData), FsError> {
-    let (idx, inode) = lookup(path)?;
-    if inode.is_file() {
-        return Err(FsError::NotADirectory);
-    }
-    Ok((idx, inode))
-}
-
 /// List children of a directory.
 pub fn list_dir(path: &str) -> Result<Vec<&'static InodeData>, FsError> {
     let (parent_idx, parent_inode) = lookup(path)?;

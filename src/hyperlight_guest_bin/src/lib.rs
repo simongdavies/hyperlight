@@ -251,7 +251,7 @@ pub extern "C" fn entrypoint(peb_address: u64, seed: u64, ops: u64, max_log_leve
                 // The manifest is in memory mapped by the host, but the guest page tables
                 // don't have entries for it yet. We create them here before fs::init reads
                 // the manifest data.
-                let manifest_start = manifest.ptr as u64;
+                let manifest_start = manifest.ptr;
                 let manifest_end = manifest_start + manifest.size;
                 let page_size = hyperlight_common::mem::PAGE_SIZE;
                 let manifest_start_page = manifest_start & !0xFFF;
