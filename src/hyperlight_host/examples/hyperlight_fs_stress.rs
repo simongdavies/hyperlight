@@ -53,6 +53,10 @@ struct Args {
     #[arg(short, long, default_value = "1024")]
     size: u64,
 
+    /// Guest type to use: "rust" or "c".
+    #[arg(short, long, default_value = "rust")]
+    guest: String,
+
     /// Keep the test file after completion (for debugging).
     #[arg(short, long)]
     keep: bool,
@@ -98,8 +102,17 @@ fn format_size(bytes: u64) -> String {
 fn run(args: Args) -> Result<(), String> {
     let file_size = args.size * 1024 * 1024; // Convert MB to bytes
 
+    // Validate guest type
+    if args.guest != "rust" && args.guest != "c" {
+        return Err(format!(
+            "Invalid guest type '{}', use 'rust' or 'c'",
+            args.guest
+        ));
+    }
+
     println!("HyperlightFS Stress Test");
     println!("========================");
+    println!("Guest type: {}", args.guest);
     println!(
         "File size: {} ({} bytes)",
         format_size(file_size),
@@ -169,8 +182,12 @@ fn run(args: Args) -> Result<(), String> {
     println!("Creating sandbox...");
     let start = Instant::now();
 
-    let guest_path = hyperlight_testing::simple_guest_as_string()
-        .map_err(|e| format!("Guest not found: {}", e))?;
+    let guest_path = if args.guest == "c" {
+        hyperlight_testing::c_simple_guest_as_string()
+    } else {
+        hyperlight_testing::simple_guest_as_string()
+    }
+    .map_err(|e| format!("Guest not found: {}", e))?;
 
     let mut uninitialized_sandbox =
         UninitializedSandbox::new(GuestBinary::FilePath(guest_path), None)

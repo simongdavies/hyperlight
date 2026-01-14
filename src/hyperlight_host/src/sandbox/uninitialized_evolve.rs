@@ -413,7 +413,7 @@ pub(crate) fn set_up_hypervisor_partition(
 
 #[cfg(test)]
 mod tests {
-    use hyperlight_testing::simple_guest_as_string;
+    use hyperlight_testing::{c_simple_guest_as_string, simple_guest_as_string};
 
     use super::evolve_impl_multi_use;
     use crate::UninitializedSandbox;
@@ -521,6 +521,16 @@ mod tests {
         );
     }
 
+    /// Returns the simpleguest path (Rust or C) based on GUEST env var.
+    fn get_c_or_rust_simpleguest_path() -> String {
+        let guest_type = std::env::var("GUEST").unwrap_or("rust".to_string());
+        match guest_type.as_str() {
+            "rust" => simple_guest_as_string().unwrap(),
+            "c" => c_simple_guest_as_string().unwrap(),
+            _ => panic!("Unknown guest type '{guest_type}', use either 'rust' or 'c'"),
+        }
+    }
+
     /// Integration test: Guest reads file content from HyperlightFS.
     ///
     /// This test verifies the full end-to-end pipeline:
@@ -529,6 +539,8 @@ mod tests {
     /// 3. Guest entrypoint initializes the FS from the PEB manifest
     /// 4. Guest function reads file content via `hyperlight_guest::fs`
     /// 5. Host verifies returned content matches original
+    ///
+    /// Works with both Rust and C guests (set GUEST=c for C guest).
     #[cfg(unix)]
     #[test]
     fn test_guest_reads_file_from_hyperlight_fs() {
@@ -565,8 +577,8 @@ mod tests {
             .build()
             .unwrap();
 
-        // Create and evolve sandbox with HyperlightFS
-        let guest_bin_path = simple_guest_as_string().unwrap();
+        // Create and evolve sandbox with HyperlightFS (supports both Rust and C guests)
+        let guest_bin_path = get_c_or_rust_simpleguest_path();
         let mut u_sbox =
             UninitializedSandbox::new(GuestBinary::FilePath(guest_bin_path), None).unwrap();
         u_sbox.set_hyperlight_fs(Arc::new(fs_image));
@@ -601,9 +613,11 @@ mod tests {
     }
 
     /// Test that sandbox without HyperlightFS reports FS as not initialized.
+    ///
+    /// Works with both Rust and C guests (set GUEST=c for C guest).
     #[test]
     fn test_guest_fs_not_initialized_without_hyperlight_fs() {
-        let guest_bin_path = simple_guest_as_string().unwrap();
+        let guest_bin_path = get_c_or_rust_simpleguest_path();
         let u_sbox =
             UninitializedSandbox::new(GuestBinary::FilePath(guest_bin_path), None).unwrap();
         let mut sandbox = evolve_impl_multi_use(u_sbox).unwrap();

@@ -35,7 +35,7 @@ limitations under the License.
 
 mod error;
 mod fd;
-mod file;
+pub mod file;
 mod manifest;
 
 pub use error::FsError;

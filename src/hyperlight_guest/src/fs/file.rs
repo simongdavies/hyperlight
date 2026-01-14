@@ -45,8 +45,14 @@ pub struct File {
 impl File {
     /// Create a new File from a file descriptor.
     ///
-    /// This is called internally by `fs::open()`.
-    pub(crate) fn from_fd(fd: i32) -> Self {
+    /// # Safety
+    /// The caller must ensure `fd` is a valid file descriptor obtained
+    /// from `fs::open()` or equivalent. Using an invalid fd may lead
+    /// to undefined behavior when reading.
+    ///
+    /// This is primarily for C API interop where file descriptors are
+    /// passed as integers.
+    pub fn from_fd(fd: i32) -> Self {
         Self { fd }
     }
 

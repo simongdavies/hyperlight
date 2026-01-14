@@ -326,6 +326,147 @@ const char* guest_fn_checks_if_host_returns_string_value() {
   return hl_get_host_return_value_as_String();
 }
 
+// Simple LCG random number generator
+static uint64_t lcg_state = 0;
+
+static uint64_t rdtsc(void) {
+    uint32_t lo, hi;
+    __asm__ __volatile__ ("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+static uint64_t lcg_next(void) {
+    lcg_state = lcg_state * 6364136223846793005ULL + 1;
+    return lcg_state;
+}
+
+// RandomReadChunks - reads 10 random 256-byte chunks from a file
+// Returns: Vec<u8> where each sample is 8 bytes offset + 256 bytes data
+// Total: 10 * 264 = 2640 bytes
+#define NUM_SAMPLES 10
+#define CHUNK_SIZE 256
+#define SAMPLE_SIZE (8 + CHUNK_SIZE)
+
+hl_Vec *random_read_chunks(const hl_FunctionCall *params) {
+    const char *path = params->parameters[0].value.String;
+    
+    // Check if FS is initialized
+    if (!hl_fs_initialized()) {
+        return hl_flatbuffer_result_from_Bytes(NULL, 0);
+    }
+    
+    // Open file
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        return hl_flatbuffer_result_from_Bytes(NULL, 0);
+    }
+    
+    // Get file size via lseek
+    int64_t file_size = lseek(fd, 0, SEEK_END);
+    if (file_size < 0) {
+        close(fd);
+        return hl_flatbuffer_result_from_Bytes(NULL, 0);
+    }
+    
+    // Allocate result buffer
+    uint8_t *result = malloc(NUM_SAMPLES * SAMPLE_SIZE);
+    if (!result) {
+        close(fd);
+        return hl_flatbuffer_result_from_Bytes(NULL, 0);
+    }
+    
+    // Seed RNG with RDTSC
+    lcg_state = rdtsc();
+    
+    // Max valid offset
+    uint64_t max_offset = (file_size > CHUNK_SIZE) ? (file_size - CHUNK_SIZE) : 0;
+    
+    for (int i = 0; i < NUM_SAMPLES; i++) {
+        // Get random offset
+        uint64_t random_val = lcg_next();
+        uint64_t offset = (max_offset > 0) ? (random_val % max_offset) : 0;
+        
+        // Seek to offset
+        if (lseek(fd, (int64_t)offset, SEEK_SET) < 0) {
+            free(result);
+            close(fd);
+            return hl_flatbuffer_result_from_Bytes(NULL, 0);
+        }
+        
+        // Write offset to result (little-endian)
+        int sample_start = i * SAMPLE_SIZE;
+        for (int j = 0; j < 8; j++) {
+            result[sample_start + j] = (offset >> (j * 8)) & 0xFF;
+        }
+        
+        // Read chunk data
+        int data_start = sample_start + 8;
+        int64_t bytes_read = read(fd, &result[data_start], CHUNK_SIZE);
+        if (bytes_read < 0) {
+            free(result);
+            close(fd);
+            return hl_flatbuffer_result_from_Bytes(NULL, 0);
+        }
+    }
+    
+    close(fd);
+    return hl_flatbuffer_result_from_Bytes(result, NUM_SAMPLES * SAMPLE_SIZE);
+}
+
+// Returns 1 if HyperlightFS is initialized, 0 otherwise
+int is_fs_initialized(void) {
+    return hl_fs_initialized() ? 1 : 0;
+}
+
+// Reads a file from HyperlightFS and returns its contents.
+// Returns empty vec if file not found or FS not initialized.
+hl_Vec *read_file(const hl_FunctionCall *params) {
+    const char *path = params->parameters[0].value.String;
+    
+    // Return empty if FS not initialized
+    if (!hl_fs_initialized()) {
+        return hl_flatbuffer_result_from_Bytes(NULL, 0);
+    }
+    
+    // Open file
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        return hl_flatbuffer_result_from_Bytes(NULL, 0);
+    }
+    
+    // Get file size via lseek
+    int64_t file_size = lseek(fd, 0, SEEK_END);
+    if (file_size < 0) {
+        close(fd);
+        return hl_flatbuffer_result_from_Bytes(NULL, 0);
+    }
+    
+    // Seek back to start
+    if (lseek(fd, 0, SEEK_SET) < 0) {
+        close(fd);
+        return hl_flatbuffer_result_from_Bytes(NULL, 0);
+    }
+    
+    // Allocate buffer for file contents
+    uint8_t *buffer = malloc((size_t)file_size);
+    if (!buffer) {
+        close(fd);
+        return hl_flatbuffer_result_from_Bytes(NULL, 0);
+    }
+    
+    // Read entire file
+    int64_t bytes_read = read(fd, buffer, (size_t)file_size);
+    close(fd);
+    
+    if (bytes_read < 0) {
+        free(buffer);
+        return hl_flatbuffer_result_from_Bytes(NULL, 0);
+    }
+    
+    return hl_flatbuffer_result_from_Bytes(buffer, (size_t)bytes_read);
+}
+
+HYPERLIGHT_WRAP_FUNCTION(is_fs_initialized, Int, 0)
 HYPERLIGHT_WRAP_FUNCTION(guest_fn_checks_if_host_returns_float_value, Float, 2, Float, Float)
 HYPERLIGHT_WRAP_FUNCTION(guest_fn_checks_if_host_returns_double_value, Double, 2, Double, Double)
 HYPERLIGHT_WRAP_FUNCTION(guest_fn_checks_if_host_returns_string_value, String, 0)
@@ -403,6 +544,10 @@ void hyperlight_main(void)
     // HYPERLIGHT_REGISTER_FUNCTION macro does not work for functions that return VecBytes,
     // so we use hl_register_function_definition directly
     hl_register_function_definition("24K_in_8K_out", twenty_four_k_in_eight_k_out, 1, (hl_ParameterType[]){hl_ParameterType_VecBytes}, hl_ReturnType_VecBytes);
+    // HyperlightFS functions
+    HYPERLIGHT_REGISTER_FUNCTION("IsFsInitialized", is_fs_initialized);
+    hl_register_function_definition("ReadFile", read_file, 1, (hl_ParameterType[]){hl_ParameterType_String}, hl_ReturnType_VecBytes);
+    hl_register_function_definition("RandomReadChunks", random_read_chunks, 1, (hl_ParameterType[]){hl_ParameterType_String}, hl_ReturnType_VecBytes);
 }
 
 // This dispatch function is only used when the host dispatches a guest function
