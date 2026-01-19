@@ -108,5 +108,8 @@ pub use builder::{BuildManifest, DirectoryBuilder, HyperlightFSBuilder, Manifest
 pub use config::{
     ConfigError, DirectoryMapping, FileMapping as ConfigFileMapping, HyperlightFsConfig,
 };
-pub use fat_image::{FatImage, MAX_FAT_IMAGE_SIZE, MIN_FAT_IMAGE_SIZE};
+pub use fat_image::{
+    FatEntry, FatFileReader, FatFileWriter, FatImage, FatStat, MAX_FAT_IMAGE_SIZE,
+    MIN_FAT_IMAGE_SIZE,
+};
 pub use image::{FileMapping, HyperlightFSImage};

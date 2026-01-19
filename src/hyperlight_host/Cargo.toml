@@ -47,7 +47,7 @@ crossbeam-channel = "0.5.15"
 thiserror = "2.0.17"
 fatfs = "0.3"
 fs2 = "0.4"
-chrono = { version = "0.4", optional = true }
+chrono = "0.4"
 anyhow = "1.0"
 metrics = "0.24.3"
 serde = { version = "1.0", features = ["derive"] }
@@ -135,7 +135,7 @@ executable_heap = []
 # This feature enables printing of debug information to stdout in debug builds
 print_debug = []
 # Dumps the VM state to a file on unexpected errors or crashes. The path of the file will be printed on stdout and logged.
-crashdump = ["dep:chrono"]
+crashdump = []
 trace_guest = ["dep:opentelemetry", "dep:tracing-opentelemetry", "dep:hyperlight-guest-tracing", "hyperlight-common/trace_guest"]
 mem_profile = [ "trace_guest", "dep:framehop", "dep:fallible-iterator", "hyperlight-common/mem_profile" ]
 kvm = ["dep:kvm-bindings", "dep:kvm-ioctls"]

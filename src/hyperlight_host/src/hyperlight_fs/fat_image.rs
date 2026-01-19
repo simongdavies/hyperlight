@@ -39,39 +39,232 @@ limitations under the License.
 //!
 //! ```ignore
 //! use hyperlight_host::hyperlight_fs::FatImage;
+//! use std::io::{Read, Write};
 //!
 //! // Create a new temporary FAT image (1MB)
-//! let image = FatImage::create_temp(1024 * 1024)?;
+//! let mut image = FatImage::create_temp(1024 * 1024)?;
 //!
 //! // Or open an existing image (acquires exclusive lock)
-//! let image = FatImage::open("/path/to/existing.fat")?;
+//! let mut image = FatImage::open("/path/to/existing.fat")?;
 //!
 //! // Get the mmap'd region for guest memory setup
 //! let ptr = image.as_ptr();
 //! let size = image.size();
+//!
+//! let mut writer = image.create_file("/hello.txt")?;
+//! writer.write_all(b"Hello, 1985!")?;
+//! drop(writer); // Release borrow
+//!
+//! let mut reader = image.open_file("/hello.txt")?;
+//! let mut contents = Vec::new();
+//! reader.read_to_end(&mut contents)?;
 //! ```
 
 use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+use chrono::NaiveDateTime;
 use fs2::FileExt;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::Result;
 use crate::error::HyperlightError;
+
+/// A file handle for reading from a FAT image.
+///
+/// Provides streaming access to file contents without loading the entire file
+/// into memory.
+///
+/// This type implements [`Read`] and [`Seek`], so you can use it with standard
+/// Rust I/O idioms like `BufReader`, `io::copy`, etc.
+///
+/// # Lifetime
+///
+/// The `FatFileReader` borrows from the [`FatImage`] that created it. You must
+/// drop the reader before you can do other operations on the image.
+///
+/// # Example
+///
+/// ```ignore
+/// use std::io::{BufRead, BufReader};
+///
+/// let reader = image.open_file("/config.txt")?;
+/// let buf_reader = BufReader::new(reader);
+/// for line in buf_reader.lines() {
+///     println!("{}", line?);
+/// }
+/// ```
+pub struct FatFileReader<'a> {
+    file: fatfs::File<'a, std::io::Cursor<&'static mut [u8]>>,
+    /// Path to the file, used in `Debug` output.
+    path: String,
+}
+
+impl<'a> Read for FatFileReader<'a> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.file.read(buf)
+    }
+}
+
+impl<'a> Seek for FatFileReader<'a> {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        self.file.seek(pos)
+    }
+}
+
+impl std::fmt::Debug for FatFileReader<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FatFileReader")
+            .field("path", &self.path)
+            .finish()
+    }
+}
+
+/// A file handle for writing to a FAT image.
+///
+/// Provides streaming write access to files without buffering the entire
+/// contents in memory.
+///
+/// This type implements [`Write`] and [`Seek`], so you can use it with standard
+/// Rust I/O idioms like `BufWriter`, `io::copy`, etc.
+///
+/// # Lifetime
+///
+/// The `FatFileWriter` borrows from the [`FatImage`] that created it. You must
+/// drop the writer before you can do other operations on the image.
+///
+/// # Flush on Drop
+///
+/// The writer automatically flushes on drop to ensure data is persisted to the
+/// mmap'd region. However, for error handling you should call `flush()` explicitly.
+///
+/// # Example
+///
+/// ```ignore
+/// use std::io::Write;
+///
+/// let mut writer = image.create_file("/output.bin")?;
+/// writer.write_all(b"Hello, world!")?;
+/// writer.flush()?; // Explicit flush for error handling
+/// drop(writer);    // Or let it drop, which also flushes
+/// ```
+#[must_use = "writer must be used to write data; dropping immediately writes nothing"]
+pub struct FatFileWriter<'a> {
+    file: fatfs::File<'a, std::io::Cursor<&'static mut [u8]>>,
+    /// Path to the file, used in `Debug` output and error logging on drop.
+    path: String,
+}
+
+impl<'a> Write for FatFileWriter<'a> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.file.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
+impl<'a> Seek for FatFileWriter<'a> {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        self.file.seek(pos)
+    }
+}
+
+impl Drop for FatFileWriter<'_> {
+    fn drop(&mut self) {
+        // Best-effort flush on drop - can't return errors here
+        if let Err(e) = self.file.flush() {
+            error!(path = %self.path, error = %e, "Failed to flush file on drop");
+        }
+    }
+}
+
+impl std::fmt::Debug for FatFileWriter<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FatFileWriter")
+            .field("path", &self.path)
+            .finish()
+    }
+}
+
+/// An entry from a FAT directory listing, representing either a file or subdirectory.
+///
+/// Returned by [`FatImage::read_dir`].
+///
+/// # Snapshot Semantics
+///
+/// This struct represents a **point-in-time snapshot** of the directory entry.
+/// If you modify the file (e.g., via [`FatImage::create_file`]) after calling
+/// [`FatImage::read_dir`], the metadata in `stat` will be stale. Use
+/// [`FatImage::stat`] to get current metadata if needed.
+///
+/// # Example
+///
+/// ```ignore
+/// let entries = image.read_dir("/")?;
+/// for entry in entries {
+///     if entry.stat.is_dir {
+///         println!("Directory: {}", entry.name);
+///     } else {
+///         println!("File: {} ({} bytes)", entry.name, entry.stat.size);
+///     }
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct FatEntry {
+    /// Name of the file or directory.
+    pub name: String,
+    /// Metadata (size, type, timestamps) at the time of the directory listing.
+    ///
+    /// **Note**: This is a snapshot. If the file is modified after
+    /// `read_dir()` is called, these values will be stale.
+    pub stat: FatStat,
+}
+
+/// Metadata for a file or directory returned by [`FatImage::stat`].
+///
+/// # FAT Timestamp Limitations
+///
+/// These are limitations of the FAT filesystem format itself, not our implementation:
+/// - **Created/Modified**: 2-second resolution (seconds are always even numbers)
+/// - **Accessed**: Date only - FAT stores no time component for last access
+///
+/// For `accessed`, we return midnight (00:00:00) as the time since FAT doesn't
+/// provide one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FatStat {
+    /// Size in bytes (0 for directories).
+    pub size: u64,
+    /// Whether this is a directory.
+    pub is_dir: bool,
+    /// Creation timestamp (2-second resolution).
+    pub created: Option<NaiveDateTime>,
+    /// Last modification timestamp (2-second resolution).
+    pub modified: Option<NaiveDateTime>,
+    /// Last access date. Time component is always midnight (00:00:00) because
+    /// FAT only stores the date, not the time, for last access.
+    pub accessed: Option<NaiveDateTime>,
+}
 
 // FatImage requires 64-bit pointers for mmap of large files
 #[cfg(not(target_pointer_width = "64"))]
 compile_error!("FatImage requires a 64-bit target");
 
-/// Minimum FAT image size (1MB) - FAT32 requires at least ~32KB for metadata,
-/// but we use 1MB as a practical minimum.
+/// Minimum FAT image size: 1 MiB (1,048,576 bytes).
+///
+/// FAT32 requires at least ~32KB for metadata, but we use 1 MiB as a practical
+/// minimum to ensure reasonable usable space.
 pub const MIN_FAT_IMAGE_SIZE: usize = 1_024 * 1_024;
 
-/// Maximum FAT image size (16GB) - practical limit to avoid excessive mmap usage.
-/// FAT32 itself supports up to ~2TB with 512-byte sectors, but we cap it here
-/// for sanity. The 4GB-1 limit often cited is for individual *files within*
-/// a FAT32 filesystem, not the volume size.
+/// Maximum FAT image size: 16 GiB (17,179,869,184 bytes).
+///
+/// This is a practical limit to avoid excessive mmap usage. FAT32 itself
+/// supports up to ~2TB with 512-byte sectors, but we cap it here for sanity.
+///
+/// Note: The 4GB-1 limit often cited is for individual *files within* a FAT32
+/// filesystem, not the volume size.
 pub const MAX_FAT_IMAGE_SIZE: usize = 16 * 1_024 * 1_024 * 1_024;
 
 /// A FAT filesystem image backed by an mmap'd host file.
@@ -87,8 +280,38 @@ pub const MAX_FAT_IMAGE_SIZE: usize = 16 * 1_024 * 1_024 * 1_024;
 /// 2. **Opening**: `open()` opens an existing file and acquires an exclusive lock.
 /// 3. **Usage**: `as_ptr()` and `size()` provide access for guest memory mapping.
 /// 4. **Cleanup**: On `drop()`, the lock is released. For temp files, the file is deleted.
+///
+/// # Internal Design: The `'static` Lifetime Lie
+///
+/// This struct stores a `FileSystem<Cursor<&'static mut [u8]>>` internally to avoid
+/// recreating the filesystem on every operation. The `'static` lifetime is a **lie** -
+/// the slice actually points to `mmap_ptr`, which is only valid until `drop()` calls
+/// `munmap`.
+///
+/// ## Why this is safe
+///
+/// 1. **Drop ordering**: `Drop::drop()` sets `self.fs = None` *before* calling `munmap`,
+///    ensuring the `FileSystem` is dropped while the memory is still valid.
+///
+/// 2. **No `mem::forget`**: If someone calls `mem::forget(fat_image)`, the `FileSystem`
+///    would hold a dangling pointer. This is a fundamental limitation - `mem::forget`
+///    is safe in Rust, but can break invariants like this. Don't do it.
+///
+/// 3. **Moving is safe**: Moving `FatImage` doesn't invalidate `mmap_ptr` because it
+///    points to kernel-managed memory (the mmap region), not data inside the struct.
+///
+/// ## Why we can't use a correct lifetime
+///
+/// This is a self-referential struct: `fs` borrows from `mmap_ptr`, but both are fields
+/// of the same struct. Rust's borrow checker cannot express "this field borrows from
+/// that field" because lifetimes must come from *outside* the struct.
+///
+/// Alternatives considered:
+/// - `FileSystem<Cursor<&'a mut [u8]>>` with `FatImage<'a>` - doesn't work, the slice
+///   comes from inside the struct, not from an external source
+/// - Recreate `FileSystem` on every operation - works but has overhead (re-parses FAT)
+/// - `ouroboros`/`self_cell` crates - use the same `'static` trick, just wrapped in macros
 #[cfg(unix)]
-#[derive(Debug)]
 pub struct FatImage {
     /// The backing file (holds the exclusive lock).
     /// Kept for its Drop impl which releases the flock.
@@ -101,6 +324,27 @@ pub struct FatImage {
     path: PathBuf,
     /// Whether this is a temp file (delete on drop).
     is_temp: bool,
+    /// Cached FAT filesystem handle.
+    ///
+    /// # Safety
+    ///
+    /// The `'static` lifetime is a lie. See struct-level documentation.
+    /// This field **must** be set to `None` before `munmap` in `Drop::drop()`.
+    fs: Option<fatfs::FileSystem<std::io::Cursor<&'static mut [u8]>>>,
+}
+
+// Manual Debug impl because fatfs::FileSystem doesn't implement Debug
+#[cfg(unix)]
+impl std::fmt::Debug for FatImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FatImage")
+            .field("mmap_ptr", &self.mmap_ptr)
+            .field("mmap_size", &self.mmap_size)
+            .field("path", &self.path)
+            .field("is_temp", &self.is_temp)
+            .field("fs", &self.fs.as_ref().map(|_| "<FileSystem>"))
+            .finish()
+    }
 }
 
 // SAFETY: FatImage is Send because the mmap'd region is process-local
@@ -179,6 +423,7 @@ impl FatImage {
             mmap_size: size,
             path,
             is_temp: false,
+            fs: None,
         })
     }
 
@@ -251,8 +496,13 @@ impl FatImage {
 
         info!(path = %path.display(), size = size_bytes, "Creating temporary FAT image");
 
-        // persist() converts NamedTempFile to a regular File, disabling its auto-delete.
-        // FatImage::Drop will delete the file since is_temp=true.
+        // Why persist() instead of letting NamedTempFile auto-delete?
+        //
+        // We need the File handle to live in FatImage._file (for flock lifetime),
+        // but NamedTempFile would delete the file when dropped at function end.
+        // Alternative: make _file an enum or generic to hold NamedTempFile directly,
+        // which would auto-delete on drop (no need for is_temp + manual delete).
+        // Tradeoff: enum/generic adds type complexity, bool + manual delete is more explicit.
         let file = temp_file.persist(&path).map_err(|e| {
             error!(path = %path.display(), error = %e, "Failed to persist temp file");
             HyperlightError::Error(format!("Failed to persist temp file: {}", e))
@@ -270,7 +520,15 @@ impl FatImage {
     /// Get a pointer to the mmap'd region.
     ///
     /// This pointer can be used to map the FAT image into guest memory.
-    /// The pointer is valid for the lifetime of this `FatImage`.
+    ///
+    /// # Safety Note
+    ///
+    /// The returned pointer is valid only for the lifetime of this `FatImage`.
+    /// After the `FatImage` is dropped, the pointer becomes invalid and must
+    /// not be dereferenced. The caller is responsible for ensuring the pointer
+    /// is not used after the `FatImage` is dropped.
+    ///
+    /// The pointer points to `size()` bytes of memory.
     pub fn as_ptr(&self) -> *const u8 {
         self.mmap_ptr as *const u8
     }
@@ -279,26 +537,658 @@ impl FatImage {
     ///
     /// This pointer can be used to map the FAT image into guest memory
     /// with write access.
+    ///
+    /// # Safety Note
+    ///
+    /// The returned pointer is valid only for the lifetime of this `FatImage`.
+    /// After the `FatImage` is dropped, the pointer becomes invalid and must
+    /// not be dereferenced. The caller is responsible for ensuring the pointer
+    /// is not used after the `FatImage` is dropped.
+    ///
+    /// The pointer points to `size()` bytes of memory. Writes through this
+    /// pointer will be persisted to the backing file via the `MAP_SHARED` mapping.
     pub fn as_mut_ptr(&mut self) -> *mut u8 {
         self.mmap_ptr
     }
 
     /// Get the size of the FAT image in bytes.
+    ///
+    /// This is the total size of the mmap'd region, which equals the size
+    /// of the backing file.
     pub fn size(&self) -> usize {
         self.mmap_size
     }
 
     /// Get the path to the backing file.
+    ///
+    /// For temporary images created with [`create_temp`](Self::create_temp),
+    /// this will be a path in the system's temporary directory.
+    ///
+    /// # Warning
+    ///
+    /// For temporary images, the file at this path will be deleted when the
+    /// `FatImage` is dropped. Do not retain and use this path after dropping
+    /// the `FatImage`.
     pub fn path(&self) -> &Path {
         &self.path
     }
 
     /// Check if this is a temporary file (will be deleted on drop).
+    ///
+    /// Returns `true` for images created with [`create_temp`](Self::create_temp),
+    /// `false` for images created with [`create_at`](Self::create_at) or
+    /// opened with [`open`](Self::open).
     pub fn is_temp(&self) -> bool {
         self.is_temp
     }
 
+    // ---- File Operations ----
+
+    /// List the contents of a directory.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Absolute path to the directory (e.g., "/" or "/subdir")
+    ///
+    /// # Returns
+    ///
+    /// A vector of [`FatEntry`] structs, one for each file or subdirectory.
+    /// Does not include "." or ".." entries.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let entries = image.read_dir("/")?;
+    /// for entry in &entries {
+    ///     if entry.stat.is_dir {
+    ///         println!("Directory: {}", entry.name);
+    ///     } else {
+    ///         println!("File: {} ({} bytes)", entry.name, entry.stat.size);
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the path doesn't exist, is not a directory,
+    /// or contains invalid path components (e.g., "..").
+    pub fn read_dir(&mut self, path: &str) -> Result<Vec<FatEntry>> {
+        Self::validate_path(path)?;
+        trace!(path, "Reading directory");
+
+        let raw_entries = self.list_dir_entries(path)?;
+        let entries: Vec<FatEntry> = raw_entries
+            .into_iter()
+            .map(|(name, stat)| FatEntry { name, stat })
+            .collect();
+
+        trace!(path, count = entries.len(), "Directory read complete");
+        Ok(entries)
+    }
+
+    /// Open a file for reading.
+    ///
+    /// Returns a [`FatFileReader`] that implements [`Read`] and [`Seek`],
+    /// providing streaming access to the file contents.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Absolute path to the file (e.g., "/file.txt")
+    ///
+    /// # Returns
+    ///
+    /// A [`FatFileReader`] that borrows from this `FatImage`. The reader implements
+    /// standard Rust I/O traits, so you can use it with `BufReader`, `io::copy`, etc.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use std::io::{BufRead, BufReader, Read};
+    ///
+    /// // Read entire small file
+    /// let mut reader = image.open_file("/small.txt")?;
+    /// let mut contents = String::new();
+    /// reader.read_to_string(&mut contents)?;
+    ///
+    /// // Stream large file line by line
+    /// let reader = image.open_file("/big.log")?;
+    /// for line in BufReader::new(reader).lines() {
+    ///     println!("{}", line?);
+    /// }
+    ///
+    /// // Read first 100 bytes only
+    /// let mut reader = image.open_file("/huge.bin")?;
+    /// let mut buf = [0u8; 100];
+    /// reader.read_exact(&mut buf)?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the path doesn't exist, is a directory, or contains
+    /// invalid path components.
+    pub fn open_file(&mut self, path: &str) -> Result<FatFileReader<'_>> {
+        Self::validate_path(path)?;
+        trace!(path, "Opening file for reading");
+
+        let fs = self.open_fs()?;
+        let root = fs.root_dir();
+
+        let file = root.open_file(path).map_err(|e| {
+            error!(path, error = %e, "Failed to open file for reading");
+            HyperlightError::Error(format!("Failed to open file '{}': {}", path, e))
+        })?;
+
+        trace!(path, "File opened for reading");
+        Ok(FatFileReader {
+            file,
+            path: path.to_string(),
+        })
+    }
+
+    /// Create or truncate a file for writing.
+    ///
+    /// Returns a [`FatFileWriter`] that implements [`Write`] and [`Seek`],
+    /// allowing you to stream data to the file without buffering everything
+    /// in memory.
+    ///
+    /// If the file already exists, it will be **truncated** (emptied) before
+    /// writing. Parent directories must already exist.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Absolute path to the file (e.g., "/file.txt")
+    ///
+    /// # Returns
+    ///
+    /// A [`FatFileWriter`] that borrows from this `FatImage`. The writer implements
+    /// standard Rust I/O traits and flushes automatically on drop.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use std::io::Write;
+    ///
+    /// // Simple write
+    /// let mut writer = image.create_file("/hello.txt")?;
+    /// writer.write_all(b"Hello, world!")?;
+    /// writer.flush()?; // Explicit flush for error handling
+    ///
+    /// // Stream from another reader
+    /// let mut writer = image.create_file("/copy.bin")?;
+    /// std::io::copy(&mut source_reader, &mut writer)?;
+    ///
+    /// // Write in chunks
+    /// let mut writer = image.create_file("/chunked.bin")?;
+    /// for chunk in data.chunks(4096) {
+    ///     writer.write_all(chunk)?;
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the path refers to a directory, the parent directory
+    /// doesn't exist, or there's insufficient space in the FAT image.
+    pub fn create_file(&mut self, path: &str) -> Result<FatFileWriter<'_>> {
+        Self::validate_path(path)?;
+        trace!(path, "Creating file for writing");
+
+        let fs = self.open_fs()?;
+        let root = fs.root_dir();
+
+        let mut file = root.create_file(path).map_err(|e| {
+            error!(path, error = %e, "Failed to create file for writing");
+            HyperlightError::Error(format!("Failed to create file '{}': {}", path, e))
+        })?;
+
+        // Truncate to 0 in case file existed
+        file.truncate().map_err(|e| {
+            error!(path, error = %e, "Failed to truncate file");
+            HyperlightError::Error(format!("Failed to truncate file '{}': {}", path, e))
+        })?;
+
+        trace!(path, "File created and truncated for writing");
+        Ok(FatFileWriter {
+            file,
+            path: path.to_string(),
+        })
+    }
+
+    /// Create a directory.
+    ///
+    /// Parent directories must already exist.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Absolute path to the directory to create (e.g., "/newdir")
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Create a single directory
+    /// image.create_dir("/data")?;
+    ///
+    /// // Create nested directories (parents must exist first)
+    /// image.create_dir("/data/logs")?;
+    /// image.create_dir("/data/logs/2025")?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the parent directory doesn't exist or the path
+    /// already exists.
+    pub fn create_dir(&mut self, path: &str) -> Result<()> {
+        Self::validate_path(path)?;
+        trace!(path, "Creating directory");
+
+        let fs = self.open_fs()?;
+        let root = fs.root_dir();
+
+        root.create_dir(path).map_err(|e| {
+            error!(path, error = %e, "Failed to create directory");
+            HyperlightError::Error(format!("Failed to create directory '{}': {}", path, e))
+        })?;
+
+        trace!(path, "Directory created");
+        Ok(())
+    }
+
+    /// Delete a file.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Absolute path to the file to delete
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The path doesn't exist
+    /// - The path contains invalid components
+    ///
+    /// # Note
+    ///
+    /// The underlying fatfs `remove()` call works on both files and empty
+    /// directories. Use [`delete_dir`](Self::delete_dir) for directories to
+    /// make your intent clear.
+    pub fn delete_file(&mut self, path: &str) -> Result<()> {
+        Self::validate_path(path)?;
+        trace!(path, "Deleting file");
+
+        let fs = self.open_fs()?;
+        let root = fs.root_dir();
+
+        root.remove(path).map_err(|e| {
+            error!(path, error = %e, "Failed to delete file");
+            HyperlightError::Error(format!("Failed to delete file '{}': {}", path, e))
+        })?;
+
+        trace!(path, "File deleted");
+        Ok(())
+    }
+
+    /// Delete an empty directory.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Absolute path to the directory to delete
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The path doesn't exist
+    /// - The directory is not empty
+    /// - The path contains invalid components
+    ///
+    /// # Note
+    ///
+    /// The underlying fatfs `remove()` call works on both files and empty
+    /// directories. Use [`delete_file`](Self::delete_file) for files to
+    /// make your intent clear.
+    pub fn delete_dir(&mut self, path: &str) -> Result<()> {
+        Self::validate_path(path)?;
+        trace!(path, "Deleting directory");
+
+        let fs = self.open_fs()?;
+        let root = fs.root_dir();
+
+        root.remove(path).map_err(|e| {
+            error!(path, error = %e, "Failed to delete directory");
+            HyperlightError::Error(format!("Failed to delete directory '{}': {}", path, e))
+        })?;
+
+        trace!(path, "Directory deleted");
+        Ok(())
+    }
+
+    /// Get metadata for a file or directory.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Absolute path to the file or directory
+    ///
+    /// # Returns
+    ///
+    /// A [`FatStat`] struct containing size, type, and timestamps.
+    ///
+    /// # Special Case: Root Directory
+    ///
+    /// For the root directory ("/"), returns `FatStat` with:
+    /// - `size: 0`
+    /// - `is_dir: true`
+    /// - All timestamps: `None`
+    ///
+    /// This is because FAT filesystems don't store metadata for the root
+    /// directory itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the path doesn't exist or contains invalid components.
+    pub fn stat(&mut self, path: &str) -> Result<FatStat> {
+        Self::validate_path(path)?;
+        trace!(path, "Getting file stat");
+
+        // Special case for root directory
+        if path == "/" {
+            return Ok(FatStat {
+                size: 0,
+                is_dir: true,
+                created: None,
+                modified: None,
+                accessed: None,
+            });
+        }
+
+        // Use the dedicated stat helper that captures timestamps
+        self.stat_entry(path)
+    }
+
+    /// Check if a path exists (file or directory).
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Absolute path to check
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(true)` if the path exists
+    /// - `Ok(false)` if the path does not exist
+    /// - `Err` if the path is invalid or there's an I/O error
+    pub fn exists(&mut self, path: &str) -> Result<bool> {
+        Self::validate_path(path)?;
+
+        // Root always exists
+        if path == "/" {
+            return Ok(true);
+        }
+
+        let fs = self.open_fs()?;
+        let root = fs.root_dir();
+
+        // Try to open as file first, then as directory.
+        // fatfs returns io::ErrorKind::NotFound if path doesn't exist.
+        let file_err = match root.open_file(path) {
+            Ok(_) => return Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => Some(e), // Save error in case open_dir also fails
+        };
+
+        match root.open_dir(path) {
+            Ok(_) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(dir_err) => {
+                // Both failed with non-NotFound errors. Report the directory error,
+                // but log both for debugging.
+                if let Some(fe) = file_err {
+                    trace!(path, file_error = %fe, dir_error = %dir_err,
+                           "Both open_file and open_dir failed");
+                }
+                error!(path, error = %dir_err, "I/O error checking path existence");
+                Err(HyperlightError::IOError(dir_err))
+            }
+        }
+    }
+
     // ---- Private helpers ----
+
+    /// Validate that a path is absolute and doesn't contain "..".
+    ///
+    /// We reject any path containing ".." as a substring (not just as a path
+    /// component) because:
+    /// 1. FAT filesystems use ".." only as a special directory entry, never in filenames
+    /// 2. Simplifies security checks - no need to handle edge cases like "foo../bar"
+    /// 3. Prevents path traversal attempts
+    fn validate_path(path: &str) -> Result<()> {
+        if !path.starts_with('/') {
+            error!(path, "Path must be absolute");
+            return Err(HyperlightError::Error(format!(
+                "Path must be absolute (start with '/'): '{}'",
+                path
+            )));
+        }
+
+        if path.contains("..") {
+            error!(path, "Path contains '..' which is not allowed");
+            return Err(HyperlightError::Error(format!(
+                "Path contains '..' which is not allowed: '{}'",
+                path
+            )));
+        }
+
+        // Null bytes can truncate paths in C APIs and cause security issues
+        if path.contains('\0') {
+            error!(path = %path.escape_default(), "Path contains null byte");
+            return Err(HyperlightError::Error(
+                "Path contains null byte which is not allowed".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Split a path into parent directory and filename.
+    ///
+    /// # Returns
+    ///
+    /// A tuple of `(parent_path, filename)`. For root, returns `("/", "")`.
+    ///
+    /// # Examples (conceptual)
+    ///
+    /// - `"/foo/bar.txt"` → `("/foo", "bar.txt")`
+    /// - `"/file.txt"` → `("/", "file.txt")`
+    /// - `"/"` → `("/", "")`
+    fn split_path(path: &str) -> Result<(&str, &str)> {
+        // Handle root specially
+        if path == "/" {
+            return Ok(("/", ""));
+        }
+
+        // Remove trailing slash if present
+        let path = path.strip_suffix('/').unwrap_or(path);
+
+        // Find last slash
+        if let Some(pos) = path.rfind('/') {
+            let parent = if pos == 0 { "/" } else { &path[..pos] };
+            let name = &path[pos + 1..];
+            Ok((parent, name))
+        } else {
+            Err(HyperlightError::Error(format!(
+                "Invalid path (no parent): '{}'",
+                path
+            )))
+        }
+    }
+
+    /// Get or create the cached FAT filesystem handle.
+    ///
+    /// All file operations (`read_dir`, `open_file`, `create_file`, etc.) go through
+    /// this method to access the underlying fatfs library.
+    ///
+    /// # Why lazy?
+    ///
+    /// `FatImage::open()` and `create_*()` only validate the FAT boot sector and
+    /// set up the mmap. We defer constructing the full `fatfs::FileSystem` until
+    /// someone actually performs a file operation. This avoids parsing FAT tables
+    /// for images that might only be memory-mapped into a guest without host-side
+    /// file operations.
+    ///
+    /// # Why cached?
+    ///
+    /// Creating a `FileSystem` parses the boot sector and FAT tables. We cache it
+    /// in `self.fs` to avoid re-parsing on every operation.
+    ///
+    /// # The `'static` lie
+    ///
+    /// This is where we create the `&'static mut [u8]` slice over the mmap region.
+    /// See the struct-level documentation for why this is safe despite the lifetime
+    /// not actually being `'static`.
+    fn open_fs(&mut self) -> Result<&mut fatfs::FileSystem<std::io::Cursor<&'static mut [u8]>>> {
+        if self.fs.is_none() {
+            // SAFETY: We're creating a slice with a 'static lifetime, but it actually
+            // lives only as long as the mmap region. This is the "'static lie" documented
+            // on the struct. Safety is maintained by:
+            // 1. Drop::drop() sets self.fs = None before munmap
+            // 2. FatImage is not Sync, so no concurrent access
+            // 3. We have exclusive access via flock
+            let slice: &'static mut [u8] =
+                unsafe { std::slice::from_raw_parts_mut(self.mmap_ptr, self.mmap_size) };
+            let cursor = std::io::Cursor::new(slice);
+
+            let fs = fatfs::FileSystem::new(cursor, fatfs::FsOptions::new()).map_err(|e| {
+                error!(error = %e, "Failed to open FAT filesystem");
+                HyperlightError::Error(format!("Failed to open FAT filesystem: {}", e))
+            })?;
+
+            self.fs = Some(fs);
+        }
+
+        self.fs.as_mut().ok_or_else(|| {
+            // This should never happen - we just set self.fs = Some above
+            error!("Internal error: FileSystem cache unexpectedly None");
+            HyperlightError::Error("Internal error: FileSystem cache unexpectedly None".to_string())
+        })
+    }
+
+    /// List directory contents, collecting into owned data.
+    ///
+    /// # Why Vec instead of an iterator?
+    ///
+    /// The fatfs `Dir::iter()` yields `DirEntry` items that borrow from the
+    /// `FileSystem`. If we tried to return an iterator, we'd have lifetime
+    /// issues: the iterator would borrow `self.fs` (via `open_fs()`), preventing
+    /// any other operations on the `FatImage` until iteration completes.
+    ///
+    /// By collecting into a `Vec<(String, FatStat)>` with all owned data, we
+    /// release the borrow on the filesystem before returning, allowing the
+    /// caller to interleave directory listing with other operations.
+    ///
+    /// Returns tuples of (name, FatStat). Excludes "." and ".." entries.
+    fn list_dir_entries(&mut self, path: &str) -> Result<Vec<(String, FatStat)>> {
+        let fs = self.open_fs()?;
+        let root = fs.root_dir();
+
+        let dir = if path == "/" {
+            root
+        } else {
+            root.open_dir(path).map_err(|e| {
+                error!(path, error = %e, "Failed to open directory");
+                HyperlightError::Error(format!("Failed to open directory '{}': {}", path, e))
+            })?
+        };
+
+        let mut entries = Vec::new();
+        for entry in dir.iter() {
+            let entry = entry.map_err(|e| {
+                error!(path, error = %e, "Failed to read directory entry");
+                HyperlightError::Error(format!(
+                    "Failed to read directory entry in '{}': {}",
+                    path, e
+                ))
+            })?;
+
+            let name = entry.file_name();
+            if name == "." || name == ".." {
+                continue;
+            }
+
+            let stat = FatStat {
+                size: entry.len(),
+                is_dir: entry.is_dir(),
+                created: Self::datetime_to_chrono(entry.created()),
+                modified: Self::datetime_to_chrono(entry.modified()),
+                accessed: Self::date_to_chrono(entry.accessed()),
+            };
+            entries.push((name, stat));
+        }
+
+        Ok(entries)
+    }
+
+    /// Get stat for a specific path by looking it up in its parent directory.
+    fn stat_entry(&mut self, path: &str) -> Result<FatStat> {
+        let fs = self.open_fs()?;
+        let root = fs.root_dir();
+
+        let (parent_path, name) = Self::split_path(path)?;
+
+        let parent_dir = if parent_path == "/" {
+            root
+        } else {
+            root.open_dir(parent_path).map_err(|e| {
+                error!(parent_path, error = %e, "Failed to open parent directory for stat");
+                HyperlightError::Error(format!(
+                    "Failed to open parent directory '{}': {}",
+                    parent_path, e
+                ))
+            })?
+        };
+
+        for entry in parent_dir.iter() {
+            let entry = entry.map_err(|e| {
+                error!(path, error = %e, "Failed to read directory entry during stat");
+                HyperlightError::Error(format!("Failed to stat '{}': {}", path, e))
+            })?;
+
+            if entry.file_name() == name {
+                return Ok(FatStat {
+                    size: entry.len(),
+                    is_dir: entry.is_dir(),
+                    created: Self::datetime_to_chrono(entry.created()),
+                    modified: Self::datetime_to_chrono(entry.modified()),
+                    accessed: Self::date_to_chrono(entry.accessed()),
+                });
+            }
+        }
+
+        error!(path, "Path not found during stat");
+        Err(HyperlightError::Error(format!(
+            "Path not found: '{}'",
+            path
+        )))
+    }
+
+    /// Convert fatfs DateTime to chrono NaiveDateTime.
+    ///
+    /// Returns `None` if the date/time values are invalid (e.g., month 0).
+    fn datetime_to_chrono(dt: fatfs::DateTime) -> Option<NaiveDateTime> {
+        chrono::NaiveDate::from_ymd_opt(
+            dt.date.year as i32,
+            dt.date.month as u32,
+            dt.date.day as u32,
+        )
+        .and_then(|date| {
+            date.and_hms_opt(dt.time.hour as u32, dt.time.min as u32, dt.time.sec as u32)
+        })
+    }
+
+    /// Convert fatfs Date to chrono NaiveDateTime.
+    ///
+    /// The time component is set to midnight (00:00:00) because FAT only
+    /// stores the date for last-access timestamps.
+    ///
+    /// Returns `None` if the date values are invalid.
+    fn date_to_chrono(d: fatfs::Date) -> Option<NaiveDateTime> {
+        chrono::NaiveDate::from_ymd_opt(d.year as i32, d.month as u32, d.day as u32)
+            .and_then(|date| date.and_hms_opt(0, 0, 0))
+    }
 
     /// Initialize a newly created image file: extend, format, and mmap.
     /// Cleans up the file on failure.
@@ -327,9 +1217,16 @@ impl FatImage {
             mmap_size: size,
             path,
             is_temp,
+            fs: None,
         })
     }
 
+    /// Validate that the image size is within acceptable bounds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `size_bytes` is less than [`MIN_FAT_IMAGE_SIZE`]
+    /// or greater than [`MAX_FAT_IMAGE_SIZE`].
     fn validate_size(size_bytes: usize) -> Result<()> {
         if !(MIN_FAT_IMAGE_SIZE..=MAX_FAT_IMAGE_SIZE).contains(&size_bytes) {
             error!(
@@ -346,6 +1243,10 @@ impl FatImage {
         Ok(())
     }
 
+    /// Extend the file to the specified size using ftruncate.
+    ///
+    /// On Linux, this creates a sparse file (doesn't allocate physical blocks
+    /// until written).
     fn extend_file(file: &File, size: usize) -> Result<()> {
         // Use ftruncate to extend the file (creates sparse file on Linux)
         file.set_len(size as u64).map_err(|e| {
@@ -355,6 +1256,16 @@ impl FatImage {
         Ok(())
     }
 
+    /// Memory-map the file with MAP_SHARED for write persistence.
+    ///
+    /// # Returns
+    ///
+    /// A pointer to the mapped region. The caller is responsible for calling
+    /// `munmap` when done.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the mmap syscall fails.
     fn mmap_file(file: &File, size: usize) -> Result<*mut u8> {
         use std::os::unix::io::AsRawFd;
 
@@ -385,11 +1296,22 @@ impl FatImage {
         Ok(ptr as *mut u8)
     }
 
+    /// Format the file as a FAT32 filesystem.
+    ///
+    /// Explicitly uses FAT32 regardless of size (fatfs would auto-select
+    /// FAT12/16 for small volumes).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if formatting fails or the sync fails.
     fn format_fat32(file: &File, size: usize) -> Result<()> {
         use std::io::{Seek, SeekFrom};
 
-        // fatfs::format_volume requires ReadWriteSeek. &File implements Read, Write, and Seek
-        // via interior mutability (pread/pwrite), so we can use it directly.
+        // fatfs::format_volume requires Read + Write + Seek. In Rust, `&File`
+        // implements these traits because the kernel maintains the file offset
+        // separately from the Rust borrow - multiple `&File` references share
+        // the same kernel file description and its offset. This is safe for our
+        // single-threaded formatting, but would be racy with concurrent access.
         let mut file_ref = file;
 
         // Seek to start before formatting
@@ -445,8 +1367,14 @@ impl Drop for FatImage {
         // 1. Redundant in the normal case (HLT already synced)
         // 2. Potentially harmful in error cases (if persisting corrupted data)
 
+        // CRITICAL: Drop the FileSystem BEFORE unmapping the memory it references.
+        // The FileSystem holds a &'static mut [u8] that actually points to mmap_ptr.
+        // If we munmap first, the FileSystem's drop would access freed memory.
+        self.fs = None;
+
         // Unmap the memory region
-        // SAFETY: mmap_ptr and mmap_size are valid from construction
+        // SAFETY: mmap_ptr and mmap_size are valid from construction, and we've
+        // already dropped self.fs above so nothing references this memory.
         let result = unsafe { libc::munmap(self.mmap_ptr as *mut libc::c_void, self.mmap_size) };
         if result != 0 {
             let err = std::io::Error::last_os_error();
@@ -466,7 +1394,10 @@ impl Drop for FatImage {
     }
 }
 
-/// Windows stub - not yet implemented.
+/// Windows stub - FatImage is not yet implemented on Windows.
+///
+/// All constructors return an error. Other methods exist only to satisfy
+/// the API but cannot be called since no `FatImage` can be constructed.
 #[cfg(windows)]
 pub struct FatImage {
     _private: (),
@@ -474,50 +1405,109 @@ pub struct FatImage {
 
 #[cfg(windows)]
 impl FatImage {
-    /// Not supported on Windows.
+    /// Returns an error - FatImage is not supported on Windows.
     pub fn open<P: AsRef<Path>>(_path: P) -> Result<Self> {
         Err(HyperlightError::Error(
             "FatImage is not supported on Windows".to_string(),
         ))
     }
 
-    /// Not supported on Windows.
+    /// Returns an error - FatImage is not supported on Windows.
     pub fn create_at<P: AsRef<Path>>(_path: P, _size_bytes: usize) -> Result<Self> {
         Err(HyperlightError::Error(
             "FatImage is not supported on Windows".to_string(),
         ))
     }
 
-    /// Not supported on Windows.
+    /// Returns an error - FatImage is not supported on Windows.
     pub fn create_temp(_size_bytes: usize) -> Result<Self> {
         Err(HyperlightError::Error(
             "FatImage is not supported on Windows".to_string(),
         ))
     }
 
-    /// Not supported on Windows.
+    // The following methods cannot be called because FatImage cannot be constructed.
+    // They exist only to provide API compatibility.
+
+    #[doc(hidden)]
     pub fn as_ptr(&self) -> *const u8 {
-        unreachable!("FatImage cannot be constructed on Windows")
+        std::ptr::null()
     }
 
-    /// Not supported on Windows.
+    #[doc(hidden)]
     pub fn as_mut_ptr(&mut self) -> *mut u8 {
-        unreachable!("FatImage cannot be constructed on Windows")
+        std::ptr::null_mut()
     }
 
-    /// Not supported on Windows.
+    #[doc(hidden)]
     pub fn size(&self) -> usize {
-        unreachable!("FatImage cannot be constructed on Windows")
+        0
     }
 
-    /// Not supported on Windows.
+    #[doc(hidden)]
     pub fn path(&self) -> &Path {
-        unreachable!("FatImage cannot be constructed on Windows")
+        Path::new("")
     }
 
-    /// Not supported on Windows.
+    #[doc(hidden)]
     pub fn is_temp(&self) -> bool {
-        unreachable!("FatImage cannot be constructed on Windows")
+        false
+    }
+
+    #[doc(hidden)]
+    pub fn read_dir(&mut self, _path: &str) -> Result<Vec<FatEntry>> {
+        Err(HyperlightError::Error(
+            "FatImage is not supported on Windows".to_string(),
+        ))
+    }
+
+    #[doc(hidden)]
+    pub fn open_file(&mut self, _path: &str) -> Result<FatFileReader<'_>> {
+        Err(HyperlightError::Error(
+            "FatImage is not supported on Windows".to_string(),
+        ))
+    }
+
+    #[doc(hidden)]
+    pub fn create_file(&mut self, _path: &str) -> Result<FatFileWriter<'_>> {
+        Err(HyperlightError::Error(
+            "FatImage is not supported on Windows".to_string(),
+        ))
+    }
+
+    #[doc(hidden)]
+    pub fn create_dir(&mut self, _path: &str) -> Result<()> {
+        Err(HyperlightError::Error(
+            "FatImage is not supported on Windows".to_string(),
+        ))
+    }
+
+    #[doc(hidden)]
+    pub fn delete_file(&mut self, _path: &str) -> Result<()> {
+        Err(HyperlightError::Error(
+            "FatImage is not supported on Windows".to_string(),
+        ))
+    }
+
+    #[doc(hidden)]
+    pub fn delete_dir(&mut self, _path: &str) -> Result<()> {
+        Err(HyperlightError::Error(
+            "FatImage is not supported on Windows".to_string(),
+        ))
+    }
+
+    #[doc(hidden)]
+    pub fn stat(&mut self, _path: &str) -> Result<FatStat> {
+        Err(HyperlightError::Error(
+            "FatImage is not supported on Windows".to_string(),
+        ))
+    }
+
+    #[doc(hidden)]
+    pub fn exists(&mut self, _path: &str) -> Result<bool> {
+        Err(HyperlightError::Error(
+            "FatImage is not supported on Windows".to_string(),
+        ))
     }
 }
 
@@ -678,5 +1668,417 @@ mod tests {
             "Expected 'valid FAT' error, got: {}",
             err
         );
+    }
+
+    // ---- File Operations Tests ----
+
+    #[test]
+    fn test_fat_write_read_file() {
+        let mut image = FatImage::create_temp(MIN_FAT_IMAGE_SIZE).expect("Failed to create image");
+
+        // Write a file using streaming API
+        let data = b"Hello, FAT world!";
+        {
+            let mut writer = image
+                .create_file("/test.txt")
+                .expect("Failed to create file");
+            writer.write_all(data).expect("Failed to write data");
+            writer.flush().expect("Failed to flush");
+        }
+
+        // Read it back using streaming API
+        let mut contents = Vec::new();
+        {
+            let mut reader = image.open_file("/test.txt").expect("Failed to open file");
+            reader.read_to_end(&mut contents).expect("Failed to read");
+        }
+        assert_eq!(contents, data);
+
+        // Verify it exists
+        assert!(image.exists("/test.txt").expect("exists failed"));
+
+        // Check stat
+        let stat = image.stat("/test.txt").expect("Failed to stat file");
+        assert_eq!(stat.size, data.len() as u64);
+        assert!(!stat.is_dir);
+    }
+
+    #[test]
+    fn test_fat_overwrite_file() {
+        let mut image = FatImage::create_temp(MIN_FAT_IMAGE_SIZE).expect("Failed to create image");
+
+        // Write initial content
+        {
+            let mut writer = image
+                .create_file("/test.txt")
+                .expect("Failed to create file");
+            writer
+                .write_all(b"initial content")
+                .expect("Failed to write");
+        }
+
+        // Overwrite with different content
+        let new_data = b"new content";
+        {
+            let mut writer = image
+                .create_file("/test.txt")
+                .expect("Failed to create file");
+            writer.write_all(new_data).expect("Failed to write");
+        }
+
+        // Read it back - should be new content only
+        let mut contents = Vec::new();
+        {
+            let mut reader = image.open_file("/test.txt").expect("Failed to open file");
+            reader.read_to_end(&mut contents).expect("Failed to read");
+        }
+        assert_eq!(contents, new_data);
+    }
+
+    #[test]
+    fn test_fat_create_delete_dir() {
+        let mut image = FatImage::create_temp(MIN_FAT_IMAGE_SIZE).expect("Failed to create image");
+
+        // Create a directory
+        image
+            .create_dir("/mydir")
+            .expect("Failed to create directory");
+
+        // Verify it exists
+        assert!(image.exists("/mydir").expect("exists failed"));
+
+        // Check stat
+        let stat = image.stat("/mydir").expect("Failed to stat directory");
+        assert!(stat.is_dir);
+
+        // Delete the directory
+        image
+            .delete_dir("/mydir")
+            .expect("Failed to delete directory");
+
+        // Verify it's gone
+        assert!(!image.exists("/mydir").expect("exists failed"));
+    }
+
+    #[test]
+    fn test_fat_list_dir() {
+        let mut image = FatImage::create_temp(MIN_FAT_IMAGE_SIZE).expect("Failed to create image");
+
+        // Create some files and directories
+        {
+            let mut w = image.create_file("/file1.txt").expect("create");
+            w.write_all(b"content1").expect("write");
+        }
+        {
+            let mut w = image.create_file("/file2.txt").expect("create");
+            w.write_all(b"content2").expect("write");
+        }
+        image
+            .create_dir("/subdir")
+            .expect("Failed to create subdir");
+
+        // List root directory
+        let entries = image.read_dir("/").expect("Failed to read root dir");
+
+        assert_eq!(entries.len(), 3);
+
+        // Check that all entries are present (order may vary)
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"file1.txt"));
+        assert!(names.contains(&"file2.txt"));
+        assert!(names.contains(&"subdir"));
+
+        // Verify types
+        let file1 = entries.iter().find(|e| e.name == "file1.txt").unwrap();
+        assert!(!file1.stat.is_dir);
+        assert_eq!(file1.stat.size, 8);
+
+        let subdir = entries.iter().find(|e| e.name == "subdir").unwrap();
+        assert!(subdir.stat.is_dir);
+    }
+
+    #[test]
+    fn test_fat_nested_dirs() {
+        let mut image = FatImage::create_temp(MIN_FAT_IMAGE_SIZE).expect("Failed to create image");
+
+        // Create nested directories
+        image
+            .create_dir("/level1")
+            .expect("Failed to create level1");
+        image
+            .create_dir("/level1/level2")
+            .expect("Failed to create level2");
+        image
+            .create_dir("/level1/level2/level3")
+            .expect("Failed to create level3");
+
+        // Write a file deep in the tree
+        {
+            let mut writer = image
+                .create_file("/level1/level2/level3/deep.txt")
+                .expect("Failed to create deep file");
+            writer.write_all(b"deep content").expect("Failed to write");
+        }
+
+        // Verify we can read it back
+        let mut contents = Vec::new();
+        {
+            let mut reader = image
+                .open_file("/level1/level2/level3/deep.txt")
+                .expect("Failed to open deep file");
+            reader.read_to_end(&mut contents).expect("Failed to read");
+        }
+        assert_eq!(contents, b"deep content");
+
+        // List intermediate directory
+        let entries = image
+            .read_dir("/level1/level2")
+            .expect("Failed to read level2");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "level3");
+        assert!(entries[0].stat.is_dir);
+    }
+
+    #[test]
+    fn test_fat_delete_file() {
+        let mut image = FatImage::create_temp(MIN_FAT_IMAGE_SIZE).expect("Failed to create image");
+
+        // Create and then delete a file
+        {
+            let mut writer = image.create_file("/deleteme.txt").expect("create");
+            writer.write_all(b"to be deleted").expect("write");
+        }
+        assert!(image.exists("/deleteme.txt").expect("exists failed"));
+
+        image
+            .delete_file("/deleteme.txt")
+            .expect("Failed to delete file");
+        assert!(!image.exists("/deleteme.txt").expect("exists failed"));
+    }
+
+    #[test]
+    fn test_fat_path_validation() {
+        let mut image = FatImage::create_temp(MIN_FAT_IMAGE_SIZE).expect("Failed to create image");
+
+        // Relative path should fail
+        image
+            .read_dir("relative/path")
+            .expect_err("relative path should be rejected");
+
+        // Path with .. should fail
+        image
+            .read_dir("/foo/../bar")
+            .expect_err("path with .. should be rejected");
+
+        // exists should also error on invalid paths (not just return false)
+        image
+            .exists("relative/path")
+            .expect_err("exists should reject invalid paths, not return false");
+    }
+
+    #[test]
+    fn test_fat_path_validation_null_byte() {
+        let mut image = FatImage::create_temp(MIN_FAT_IMAGE_SIZE).expect("Failed to create image");
+
+        // Null bytes should fail (security: prevents C API path truncation attacks)
+        image
+            .read_dir("/foo\0bar")
+            .expect_err("null byte in path should be rejected");
+        image
+            .exists("/test\0.txt")
+            .expect_err("null byte should be rejected");
+        image
+            .create_file("/malicious\0hidden.txt")
+            .expect_err("null byte should be rejected");
+    }
+
+    #[test]
+    fn test_fat_exists_directory() {
+        let mut image = FatImage::create_temp(MIN_FAT_IMAGE_SIZE).expect("Failed to create image");
+
+        // Create a directory
+        image.create_dir("/mydir").expect("Failed to create dir");
+
+        // exists() should return true for directories
+        assert!(
+            image.exists("/mydir").expect("exists failed"),
+            "exists() should return true for directories"
+        );
+
+        // Also test nested directory
+        image
+            .create_dir("/mydir/subdir")
+            .expect("Failed to create subdir");
+        assert!(
+            image.exists("/mydir/subdir").expect("exists failed"),
+            "exists() should return true for nested directories"
+        );
+
+        // Non-existent directory should return false
+        assert!(
+            !image.exists("/nonexistent").expect("exists failed"),
+            "exists() should return false for non-existent paths"
+        );
+    }
+
+    #[test]
+    fn test_fat_root_exists_and_stat() {
+        let mut image = FatImage::create_temp(MIN_FAT_IMAGE_SIZE).expect("Failed to create image");
+
+        // Root should always exist
+        assert!(image.exists("/").expect("exists failed"));
+
+        // Stat on root
+        let stat = image.stat("/").expect("Failed to stat root");
+        assert!(stat.is_dir);
+        assert_eq!(stat.size, 0);
+    }
+
+    #[test]
+    fn test_fat_read_nonexistent_file() {
+        let mut image = FatImage::create_temp(MIN_FAT_IMAGE_SIZE).expect("Failed to create image");
+
+        let result = image.open_file("/nonexistent.txt");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_fat_timestamps() {
+        let mut image = FatImage::create_temp(MIN_FAT_IMAGE_SIZE).expect("Failed to create image");
+
+        // Write a file
+        let before = chrono::Utc::now().naive_utc();
+
+        {
+            let mut writer = image.create_file("/timestamped.txt").expect("create");
+            writer.write_all(b"test content").expect("write");
+        }
+
+        let after = chrono::Utc::now().naive_utc();
+
+        // Get stat and verify timestamps are populated
+        let stat = image.stat("/timestamped.txt").expect("Failed to stat file");
+
+        // Created and modified should be populated for a newly written file
+        let created = stat.created.expect("Created timestamp should be populated");
+        let modified = stat
+            .modified
+            .expect("Modified timestamp should be populated");
+        assert!(
+            stat.accessed.is_some(),
+            "Accessed timestamp should be populated"
+        );
+
+        // Verify timestamps are within the test execution window
+        // (FAT has 2-second resolution, so allow a few seconds of slack)
+        let slack = chrono::Duration::seconds(5);
+        assert!(
+            created >= before - slack && created <= after + slack,
+            "Created timestamp {} should be between {} and {}",
+            created,
+            before - slack,
+            after + slack
+        );
+        assert!(
+            modified >= before - slack && modified <= after + slack,
+            "Modified timestamp {} should be between {} and {}",
+            modified,
+            before - slack,
+            after + slack
+        );
+    }
+
+    #[test]
+    fn test_fat_delete_nonempty_dir_fails() {
+        let mut image = FatImage::create_temp(MIN_FAT_IMAGE_SIZE).expect("Failed to create image");
+
+        // Create directory with a file in it
+        image.create_dir("/nonempty").expect("Failed to create dir");
+        {
+            let mut writer = image.create_file("/nonempty/file.txt").expect("create");
+            writer.write_all(b"content").expect("write");
+        }
+
+        // Deleting non-empty directory should fail
+        let result = image.delete_dir("/nonempty");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_fat_streaming_read_partial() {
+        let mut image = FatImage::create_temp(MIN_FAT_IMAGE_SIZE).expect("Failed to create image");
+
+        // Write a file with known content
+        let data = b"0123456789ABCDEF";
+        {
+            let mut writer = image.create_file("/partial.txt").expect("create");
+            writer.write_all(data).expect("write");
+        }
+
+        // Read only first 5 bytes using streaming API
+        let mut buf = [0u8; 5];
+        let bytes_read = {
+            let mut reader = image.open_file("/partial.txt").expect("open");
+            reader.read(&mut buf).expect("read")
+        };
+
+        assert_eq!(bytes_read, 5);
+        assert_eq!(&buf, b"01234");
+    }
+
+    #[test]
+    fn test_fat_streaming_write_chunks() {
+        let mut image = FatImage::create_temp(MIN_FAT_IMAGE_SIZE).expect("Failed to create image");
+
+        // Write in multiple chunks using streaming API
+        {
+            let mut writer = image.create_file("/chunked.txt").expect("create");
+            writer.write_all(b"chunk1").expect("write1");
+            writer.write_all(b"chunk2").expect("write2");
+            writer.write_all(b"chunk3").expect("write3");
+        }
+
+        // Read it back and verify
+        let mut contents = Vec::new();
+        {
+            let mut reader = image.open_file("/chunked.txt").expect("open");
+            reader.read_to_end(&mut contents).expect("read");
+        }
+
+        assert_eq!(contents, b"chunk1chunk2chunk3");
+    }
+
+    #[test]
+    fn test_fat_copy_between_files() {
+        let mut image = FatImage::create_temp(MIN_FAT_IMAGE_SIZE).expect("Failed to create image");
+
+        // Write source data
+        let source_data = b"Data to be copied using idiomatic Rust I/O!";
+        {
+            let mut writer = image.create_file("/source.txt").expect("create");
+            writer.write_all(source_data).expect("write");
+        }
+
+        // Read source into memory, then write to dest
+        // (Can't have reader + writer open simultaneously - they both borrow &mut image)
+        let data_copy = {
+            let mut reader = image.open_file("/source.txt").expect("open source");
+            let mut buf = Vec::new();
+            reader.read_to_end(&mut buf).expect("read");
+            buf
+        };
+
+        {
+            let mut writer = image.create_file("/dest.txt").expect("create dest");
+            writer.write_all(&data_copy).expect("write dest");
+        }
+
+        // Verify the copy
+        let mut contents = Vec::new();
+        {
+            let mut reader = image.open_file("/dest.txt").expect("open dest");
+            reader.read_to_end(&mut contents).expect("read");
+        }
+        assert_eq!(contents, source_data);
     }
 }
