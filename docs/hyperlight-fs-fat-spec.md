@@ -291,9 +291,15 @@ When a sandbox with RW FAT mounts halts (HLT), the host automatically calls `msy
 ```
 
 **What this means for users:**
-- When `sandbox.call()` returns, all FAT writes are durably persisted to disk
+- When `sandbox.call()` returns normally, all FAT writes are durably persisted to disk
 - No need for explicit `fsync()` or `msync()` in user code
 - Safe to read the backing file immediately after sandbox execution
+
+**Data loss warning:**
+- If the sandbox terminates abnormally (e.g., guest crash, timeout, host error), `msync()` is NOT called
+- In these cases, recent writes may be lost or the FAT image may be in an inconsistent state
+- This is intentional: we do not want to persist potentially corrupted data from a failed execution
+- Users should treat the FAT image as potentially invalid after any error
 
 **Implementation notes:**
 - `msync()` is only called if `has_rw_fat_mounts` is true (no overhead for RO-only)
@@ -449,7 +455,7 @@ impl HyperlightFSBuilder {
     /// 
     /// # Errors
     /// * Mount point conflicts with existing mapping or mount
-    /// * Size is too small for FAT32 (minimum ~64KB)
+    /// * Size is too small (minimum 1MB) or too large (maximum 16GB)
     /// * Failed to create temp file
     /// * Platform not supported (Windows/WHP - TODO)
     pub fn add_empty_fat_mount(
@@ -475,7 +481,7 @@ impl HyperlightFSBuilder {
     /// 
     /// # Errors
     /// * Mount point conflicts with existing mapping or mount
-    /// * Size is too small for FAT32 (minimum ~64KB)
+    /// * Size is too small (minimum 1MB) or too large (maximum 16GB)
     /// * Failed to create file at host_path
     /// * File already in use by another sandbox (exclusive lock)
     /// * Platform not supported (Windows/WHP - TODO)
@@ -1437,7 +1443,9 @@ This ensures:
 | Limitation | Value | Impact |
 |------------|-------|--------|
 | Fixed size | Cannot grow after creation | Must specify size upfront; ENOSPC when full |
-| Max file size | 4 GB - 1 byte | Large files not supported |
+| Min image size | 1 MB | Implementation practical minimum |
+| Max image size | 16 GB | Implementation limit (FAT32 itself supports ~2TB) |
+| Max file size | 4 GB - 1 byte | Large individual files not supported |
 | Max filename | 255 chars (LFN) | Long names supported |
 | Max path | ~260 chars | Deep nesting limited |
 | Timestamps | 2-second resolution | Not precise; requires `guest_time` feature for real timestamps |
@@ -1470,8 +1478,8 @@ HyperlightFS enforces limits on resources that consume guest memory or have fixe
 | Max open file descriptors | 256 | ✅ `FsLimits` | FD table size |
 | Max single RO file size | **No limit** | N/A | Zero-copy, no guest memory used |
 | Max total RO file size | **No limit** | N/A | Zero-copy, shared via page cache |
-| Max single FAT image (host) | **No limit** | N/A | Zero-copy via MAP_SHARED |
-| Max total FAT size (host) | **No limit** | N/A | Zero-copy via MAP_SHARED |
+| Min FAT image size (host) | 1 MB | ❌ | FAT32 metadata + practical minimum |
+| Max FAT image size (host) | 16 GB | ❌ | Practical mmap limit (FAT32 supports ~2TB) |
 | Max guest-created FAT size | Guest heap size | N/A | Allocated from guest heap |
 
 ### 13.5 Known Issues
@@ -1479,6 +1487,69 @@ HyperlightFS enforces limits on resources that consume guest memory or have fixe
 1. **SIGBUS on RO file modification**: If host modifies mmap'd file during sandbox execution, SIGBUS may occur
 2. **FAT fragmentation**: Long-running guests with many create/delete cycles may fragment
 3. **no_std fatfs**: Requires specific Rust nightly for `core_io` feature
+
+---
+
+## 14. Dependencies and Risks
+
+### 14.1 fatfs Crate Status
+
+The FAT filesystem implementation depends on the [`fatfs`](https://crates.io/crates/fatfs) crate.
+
+| Metric | Value | Assessment |
+|--------|-------|------------|
+| Downloads | ~900K | Moderate adoption |
+| Last release | 0.3.6 (June 2019) | ⚠️ Stale |
+| Last commit | March 2025 | Active development |
+| Unreleased version | 0.4.0 | Breaking API changes pending |
+
+**Current situation**: The crate is actively maintained with 154+ commits since 0.3.6, including important bug fixes. However, these fixes are unreleased because 0.4.0 includes breaking API changes.
+
+**Unreleased bug fixes (on master) that may affect us**:
+- Fill FAT32 root directory clusters with zeros (avoids interpreting garbage as entries)
+- Fix `.` and `..` directory entries (fixes fsck errors)
+- Fix `..` cluster number for first-level directories
+- Don't create LFN entries for `.` and `..`
+- Time encoding/decoding fixes
+
+### 14.2 Dependency Configuration
+
+**Initial approach**: Use published 0.3.6
+```toml
+fatfs = "0.3"
+```
+
+### 14.3 Mitigation Options
+
+If we encounter bugs fixed in unreleased master, we have several options:
+
+#### Option 1: Pin to Git Commit
+```toml
+fatfs = { git = "https://github.com/rafalh/rust-fatfs.git", rev = "4eccb50" }
+```
+- **Pros**: Get all fixes, minimal effort
+- **Cons**: Breaking 0.4.0 API requires code changes, not on crates.io
+
+#### Option 2: Vendor the Crate
+Copy the crate source into `src/hyperlight_host/vendor/fatfs/`.
+- **Pros**: Full control, can cherry-pick fixes, no external dependency
+- **Cons**: Maintenance burden, need to track upstream
+
+#### Option 3: Fork and Publish
+Fork to `hyperlight-dev/fatfs`, apply fixes, publish as `hyperlight-fatfs`.
+- **Pros**: Control + crates.io availability, community can benefit
+- **Cons**: Ongoing maintenance, version coordination
+
+#### Option 4: Implement Minimal FAT
+Write our own minimal FAT32 implementation.
+- **Pros**: Tailored to our needs, no external dependency
+- **Cons**: Significant effort (~2-4 weeks), potential for bugs, reinventing wheel
+
+### 14.4 Decision Record
+
+| Date | Decision | Rationale |
+|------|----------|----------|
+| 2026-01-19 | Start with fatfs 0.3.6 | Published, stable API; switch if we hit known bugs |
 
 ---
 

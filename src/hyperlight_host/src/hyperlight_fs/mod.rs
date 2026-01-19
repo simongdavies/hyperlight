@@ -101,10 +101,12 @@ limitations under the License.
 
 mod builder;
 mod config;
+mod fat_image;
 mod image;
 
 pub use builder::{BuildManifest, DirectoryBuilder, HyperlightFSBuilder, ManifestEntry};
 pub use config::{
     ConfigError, DirectoryMapping, FileMapping as ConfigFileMapping, HyperlightFsConfig,
 };
+pub use fat_image::{FatImage, MAX_FAT_IMAGE_SIZE, MIN_FAT_IMAGE_SIZE};
 pub use image::{FileMapping, HyperlightFSImage};

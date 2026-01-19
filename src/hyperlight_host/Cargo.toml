@@ -45,6 +45,8 @@ hyperlight-guest-tracing = { workspace = true, default-features = true, optional
 vmm-sys-util = "0.15.0"
 crossbeam-channel = "0.5.15"
 thiserror = "2.0.17"
+fatfs = "0.3"
+fs2 = "0.4"
 chrono = { version = "0.4", optional = true }
 anyhow = "1.0"
 metrics = "0.24.3"
@@ -54,7 +56,7 @@ toml = "0.8"
 elfcore = "2.0"
 uuid = { version = "1.19.0", features = ["v4"] }
 glob = "0.3"
-tempfile = { version = "3.19", optional = true }
+tempfile = "3.19"
 clap = { version = "4.5", features = ["derive"] }
 
 [target.'cfg(windows)'.dependencies]
