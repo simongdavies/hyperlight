@@ -13,14 +13,14 @@
 
 | Phase | Status | Progress |
 |-------|--------|----------|
-| Phase 1: Host-Side Foundation | ⬜ Not Started | 0/5 |
+| Phase 1: Host-Side Foundation | 🟡 In Progress | 4/6 |
 | Phase 2: Guest-Side Foundation | ⬜ Not Started | 0/5 |
 | Phase 3: Host-Guest Integration | ⬜ Not Started | 0/4 |
 | Phase 4: C API Implementation | ⬜ Not Started | 0/4 |
 | Phase 5: Host Extraction APIs | ⬜ Not Started | 0/3 |
 | Phase 6: Testing & Documentation | ⬜ Not Started | 0/4 |
 
-**Overall: 0/25 steps complete**
+**Overall: 4/26 steps complete**
 
 ---
 
@@ -49,7 +49,7 @@ Build the host-side infrastructure for FAT filesystem support.
 
 ### Step 1.1: Add fatfs Dependencies
 
-**Status:** ⬜ Not Started
+**Status:** ✅ Complete
 
 **Goal:** Add fatfs, fscommon, and file locking crates to hyperlight-host.
 
@@ -78,7 +78,7 @@ fs2 = "0.4"  # For cross-platform file locking
 
 ### Step 1.2: Create FatImage Wrapper Type with Exclusive Locking
 
-**Status:** ⬜ Not Started
+**Status:** ✅ Complete
 
 **Goal:** Create a type to manage FAT filesystem images on the host with exclusive file locking.
 
@@ -157,7 +157,7 @@ impl Drop for FatImage {
 
 ### Step 1.3: Host FAT File Operations
 
-**Status:** ⬜ Not Started
+**Status:** ✅ Complete
 
 **Goal:** Add methods to read/write files within a FAT image.
 
@@ -224,7 +224,7 @@ pub struct FatStat {
 
 ### Step 1.4: Extend HyperlightFSBuilder for FAT Mounts
 
-**Status:** ⬜ Not Started
+**Status:** ✅ Complete
 
 **Goal:** Add methods to mount FAT images in the builder.
 
@@ -233,19 +233,7 @@ pub struct FatStat {
 
 **Methods to add:**
 ```rust
-/// Resource limits for filesystem operations (spec §13.4).
-pub struct FsLimits {
-    pub max_file_count: usize,      // default: 100,000
-    pub max_mount_count: usize,     // default: 64
-    pub max_path_length: usize,     // default: 4096
-    pub max_open_files: usize,      // default: 256
-}
-
 impl HyperlightFSBuilder {
-    /// Create a new builder with custom limits.
-    /// Note: No size limits needed for host-provided content (zero-copy).
-    pub fn with_limits(limits: FsLimits) -> Self;
-    
     /// Mount a FAT image from a host file.
     pub fn add_fat_image<P: AsRef<Path>>(
         self,
@@ -255,9 +243,8 @@ impl HyperlightFSBuilder {
     
     /// Create an empty FAT filesystem at a mount point.
     /// 
-    /// For consistency with add_fat_image(), this creates a backing
-    /// host temp file of the specified size (potentially sparse) and
-    /// formats it as FAT32. The size is fixed - ENOSPC when full.
+    /// Creates a backing host temp file of the specified size (sparse)
+    /// and formats it as FAT32. Size is fixed - ENOSPC when full.
     /// Temp file is deleted when HyperlightFSImage is dropped.
     pub fn add_empty_fat_mount(
         self,
@@ -280,41 +267,143 @@ impl HyperlightFSBuilder {
 
 **Internal changes:**
 - Add `fat_mounts: Vec<FatMountEntry>` to builder state
-- Add `limits: FsLimits` to builder state (default or from `with_limits()`)
 - Add conflict detection between:
   - FAT mounts and RO files
   - FAT mounts and other FAT mounts
   - Root mount exclusivity check
-- Validate mount points (absolute, no `..`)
-- Validate against limits:
-  - File count vs `max_file_count`
-  - Mount count vs `max_mount_count`
-  - Path lengths vs `max_path_length`
-- Add shared lock (`LOCK_SH`) for RO files via `add_file()` / `add_dir()`
+- Validate mount points (absolute, no `..`, no null bytes)
 
 **Acceptance criteria:**
-- [ ] add_fat_image() loads and validates FAT image
-- [ ] add_empty_fat_mount() creates formatted FAT
-- [ ] Conflict detection works for all cases
-- [ ] Root mount (`/`) prevents other additions
-- [ ] FsLimits enforced (file count, mount count, path length)
-- [ ] Shared locks acquired for RO files
-- [ ] Unit tests pass
+- [x] add_fat_image() loads and validates FAT image
+- [x] add_empty_fat_mount() creates formatted FAT
+- [x] add_empty_fat_mount_at() creates FAT at specified path
+- [x] Conflict detection works for all cases
+- [x] Root mount (`/`) prevents other additions
+- [x] Unit tests pass
 
 **Tests to add:**
-- `test_builder_add_fat_image`
-- `test_builder_add_empty_fat`
-- `test_builder_add_empty_fat_at` - verify file persists after drop
-- `test_builder_fat_conflict_with_file`
-- `test_builder_fat_conflict_with_fat`
-- `test_builder_root_fat_exclusive`
-- `test_builder_limits_file_count` - exceed max_file_count
-- `test_builder_limits_mount_count` - exceed max_mount_count
-- `test_builder_limits_path_length` - exceed max_path_length
+- [x] `test_builder_add_fat_image`
+- [x] `test_builder_add_empty_fat`
+- [x] `test_builder_add_empty_fat_at` - verify file persists after drop
+- [x] `test_builder_fat_conflict_with_file`
+- [x] `test_builder_fat_conflict_with_fat`
+- [x] `test_builder_root_fat_exclusive`
+
+**Additional tests added:**
+- [x] `test_file_after_fat_mount_conflict` - RO file under existing mount
+- [x] `test_file_after_root_fat_mount` - RO file with root mount
+- [x] `test_dir_after_fat_mount_conflict` - directory under mount
+- [x] `test_dir_after_root_fat_mount` - directory with root mount
+- [x] `test_nested_fat_mounts_rejected` - /data then /data/nested
+- [x] `test_nested_fat_mounts_reverse_order` - /data/nested then /data
+- [x] `test_builder_multiple_fat_mounts` - non-conflicting mounts
+- [x] `test_builder_fat_and_ro_files_coexist` - valid coexistence
+- [x] `test_builder_invalid_mount_point` - path validation
+- [x] `test_builder_root_fat_blocks_files` - files then root mount
+- [x] `test_builder_fat_conflict_nested_mounts` - nested mount detection
+
+**Deferred:** FsLimits and shared locks for RO files (see Appendix D)
 
 ---
 
-### Step 1.5: Update FlatBuffer Schema
+### Step 1.5: TOML Config Support for FAT Mounts
+
+**Status:** ⬜ Not Started
+
+**Goal:** Extend the TOML configuration parser to support FAT mount declarations.
+
+**Files to modify:**
+- `src/hyperlight_host/src/hyperlight_fs/config.rs`
+
+**Config format:**
+```toml
+# Mount an existing FAT image file
+[[fat_image]]
+host = "/host/path/to/data.fat"
+mount_point = "/data"
+
+# Create an empty FAT mount (temp file, deleted on drop)
+[[fat_mount]]
+mount_point = "/scratch"
+size = "10MB"
+
+# Create an empty FAT mount at a specific host path (persists after drop)
+[[fat_mount]]
+host = "/host/path/to/persistent.fat"
+mount_point = "/logs"
+size = "50MB"
+```
+
+**Types to add:**
+```rust
+/// Configuration for mounting an existing FAT image.
+#[derive(Debug, Clone, Deserialize)]
+pub struct FatImageConfig {
+    /// Path to the FAT image file on the host
+    pub host: String,
+    /// Mount point in the guest filesystem
+    pub mount_point: String,
+}
+
+/// Configuration for creating an empty FAT mount.
+#[derive(Debug, Clone, Deserialize)]
+pub struct FatMountConfig {
+    /// Optional path for persistent FAT image (temp if omitted)
+    pub host: Option<String>,
+    /// Mount point in the guest filesystem
+    pub mount_point: String,
+    /// Size of the FAT image (e.g., "10MB", "1GB", or bytes as integer)
+    pub size: SizeValue,
+}
+
+/// Size value that can be parsed from string ("10MB") or integer (bytes).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum SizeValue {
+    Bytes(usize),
+    Human(String),
+}
+```
+
+**Changes to HyperlightFsConfig:**
+```rust
+pub struct HyperlightFsConfig {
+    #[serde(default)]
+    pub file: Vec<FileMapping>,
+    #[serde(default)]
+    pub directory: Vec<DirectoryMapping>,
+    #[serde(default)]
+    pub fat_image: Vec<FatImageConfig>,    // NEW
+    #[serde(default)]
+    pub fat_mount: Vec<FatMountConfig>,    // NEW
+}
+```
+
+**Changes to from_config():**
+- Process `fat_image` entries via `add_fat_image()`
+- Process `fat_mount` entries via `add_empty_fat_mount()` or `add_empty_fat_mount_at()`
+- Parse human-readable sizes ("10MB", "1GB", etc.)
+
+**Acceptance criteria:**
+- [ ] `FatImageConfig` struct implemented
+- [ ] `FatMountConfig` struct implemented  
+- [ ] `SizeValue` parses both bytes and human-readable sizes
+- [ ] `from_config()` processes FAT entries
+- [ ] Conflict detection works via builder
+- [ ] Unit tests pass
+
+**Tests to add:**
+- `test_from_config_fat_image`
+- `test_from_config_fat_mount_temp`
+- `test_from_config_fat_mount_persistent`
+- `test_from_config_fat_size_bytes`
+- `test_from_config_fat_size_human`
+- `test_from_config_fat_conflict_with_file`
+- `test_from_config_mixed_ro_and_fat`
+
+---
+
+### Step 1.6: Update FlatBuffer Schema
 
 **Status:** ⬜ Not Started
 
@@ -1281,6 +1370,24 @@ For design limitations and constraints, see **Spec §13**.
 | HLT | x86 halt instruction; triggers VM exit |
 
 For complete glossary, see **Spec Appendix**.
+
+---
+
+## Appendix D: Deferred Items
+
+Items intentionally deferred from initial implementation. Review before considering the feature complete.
+
+| Item | Spec Reference | Reason Deferred | Review Trigger |
+|------|----------------|-----------------|----------------|
+| `FsLimits` struct | §13.4 | No guest-side code yet to hit limits | Before Phase 2 (guest-side) |
+| `with_limits()` builder method | §13.4 | YAGNI until limits are enforced | Before Phase 2 |
+| `max_file_count` enforcement | §13.4 | Manifest size not a concern yet | When manifest exceeds ~1MB |
+| `max_mount_count` enforcement | §13.4 | 64 mounts unlikely to be hit | When mount count > 10 |
+| `max_path_length` enforcement | §13.4 | Stack allocation not yet an issue | Guest VFS implementation |
+| `max_open_files` enforcement | §13.4 | Guest FD table not implemented | Guest file handle implementation |
+| Shared locks (`LOCK_SH`) for RO files | §12 | Prevents FAT exclusive lock conflicts | When mixing RO + FAT on same files |
+
+**When to revisit:** Before declaring Phase 2 complete, review this table and implement any items that become relevant.
 
 ---
 

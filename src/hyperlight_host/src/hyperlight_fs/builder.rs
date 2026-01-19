@@ -25,6 +25,7 @@ use std::path::{Component, Path, PathBuf};
 use glob::Pattern;
 use tracing::info;
 
+use super::fat_image::FatImage;
 use super::image::HyperlightFSImage;
 use crate::Result;
 use crate::error::HyperlightError;
@@ -195,26 +196,48 @@ pub struct BuildManifest {
     pub total_size: u64,
 }
 
+/// Internal representation of a FAT mount.
+// TODO(Phase 3): Remove this allow when FAT mounts are integrated with HyperlightFSImage
+#[allow(dead_code)]
+#[derive(Debug)]
+struct FatMountEntry {
+    /// The FAT image
+    image: FatImage,
+    /// Mount point in the guest filesystem (e.g., "/data")
+    mount_point: String,
+}
+
 /// Builder for HyperlightFS images.
 ///
-/// Empty by default - files must be explicitly added (no implicit mappings).
+/// Supports two types of filesystem content:
+/// - **Read-only files**: Host files mapped into the guest via [`add_file`](Self::add_file)
+///   or [`add_dir`](Self::add_dir)
+/// - **FAT mounts**: Read-write FAT filesystems via [`add_fat_image`](Self::add_fat_image)
+///   or [`add_empty_fat_mount`](Self::add_empty_fat_mount)
+///
+/// Empty by default - content must be explicitly added (no implicit mappings).
 #[derive(Debug)]
 pub struct HyperlightFSBuilder {
-    /// Files collected so far
+    /// Files collected so far (read-only mappings from host to guest)
     files: Vec<MappedFile>,
     /// Guest paths seen so far (for duplicate detection)
     guest_paths_seen: HashSet<String>,
+    /// FAT mounts collected so far (read-write filesystems)
+    fat_mounts: Vec<FatMountEntry>,
 }
 
 impl HyperlightFSBuilder {
     /// Create a new empty builder.
     ///
-    /// No files are mapped by default. Use [`add_file`](Self::add_file) or
-    /// [`add_dir`](Self::add_dir) to specify what to include.
+    /// No content is mapped by default. Use:
+    /// - [`add_file`](Self::add_file) or [`add_dir`](Self::add_dir) for read-only files
+    /// - [`add_fat_image`](Self::add_fat_image) or [`add_empty_fat_mount`](Self::add_empty_fat_mount)
+    ///   for read-write FAT filesystems
     pub fn new() -> Self {
         Self {
             files: Vec::new(),
             guest_paths_seen: HashSet::new(),
+            fat_mounts: Vec::new(),
         }
     }
 
@@ -248,6 +271,9 @@ impl HyperlightFSBuilder {
                 guest_path
             )));
         }
+
+        // Check for conflicts with existing FAT mounts
+        self.check_file_path_conflicts(&guest_path)?;
 
         // Fail immediately if file doesn't exist
         // Use symlink_metadata to avoid following symlinks
@@ -487,10 +513,389 @@ impl HyperlightFSBuilder {
         Self::from_config(&config)
     }
 
+    /// Mount an existing FAT image from a host file.
+    ///
+    /// The FAT image file will be opened with an exclusive lock to prevent
+    /// concurrent modifications.
+    ///
+    /// # Arguments
+    ///
+    /// * `host_path` - Path to the FAT image file on the host
+    /// * `mount_point` - Where the FAT filesystem will be mounted in the guest (e.g., "/data")
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The host path doesn't exist or isn't a valid FAT image
+    /// - The mount point is invalid (not absolute, contains `..`, etc.)
+    /// - The mount point conflicts with existing files or mounts
+    /// - The FAT image is already locked by another process
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    ///
+    /// let fs = HyperlightFSBuilder::new()
+    ///     .add_fat_image("/host/path/to/data.fat", "/data")?
+    ///     .build()?;
+    /// ```
+    #[cfg(unix)]
+    pub fn add_fat_image<P: AsRef<Path>>(
+        mut self,
+        host_path: P,
+        mount_point: &str,
+    ) -> Result<Self> {
+        let host_path = host_path.as_ref();
+        let mount_point = self.validate_mount_point(mount_point)?;
+
+        // Check for conflicts with existing files and mounts
+        self.check_mount_conflicts(&mount_point)?;
+
+        // Open the FAT image (acquires exclusive lock)
+        let image = FatImage::open(host_path)?;
+
+        info!(
+            host = %host_path.display(),
+            mount_point = %mount_point,
+            size = image.size(),
+            "Adding FAT image to HyperlightFS"
+        );
+
+        self.fat_mounts.push(FatMountEntry { image, mount_point });
+
+        Ok(self)
+    }
+
+    /// Windows stub - FAT mounts are not supported on Windows.
+    #[cfg(windows)]
+    pub fn add_fat_image<P: AsRef<Path>>(self, _host_path: P, _mount_point: &str) -> Result<Self> {
+        Err(HyperlightError::Error(
+            "FAT mounts are not supported on Windows".to_string(),
+        ))
+    }
+
+    /// Create an empty FAT filesystem at a mount point.
+    ///
+    /// Creates a temporary FAT image file on the host with the specified size.
+    /// The temp file is deleted when the `HyperlightFSImage` is dropped.
+    ///
+    /// # Arguments
+    ///
+    /// * `mount_point` - Where the FAT filesystem will be mounted in the guest
+    /// * `size_bytes` - Size of the FAT image (min: 1MB, max: 16GB)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The mount point is invalid or conflicts with existing files/mounts
+    /// - The size is out of range
+    /// - Failed to create or format the FAT image
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    ///
+    /// // Create a 10MB scratch space for the guest
+    /// let fs = HyperlightFSBuilder::new()
+    ///     .add_empty_fat_mount("/scratch", 10 * 1024 * 1024)?
+    ///     .build()?;
+    /// ```
+    #[cfg(unix)]
+    pub fn add_empty_fat_mount(mut self, mount_point: &str, size_bytes: usize) -> Result<Self> {
+        let mount_point = self.validate_mount_point(mount_point)?;
+
+        // Check for conflicts with existing files and mounts
+        self.check_mount_conflicts(&mount_point)?;
+
+        // Create a temp FAT image
+        let image = FatImage::create_temp(size_bytes)?;
+
+        info!(
+            mount_point = %mount_point,
+            size = size_bytes,
+            temp_path = %image.path().display(),
+            "Creating empty FAT mount in HyperlightFS"
+        );
+
+        self.fat_mounts.push(FatMountEntry { image, mount_point });
+
+        Ok(self)
+    }
+
+    /// Windows stub - FAT mounts are not supported on Windows.
+    #[cfg(windows)]
+    pub fn add_empty_fat_mount(self, _mount_point: &str, _size_bytes: usize) -> Result<Self> {
+        Err(HyperlightError::Error(
+            "FAT mounts are not supported on Windows".to_string(),
+        ))
+    }
+
+    /// Create an empty FAT filesystem backed by a specified host file.
+    ///
+    /// Like [`add_empty_fat_mount`](Self::add_empty_fat_mount), but the backing
+    /// file is created at the specified path and persists after drop. Useful for
+    /// debugging, inspection, or reusing the filesystem across runs.
+    ///
+    /// # Arguments
+    ///
+    /// * `host_path` - Where to create the FAT image file on the host
+    /// * `mount_point` - Where the FAT filesystem will be mounted in the guest
+    /// * `size_bytes` - Size of the FAT image (min: 1MB, max: 16GB)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The host path already exists
+    /// - The mount point is invalid or conflicts with existing files/mounts
+    /// - The size is out of range
+    /// - Failed to create or format the FAT image
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    ///
+    /// // Create a persistent 50MB data volume
+    /// let fs = HyperlightFSBuilder::new()
+    ///     .add_empty_fat_mount_at("/host/data.fat", "/data", 50 * 1024 * 1024)?
+    ///     .build()?;
+    /// // After drop, /host/data.fat still exists and can be inspected or reused
+    /// ```
+    #[cfg(unix)]
+    pub fn add_empty_fat_mount_at<P: AsRef<Path>>(
+        mut self,
+        host_path: P,
+        mount_point: &str,
+        size_bytes: usize,
+    ) -> Result<Self> {
+        let host_path = host_path.as_ref();
+        let mount_point = self.validate_mount_point(mount_point)?;
+
+        // Check for conflicts with existing files and mounts
+        self.check_mount_conflicts(&mount_point)?;
+
+        // Create a FAT image at the specified path
+        let image = FatImage::create_at(host_path, size_bytes)?;
+
+        info!(
+            host = %host_path.display(),
+            mount_point = %mount_point,
+            size = size_bytes,
+            "Creating FAT mount at path in HyperlightFS"
+        );
+
+        self.fat_mounts.push(FatMountEntry { image, mount_point });
+
+        Ok(self)
+    }
+
+    /// Windows stub - FAT mounts are not supported on Windows.
+    #[cfg(windows)]
+    pub fn add_empty_fat_mount_at<P: AsRef<Path>>(
+        self,
+        _host_path: P,
+        _mount_point: &str,
+        _size_bytes: usize,
+    ) -> Result<Self> {
+        Err(HyperlightError::Error(
+            "FAT mounts are not supported on Windows".to_string(),
+        ))
+    }
+
+    /// Validate and normalize a mount point.
+    ///
+    /// Mount points must be:
+    /// - Absolute (start with `/`)
+    /// - Not contain `..` components
+    /// - Not contain null bytes
+    fn validate_mount_point(&self, mount_point: &str) -> Result<String> {
+        if mount_point.contains('\0') {
+            return Err(HyperlightError::Error(format!(
+                "Invalid mount point {:?}: contains null byte",
+                mount_point
+            )));
+        }
+
+        let p = Path::new(mount_point);
+        if !p.is_absolute() {
+            return Err(HyperlightError::Error(format!(
+                "Invalid mount point {:?}: must be absolute (start with '/')",
+                mount_point
+            )));
+        }
+
+        let mut parts = Vec::new();
+        for comp in p.components() {
+            match comp {
+                Component::ParentDir => {
+                    return Err(HyperlightError::Error(format!(
+                        "Invalid mount point {:?}: '..' components are not allowed",
+                        mount_point
+                    )));
+                }
+                Component::Normal(s) => parts.push(s.to_string_lossy().to_string()),
+                Component::RootDir | Component::CurDir | Component::Prefix(_) => {}
+            }
+        }
+
+        // Root mount "/" is allowed
+        if parts.is_empty() {
+            Ok("/".to_string())
+        } else {
+            Ok(format!("/{}", parts.join("/")))
+        }
+    }
+
+    /// Check for conflicts between a new mount point and existing files/mounts.
+    ///
+    /// Conflicts occur when:
+    /// - The mount point is a prefix of an existing RO file path
+    /// - An existing RO file path is a prefix of the mount point
+    /// - Two mounts have the same or overlapping mount points
+    /// - Root mount ("/") is used with other files or mounts
+    fn check_mount_conflicts(&self, mount_point: &str) -> Result<()> {
+        let mount_with_slash = if mount_point == "/" {
+            "/".to_string()
+        } else {
+            format!("{}/", mount_point)
+        };
+
+        // If mounting at root, no other files or mounts allowed
+        if mount_point == "/" {
+            if !self.guest_paths_seen.is_empty() {
+                return Err(HyperlightError::Error(
+                    "Cannot mount at root '/': RO files already added. \
+                     Root mount must be the only filesystem content."
+                        .to_string(),
+                ));
+            }
+            if !self.fat_mounts.is_empty() {
+                return Err(HyperlightError::Error(
+                    "Cannot mount at root '/': other mounts already added. \
+                     Root mount must be the only filesystem content."
+                        .to_string(),
+                ));
+            }
+        }
+
+        // Check if any existing RO file would be under this mount point
+        for guest_path in &self.guest_paths_seen {
+            // Check if guest_path starts with mount_point
+            if guest_path == mount_point || guest_path.starts_with(&mount_with_slash) {
+                return Err(HyperlightError::Error(format!(
+                    "Mount point '{}' conflicts with existing file '{}'. \
+                     Cannot mount over existing RO files.",
+                    mount_point, guest_path
+                )));
+            }
+
+            // Check if mount_point would be under an existing file's directory
+            // (This shouldn't normally happen since we don't allow mounting files at non-leaf paths,
+            // but check anyway for safety)
+            let guest_with_slash = format!("{}/", guest_path);
+            if mount_point.starts_with(&guest_with_slash) {
+                return Err(HyperlightError::Error(format!(
+                    "Mount point '{}' conflicts with existing file '{}'. \
+                     Mount point would be under an existing file path.",
+                    mount_point, guest_path
+                )));
+            }
+        }
+
+        // Check if any existing FAT mount would conflict
+        for existing in &self.fat_mounts {
+            // Check if this is trying to add root mount when others exist
+            if existing.mount_point == "/" {
+                return Err(HyperlightError::Error(format!(
+                    "Cannot add mount at '{}': root mount already exists. \
+                     Root mount must be the only filesystem content.",
+                    mount_point
+                )));
+            }
+
+            let existing_with_slash = if existing.mount_point == "/" {
+                "/".to_string()
+            } else {
+                format!("{}/", existing.mount_point)
+            };
+
+            // Same mount point
+            if mount_point == existing.mount_point {
+                return Err(HyperlightError::Error(format!(
+                    "Mount point '{}' already in use",
+                    mount_point
+                )));
+            }
+
+            // New mount is under existing mount
+            if mount_point.starts_with(&existing_with_slash) {
+                return Err(HyperlightError::Error(format!(
+                    "Mount point '{}' conflicts with existing mount '{}'. \
+                     Cannot create nested mounts.",
+                    mount_point, existing.mount_point
+                )));
+            }
+
+            // Existing mount is under new mount
+            if existing.mount_point.starts_with(&mount_with_slash) {
+                return Err(HyperlightError::Error(format!(
+                    "Mount point '{}' conflicts with existing mount '{}'. \
+                     Cannot create nested mounts.",
+                    mount_point, existing.mount_point
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Check if a file path conflicts with existing mounts.
+    ///
+    /// This is called when adding RO files (via `add_file` or `add_dir`) to ensure
+    /// they don't fall under an existing mount point.
+    ///
+    /// # Arguments
+    ///
+    /// * `guest_path` - The guest path of the file being added
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - A root mount exists (no RO files allowed)
+    /// - The file path would be under an existing mount point
+    fn check_file_path_conflicts(&self, guest_path: &str) -> Result<()> {
+        for mount in &self.fat_mounts {
+            // Root mount means no RO files allowed
+            if mount.mount_point == "/" {
+                return Err(HyperlightError::Error(format!(
+                    "Cannot add file '{}': root mount exists. \
+                     Root mount must be the only filesystem content.",
+                    guest_path
+                )));
+            }
+
+            let mount_with_slash = format!("{}/", mount.mount_point);
+
+            // Check if file path is exactly the mount point or under it
+            if guest_path == mount.mount_point || guest_path.starts_with(&mount_with_slash) {
+                return Err(HyperlightError::Error(format!(
+                    "Cannot add file '{}': conflicts with mount at '{}'. \
+                     RO files cannot be placed under mount points.",
+                    guest_path, mount.mount_point
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
     /// Build the HyperlightFS image.
     ///
-    /// This creates memory mappings for all files. On Linux, files are
-    /// mmap'd with `MAP_PRIVATE | PROT_READ`.
+    /// This creates memory mappings for all configured content:
+    /// - **Read-only files**: mmap'd with `MAP_PRIVATE | PROT_READ`
+    /// - **FAT mounts**: mmap'd with `MAP_SHARED` for write persistence
     ///
     /// # Errors
     ///
@@ -498,6 +903,11 @@ impl HyperlightFSBuilder {
     /// - Any file cannot be opened
     /// - mmap fails
     /// - Platform is not supported (Windows)
+    ///
+    /// # Note
+    ///
+    /// FAT mount integration is not yet implemented (Phase 3). Currently only
+    /// read-only files are included in the built image.
     pub fn build(self) -> Result<HyperlightFSImage> {
         super::image::build_image(self.files)
     }
@@ -578,6 +988,7 @@ impl DirectoryBuilder {
     /// Returns an error if:
     /// - No include patterns were specified
     /// - Any generated guest path would conflict with an existing path
+    /// - Any generated guest path would conflict with an existing FAT mount
     pub fn done(mut self) -> Result<HyperlightFSBuilder> {
         if self.include_patterns.is_empty() {
             return Err(HyperlightError::Error(format!(
@@ -597,6 +1008,11 @@ impl DirectoryBuilder {
                     file.guest_path, self.host_path
                 )));
             }
+        }
+
+        // Check for conflicts with existing FAT mounts
+        for file in &files {
+            self.parent.check_file_path_conflicts(&file.guest_path)?;
         }
 
         // Add all guest paths to the seen set
@@ -1284,5 +1700,349 @@ guest = "/file.txt"
     fn test_from_toml_file_not_found() {
         let result = HyperlightFSBuilder::from_toml_file("/nonexistent/config.toml");
         assert!(result.is_err());
+    }
+
+    // ---- FAT Mount Tests ----
+
+    #[cfg(unix)]
+    mod fat_mount_tests {
+        use super::*;
+        use crate::hyperlight_fs::fat_image::MIN_FAT_IMAGE_SIZE;
+
+        #[test]
+        fn test_builder_add_fat_image() {
+            let tmp = TempDir::new().unwrap();
+            let fat_path = tmp.path().join("test.fat");
+
+            // Create a FAT image first
+            {
+                let _img = crate::hyperlight_fs::FatImage::create_at(&fat_path, MIN_FAT_IMAGE_SIZE)
+                    .expect("Failed to create FAT image");
+            }
+
+            // Now open it via the builder
+            let builder = HyperlightFSBuilder::new()
+                .add_fat_image(&fat_path, "/data")
+                .expect("Failed to add FAT image");
+
+            assert_eq!(builder.fat_mounts.len(), 1);
+            assert_eq!(builder.fat_mounts[0].mount_point, "/data");
+        }
+
+        #[test]
+        fn test_builder_add_empty_fat() {
+            let builder = HyperlightFSBuilder::new()
+                .add_empty_fat_mount("/scratch", MIN_FAT_IMAGE_SIZE)
+                .expect("Failed to add empty FAT mount");
+
+            assert_eq!(builder.fat_mounts.len(), 1);
+            assert_eq!(builder.fat_mounts[0].mount_point, "/scratch");
+            assert!(builder.fat_mounts[0].image.is_temp());
+        }
+
+        #[test]
+        fn test_builder_add_empty_fat_at() {
+            let tmp = TempDir::new().unwrap();
+            let fat_path = tmp.path().join("persistent.fat");
+
+            let builder = HyperlightFSBuilder::new()
+                .add_empty_fat_mount_at(&fat_path, "/data", MIN_FAT_IMAGE_SIZE)
+                .expect("Failed to add FAT mount at path");
+
+            assert_eq!(builder.fat_mounts.len(), 1);
+            assert_eq!(builder.fat_mounts[0].mount_point, "/data");
+            assert!(!builder.fat_mounts[0].image.is_temp());
+
+            // File should exist
+            assert!(fat_path.exists());
+
+            // Drop builder and verify file persists
+            drop(builder);
+            assert!(fat_path.exists());
+        }
+
+        #[test]
+        fn test_builder_fat_conflict_with_file() {
+            let tmp = TempDir::new().unwrap();
+            let file_path = tmp.path().join("file.txt");
+            std::fs::write(&file_path, b"content").unwrap();
+
+            // Add a file at /data/file.txt
+            let builder = HyperlightFSBuilder::new()
+                .add_file(&file_path, "/data/file.txt")
+                .expect("Failed to add file");
+
+            // Try to mount FAT at /data (parent of the file) - should fail
+            let result = builder.add_empty_fat_mount("/data", MIN_FAT_IMAGE_SIZE);
+            assert!(result.is_err());
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains("conflicts"),
+                "Expected conflict error, got: {}",
+                err
+            );
+        }
+
+        #[test]
+        fn test_builder_fat_conflict_with_fat() {
+            // Add first FAT mount
+            let builder = HyperlightFSBuilder::new()
+                .add_empty_fat_mount("/data", MIN_FAT_IMAGE_SIZE)
+                .expect("Failed to add first FAT mount");
+
+            // Try to add another FAT at the same mount point - should fail
+            let result = builder.add_empty_fat_mount("/data", MIN_FAT_IMAGE_SIZE);
+            assert!(result.is_err());
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains("already in use"),
+                "Expected 'already in use' error, got: {}",
+                err
+            );
+        }
+
+        #[test]
+        fn test_builder_fat_conflict_nested_mounts() {
+            // Add FAT at /data
+            let builder = HyperlightFSBuilder::new()
+                .add_empty_fat_mount("/data", MIN_FAT_IMAGE_SIZE)
+                .expect("Failed to add FAT mount");
+
+            // Try to add nested FAT at /data/nested - should fail
+            let result = builder.add_empty_fat_mount("/data/nested", MIN_FAT_IMAGE_SIZE);
+            assert!(result.is_err());
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains("nest"),
+                "Expected nesting conflict error, got: {}",
+                err
+            );
+        }
+
+        #[test]
+        fn test_builder_root_fat_exclusive() {
+            // Add FAT at root
+            let builder = HyperlightFSBuilder::new()
+                .add_empty_fat_mount("/", MIN_FAT_IMAGE_SIZE)
+                .expect("Failed to add root FAT mount");
+
+            // Try to add another mount - should fail
+            let result = builder.add_empty_fat_mount("/data", MIN_FAT_IMAGE_SIZE);
+            assert!(result.is_err());
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains("root"),
+                "Expected root exclusivity error, got: {}",
+                err
+            );
+        }
+
+        #[test]
+        fn test_builder_root_fat_blocks_files() {
+            let tmp = TempDir::new().unwrap();
+            let file_path = tmp.path().join("file.txt");
+            std::fs::write(&file_path, b"content").unwrap();
+
+            // Add a file first
+            let builder = HyperlightFSBuilder::new()
+                .add_file(&file_path, "/config.txt")
+                .expect("Failed to add file");
+
+            // Try to mount root FAT - should fail because files exist
+            let result = builder.add_empty_fat_mount("/", MIN_FAT_IMAGE_SIZE);
+            assert!(result.is_err());
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains("root") && err.contains("RO files"),
+                "Expected root + files conflict error, got: {}",
+                err
+            );
+        }
+
+        #[test]
+        fn test_builder_invalid_mount_point() {
+            let builder = HyperlightFSBuilder::new();
+
+            // Relative path
+            let result = builder.add_empty_fat_mount("relative/path", MIN_FAT_IMAGE_SIZE);
+            assert!(result.is_err());
+
+            let builder = HyperlightFSBuilder::new();
+
+            // Path with ..
+            let result = builder.add_empty_fat_mount("/foo/../bar", MIN_FAT_IMAGE_SIZE);
+            assert!(result.is_err());
+
+            let builder = HyperlightFSBuilder::new();
+
+            // Null byte
+            let result = builder.add_empty_fat_mount("/foo\0bar", MIN_FAT_IMAGE_SIZE);
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn test_builder_multiple_fat_mounts() {
+            // Multiple non-conflicting FAT mounts should work
+            let builder = HyperlightFSBuilder::new()
+                .add_empty_fat_mount("/data", MIN_FAT_IMAGE_SIZE)
+                .expect("Failed to add first FAT mount")
+                .add_empty_fat_mount("/scratch", MIN_FAT_IMAGE_SIZE)
+                .expect("Failed to add second FAT mount")
+                .add_empty_fat_mount("/logs", MIN_FAT_IMAGE_SIZE)
+                .expect("Failed to add third FAT mount");
+
+            assert_eq!(builder.fat_mounts.len(), 3);
+        }
+
+        #[test]
+        fn test_builder_fat_and_ro_files_coexist() {
+            let tmp = TempDir::new().unwrap();
+            let file_path = tmp.path().join("config.json");
+            std::fs::write(&file_path, b"{}").unwrap();
+
+            // RO file at /config.json and FAT at /data should coexist
+            let builder = HyperlightFSBuilder::new()
+                .add_file(&file_path, "/config.json")
+                .expect("Failed to add file")
+                .add_empty_fat_mount("/data", MIN_FAT_IMAGE_SIZE)
+                .expect("Failed to add FAT mount");
+
+            assert_eq!(builder.files.len(), 1);
+            assert_eq!(builder.fat_mounts.len(), 1);
+        }
+
+        #[test]
+        fn test_file_after_fat_mount_conflict() {
+            // This is the critical bug test: adding a file AFTER a FAT mount
+            // at a path under the mount point should fail
+            let tmp = TempDir::new().unwrap();
+            let file_path = tmp.path().join("data.txt");
+            std::fs::write(&file_path, b"data").unwrap();
+
+            let builder = HyperlightFSBuilder::new()
+                .add_empty_fat_mount("/data", MIN_FAT_IMAGE_SIZE)
+                .expect("Failed to add FAT mount");
+
+            // This should fail - file is under mount point
+            let result = builder.add_file(&file_path, "/data/file.txt");
+            assert!(result.is_err());
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains("conflicts with mount"),
+                "Expected mount conflict error, got: {}",
+                err
+            );
+        }
+
+        #[test]
+        fn test_file_after_root_fat_mount() {
+            // No files allowed when root mount exists
+            let tmp = TempDir::new().unwrap();
+            let file_path = tmp.path().join("config.json");
+            std::fs::write(&file_path, b"{}").unwrap();
+
+            let builder = HyperlightFSBuilder::new()
+                .add_empty_fat_mount("/", MIN_FAT_IMAGE_SIZE)
+                .expect("Failed to add root FAT mount");
+
+            let result = builder.add_file(&file_path, "/config.json");
+            assert!(result.is_err());
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains("root mount exists"),
+                "Expected root mount error, got: {}",
+                err
+            );
+        }
+
+        #[test]
+        fn test_dir_after_fat_mount_conflict() {
+            // Adding directory files under mount point should fail
+            let tmp = TempDir::new().unwrap();
+
+            // Create a directory structure that will map under /data
+            let data_dir = tmp.path().join("hostdir");
+            std::fs::create_dir_all(&data_dir).unwrap();
+            std::fs::write(data_dir.join("file.txt"), b"content").unwrap();
+
+            let builder = HyperlightFSBuilder::new()
+                .add_empty_fat_mount("/data", MIN_FAT_IMAGE_SIZE)
+                .expect("Failed to add FAT mount");
+
+            // This should fail - directory would map files under mount point
+            let result = builder
+                .add_dir(&data_dir, "/data")
+                .unwrap()
+                .include("**/*")
+                .done();
+            assert!(result.is_err());
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains("conflicts with mount"),
+                "Expected mount conflict error, got: {}",
+                err
+            );
+        }
+
+        #[test]
+        fn test_dir_after_root_fat_mount() {
+            // Adding directory files with root mount should fail
+            let tmp = TempDir::new().unwrap();
+
+            let src_dir = tmp.path().join("src");
+            std::fs::create_dir_all(&src_dir).unwrap();
+            std::fs::write(src_dir.join("main.rs"), b"fn main() {}").unwrap();
+
+            let builder = HyperlightFSBuilder::new()
+                .add_empty_fat_mount("/", MIN_FAT_IMAGE_SIZE)
+                .expect("Failed to add root FAT mount");
+
+            let result = builder
+                .add_dir(&src_dir, "/src")
+                .unwrap()
+                .include("**/*")
+                .done();
+            assert!(result.is_err());
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains("root mount exists"),
+                "Expected root mount error, got: {}",
+                err
+            );
+        }
+
+        #[test]
+        fn test_nested_fat_mounts_rejected() {
+            // Cannot have /data and /data/nested as separate mounts
+            let builder = HyperlightFSBuilder::new()
+                .add_empty_fat_mount("/data", MIN_FAT_IMAGE_SIZE)
+                .expect("Failed to add first FAT mount");
+
+            let result = builder.add_empty_fat_mount("/data/nested", MIN_FAT_IMAGE_SIZE);
+            assert!(result.is_err());
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains("nested mounts"),
+                "Expected nested mount error, got: {}",
+                err
+            );
+        }
+
+        #[test]
+        fn test_nested_fat_mounts_reverse_order() {
+            // Cannot have /data/nested and then /data as parent
+            let builder = HyperlightFSBuilder::new()
+                .add_empty_fat_mount("/data/nested", MIN_FAT_IMAGE_SIZE)
+                .expect("Failed to add nested FAT mount");
+
+            let result = builder.add_empty_fat_mount("/data", MIN_FAT_IMAGE_SIZE);
+            assert!(result.is_err());
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains("nested mounts"),
+                "Expected nested mount error, got: {}",
+                err
+            );
+        }
     }
 }
