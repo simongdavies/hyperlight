@@ -683,27 +683,52 @@ Wire FAT images into sandbox memory.
 
 **Status:** ⬜ Not Started
 
-**Goal:** Map FAT image data into guest address space with RW permissions.
+**Goal:** Map FAT image data into guest address space with RW permissions, including guest-side page fault handler updates.
 
 **Files to modify:**
+
+*Host side:*
 - `src/hyperlight_host/src/sandbox/uninitialized_evolve.rs`
 - `src/hyperlight_host/src/sandbox/initialized_multi_use.rs`
 - `src/hyperlight_host/src/hypervisor/hyperlight_vm.rs`
 - `src/hyperlight_host/src/sandbox/mod.rs`
 
+*Guest side:*
+- `src/hyperlight_guest_bin/src/paging.rs` - add `map_page_readwrite()` function
+- `src/hyperlight_guest_bin/src/exceptions/handler.rs` - update page fault handler
+- `src/hyperlight_common/src/mem.rs` or new shared location - FAT region tracking
+
 **Key changes:**
-- Enable writable mappings in `map_region`
+
+*Host side:*
+- Enable writable mappings in hypervisor `map_region`
 - Map FAT images using `mmap(MAP_SHARED)` (per spec §2.1)
 - Call `msync(MS_SYNC)` on HLT (per spec §3.5)
 - Return `FsError::PlatformNotSupported` on Windows
 
+*Guest side (page fault handler):*
+- Currently `map_page_readonly()` is used for ALL FS region page faults
+- Need to distinguish FAT regions (RW) from RO file regions (RO)
+- Add `map_page_readwrite()` function in `paging.rs`
+- Update page fault handler to check if address is in a FAT region:
+  - If in FAT region → `map_page_readwrite()`
+  - If in RO region → `map_page_readonly()` (existing behavior)
+- FAT region info must be accessible from `hyperlight_guest_bin` (before FS init):
+  - Option A: Store FAT ranges in PEB alongside `guest_fs_region`
+  - Option B: Parse manifest in page fault handler (expensive)
+  - Option C: Separate memory regions for FAT vs RO (cleaner but more host changes)
+
 **Acceptance criteria:**
-- [ ] FAT regions mapped with RW permissions
-- [ ] Guest addresses correct in manifest  
-- [ ] Guest can read/write FAT data
-- [ ] Writes persist to backing file
-- [ ] `msync()` called on HLT for dirty regions
-- [ ] Returns `PlatformNotSupported` on Windows
+- [ ] Host: FAT regions mapped with RW permissions in EPT/NPT
+- [ ] Host: Guest addresses correct in manifest  
+- [ ] Host: Writes persist to backing file via MAP_SHARED
+- [ ] Host: `msync()` called on HLT for dirty regions
+- [ ] Host: Returns `PlatformNotSupported` on Windows
+- [ ] Guest: `map_page_readwrite()` function added to paging.rs
+- [ ] Guest: Page fault handler creates RW PTEs for FAT region addresses
+- [ ] Guest: Page fault handler creates RO PTEs for RO file addresses (unchanged)
+- [ ] Guest: FAT region bounds accessible before FS init (via PEB or similar)
+- [ ] E2E: Guest can read/write FAT data and changes persist
 
 ---
 
