@@ -57,6 +57,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
+name = "fatfs"
+version = "0.4.0"
+source = "git+https://github.com/rafalh/rust-fatfs?rev=4eccb50d011146fbed20e133d33b22f3c27292e7#4eccb50d011146fbed20e133d33b22f3c27292e7"
+dependencies = [
+ "bitflags",
+ "log",
+]
+
+[[package]]
 name = "flatbuffers"
 version = "25.12.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -95,6 +104,7 @@ version = "0.12.0"
 dependencies = [
  "anyhow",
  "embedded-io",
+ "fatfs",
  "flatbuffers",
  "hyperlight-common",
  "hyperlight-guest-tracing",

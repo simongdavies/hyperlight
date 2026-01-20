@@ -20,7 +20,7 @@ limitations under the License.
 //! that handles:
 //! - Exclusive file locking to prevent concurrent access
 //! - Memory mapping with `MAP_SHARED` for write persistence
-//! - FAT32 formatting for new images
+//! - FAT filesystem formatting for new images (FAT12/16/32 auto-selected by size)
 //! - Automatic cleanup of temporary files
 //!
 //! # Zero-Copy Architecture
@@ -71,6 +71,18 @@ use tracing::{debug, error, info, trace, warn};
 use crate::Result;
 use crate::error::HyperlightError;
 
+/// Type alias for the I/O wrapper used with fatfs 0.4.0.
+///
+/// fatfs 0.4 uses custom Read/Write/Seek traits instead of std::io traits.
+/// StdIoWrapper adapts std::io types to fatfs's traits.
+type FatIo = fatfs::StdIoWrapper<std::io::Cursor<&'static mut [u8]>>;
+
+/// Type alias for the filesystem type with default time provider and OEM converter.
+type FatFs = fatfs::FileSystem<FatIo, fatfs::DefaultTimeProvider, fatfs::LossyOemCpConverter>;
+
+/// Type alias for a file within our FAT filesystem.
+type FatFile<'a> = fatfs::File<'a, FatIo, fatfs::DefaultTimeProvider, fatfs::LossyOemCpConverter>;
+
 /// A file handle for reading from a FAT image.
 ///
 /// Provides streaming access to file contents without loading the entire file
@@ -96,7 +108,7 @@ use crate::error::HyperlightError;
 /// }
 /// ```
 pub struct FatFileReader<'a> {
-    file: fatfs::File<'a, std::io::Cursor<&'static mut [u8]>>,
+    file: FatFile<'a>,
     /// Path to the file, used in `Debug` output.
     path: String,
 }
@@ -151,7 +163,7 @@ impl std::fmt::Debug for FatFileReader<'_> {
 /// ```
 #[must_use = "writer must be used to write data; dropping immediately writes nothing"]
 pub struct FatFileWriter<'a> {
-    file: fatfs::File<'a, std::io::Cursor<&'static mut [u8]>>,
+    file: FatFile<'a>,
     /// Path to the file, used in `Debug` output and error logging on drop.
     path: String,
 }
@@ -254,16 +266,23 @@ compile_error!("FatImage requires a 64-bit target");
 
 /// Minimum FAT image size: 1 MiB (1,048,576 bytes).
 ///
-/// FAT32 requires at least ~32KB for metadata, but we use 1 MiB as a practical
-/// minimum to ensure reasonable usable space.
+/// The `fatfs` crate auto-selects the appropriate FAT variant based on size:
+/// - FAT12: < ~4085 clusters (small volumes up to ~16MB)
+/// - FAT16: 4085-65524 clusters (medium volumes, 16MB-2GB)
+/// - FAT32: >= 65525 clusters (large volumes, requires ~33MB+)
+///
+/// At 1 MiB, FAT12 or FAT16 will be used. This is sufficient for typical
+/// Hyperlight use cases (config files, temp data). Note that FAT12/16 have
+/// a fixed root directory limit (~224-512 entries), but this is unlikely
+/// to be hit in normal sandbox usage.
 pub const MIN_FAT_IMAGE_SIZE: usize = 1_024 * 1_024;
 
 /// Maximum FAT image size: 16 GiB (17,179,869,184 bytes).
 ///
-/// This is a practical limit to avoid excessive mmap usage. FAT32 itself
-/// supports up to ~2TB with 512-byte sectors, but we cap it here for sanity.
+/// This is a practical limit to avoid excessive mmap usage. FAT itself
+/// supports much larger volumes (FAT32 up to ~2TB), but we cap it here for sanity.
 ///
-/// Note: The 4GB-1 limit often cited is for individual *files within* a FAT32
+/// Note: The 4GB-1 limit often cited is for individual *files within* a FAT
 /// filesystem, not the volume size.
 pub const MAX_FAT_IMAGE_SIZE: usize = 16 * 1_024 * 1_024 * 1_024;
 
@@ -276,7 +295,7 @@ pub const MAX_FAT_IMAGE_SIZE: usize = 16 * 1_024 * 1_024 * 1_024;
 /// # Lifecycle
 ///
 /// 1. **Creation**: `create_temp()` or `create_at()` creates a new file,
-///    formats it as FAT32, and acquires an exclusive lock.
+///    formats it as FAT, and acquires an exclusive lock.
 /// 2. **Opening**: `open()` opens an existing file and acquires an exclusive lock.
 /// 3. **Usage**: `as_ptr()` and `size()` provide access for guest memory mapping.
 /// 4. **Cleanup**: On `drop()`, the lock is released. For temp files, the file is deleted.
@@ -343,7 +362,7 @@ pub struct FatImage {
     ///
     /// The `'static` lifetime is a lie. See struct-level documentation.
     /// This field **must** be set to `None` before `munmap` in `Drop::drop()`.
-    fs: Option<fatfs::FileSystem<std::io::Cursor<&'static mut [u8]>>>,
+    fs: Option<FatFs>,
 }
 
 // Manual Debug impl because fatfs::FileSystem doesn't implement Debug
@@ -443,7 +462,7 @@ impl FatImage {
     /// Create a new empty FAT image at the specified path.
     ///
     /// Creates the file, extends it to the specified size (sparse if supported),
-    /// formats it as FAT32, and acquires an exclusive lock.
+    /// formats it as FAT, and acquires an exclusive lock.
     ///
     /// # Arguments
     ///
@@ -937,16 +956,16 @@ impl FatImage {
         let root = fs.root_dir();
 
         // Try to open as file first, then as directory.
-        // fatfs returns io::ErrorKind::NotFound if path doesn't exist.
+        // fatfs returns fatfs::Error::NotFound if path doesn't exist.
         let file_err = match root.open_file(path) {
             Ok(_) => return Ok(true),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(fatfs::Error::NotFound) => None,
             Err(e) => Some(e), // Save error in case open_dir also fails
         };
 
         match root.open_dir(path) {
             Ok(_) => Ok(true),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(fatfs::Error::NotFound) => Ok(false),
             Err(dir_err) => {
                 // Both failed with non-NotFound errors. Report the directory error,
                 // but log both for debugging.
@@ -955,7 +974,9 @@ impl FatImage {
                            "Both open_file and open_dir failed");
                 }
                 error!(path, error = %dir_err, "I/O error checking path existence");
-                Err(HyperlightError::IOError(dir_err))
+                // Convert fatfs::Error to std::io::Error
+                let io_err: std::io::Error = dir_err.into();
+                Err(HyperlightError::IOError(io_err))
             }
         }
     }
@@ -1053,7 +1074,7 @@ impl FatImage {
     /// This is where we create the `&'static mut [u8]` slice over the mmap region.
     /// See the struct-level documentation for why this is safe despite the lifetime
     /// not actually being `'static`.
-    fn open_fs(&mut self) -> Result<&mut fatfs::FileSystem<std::io::Cursor<&'static mut [u8]>>> {
+    fn open_fs(&mut self) -> Result<&mut FatFs> {
         if self.fs.is_none() {
             // SAFETY: We're creating a slice with a 'static lifetime, but it actually
             // lives only as long as the mmap region. This is the "'static lie" documented
@@ -1064,8 +1085,10 @@ impl FatImage {
             let slice: &'static mut [u8] =
                 unsafe { std::slice::from_raw_parts_mut(self.mmap_ptr, self.mmap_size) };
             let cursor = std::io::Cursor::new(slice);
+            // fatfs 0.4 uses custom I/O traits; StdIoWrapper adapts std::io types
+            let io = fatfs::StdIoWrapper::new(cursor);
 
-            let fs = fatfs::FileSystem::new(cursor, fatfs::FsOptions::new()).map_err(|e| {
+            let fs = fatfs::FileSystem::new(io, fatfs::FsOptions::new()).map_err(|e| {
                 error!(error = %e, "Failed to open FAT filesystem");
                 HyperlightError::Error(format!("Failed to open FAT filesystem: {}", e))
             })?;
@@ -1216,8 +1239,8 @@ impl FatImage {
         // Extend file to size (creates sparse file on Linux)
         Self::extend_file(&file, size).map_err(cleanup_on_err)?;
 
-        // Format as FAT32
-        Self::format_fat32(&file, size).map_err(cleanup_on_err)?;
+        // Format as FAT filesystem (auto-selects FAT12/16/32 based on size)
+        Self::format_fat(&file, size).map_err(cleanup_on_err)?;
 
         // Memory map the file
         let mmap_ptr = Self::mmap_file(&file, size).map_err(cleanup_on_err)?;
@@ -1309,33 +1332,43 @@ impl FatImage {
         Ok(ptr as *mut u8)
     }
 
-    /// Format the file as a FAT32 filesystem.
+    /// Format the file as a FAT filesystem.
     ///
-    /// Explicitly uses FAT32 regardless of size (fatfs would auto-select
-    /// FAT12/16 for small volumes).
+    /// The `fatfs` crate auto-selects the appropriate FAT variant:
+    /// - FAT12 for small volumes (< ~16MB)
+    /// - FAT16 for medium volumes (16MB - 2GB)
+    /// - FAT32 for large volumes (> ~33MB)
     ///
     /// # Errors
     ///
     /// Returns an error if formatting fails or the sync fails.
-    fn format_fat32(file: &File, size: usize) -> Result<()> {
+    fn format_fat(file: &File, size: usize) -> Result<()> {
         use std::io::{Seek, SeekFrom};
 
-        // fatfs::format_volume requires Read + Write + Seek. In Rust, `&File`
-        // implements these traits because the kernel maintains the file offset
-        // separately from the Rust borrow - multiple `&File` references share
-        // the same kernel file description and its offset. This is safe for our
-        // single-threaded formatting, but would be racy with concurrent access.
-        let mut file_ref = file;
+        // fatfs::format_volume requires Read + Write + Seek. We need a mutable
+        // reference to the file for formatting. Since File implements these traits
+        // via shared reference (&File), we clone the file descriptor to get an
+        // owned File that we can pass mutably.
+        let mut file_clone = file.try_clone().map_err(|e| {
+            error!(error = %e, "Failed to clone file for FAT formatting");
+            HyperlightError::Error(format!("Failed to clone file: {}", e))
+        })?;
 
         // Seek to start before formatting
-        file_ref.seek(SeekFrom::Start(0)).map_err(|e| {
+        file_clone.seek(SeekFrom::Start(0)).map_err(|e| {
             error!(error = %e, "Failed to seek to start for FAT formatting");
             HyperlightError::Error(format!("Failed to seek to start: {}", e))
         })?;
 
-        // Format as FAT32 explicitly (don't let fatfs auto-select FAT12/16 for small volumes)
-        let options = fatfs::FormatVolumeOptions::new().fat_type(fatfs::FatType::Fat32);
-        fatfs::format_volume(file_ref, options).map_err(|e| {
+        // fatfs 0.4 uses custom I/O traits; StdIoWrapper adapts std::io types
+        let mut io = fatfs::StdIoWrapper::new(file_clone);
+
+        // Let fatfs auto-select the appropriate FAT type based on volume size:
+        // - FAT12: < ~4085 clusters (small volumes)
+        // - FAT16: 4085 - 65524 clusters (medium volumes)
+        // - FAT32: >= 65525 clusters (large volumes, requires ~33MB+ with 512-byte sectors)
+        let options = fatfs::FormatVolumeOptions::new();
+        fatfs::format_volume(&mut io, options).map_err(|e| {
             error!(size, error = %e, "Failed to format FAT volume");
             HyperlightError::Error(format!("Failed to format FAT volume: {}", e))
         })?;
@@ -1355,15 +1388,17 @@ impl FatImage {
     fn validate_fat_image(ptr: *mut u8, size: usize) -> Result<()> {
         // SAFETY:
         // - `ptr` is valid for `size` bytes (from successful mmap_file call)
-        // - Data is initialized: either formatted by format_fat32, or read from existing file
+        // - Data is initialized: either formatted by format_fat, or read from existing file
         // - The slice lifetime is bounded by this function scope (no escape)
         // - We use a mutable slice because fatfs::FileSystem requires ReadWriteSeek,
         //   but we only read (validation doesn't modify the filesystem)
         let slice = unsafe { std::slice::from_raw_parts_mut(ptr, size) };
         let cursor = std::io::Cursor::new(slice);
+        // fatfs 0.4 uses custom I/O traits; StdIoWrapper adapts std::io types
+        let io = fatfs::StdIoWrapper::new(cursor);
 
         // Try to open as a FAT filesystem - this validates the boot sector
-        fatfs::FileSystem::new(cursor, fatfs::FsOptions::new()).map_err(|e| {
+        fatfs::FileSystem::new(io, fatfs::FsOptions::new()).map_err(|e| {
             error!(error = %e, "File is not a valid FAT image");
             HyperlightError::Error(format!("Not a valid FAT image: {}", e))
         })?;

@@ -40,7 +40,7 @@ HyperlightFS is the filesystem subsystem for Hyperlight sandboxes. It provides a
 ### 1.2 Read-Write FAT Filesystems
 
 - **Mutable**: Full read/write access to files and directories
-- **FAT32 format**: Industry-standard filesystem via `fatfs` crate
+- **FAT filesystem**: Industry-standard filesystem via `fatfs` crate (auto-selects FAT12/16/32 based on volume size)
 - **Zero-copy via MAP_SHARED**: Host file is mmap'd with `MAP_SHARED`, then the same physical pages are mapped into guest address space
 - **Auto-persist**: Guest writes go to page cache → OS flushes to backing file asynchronously
 - **Exclusive**: Each backing file locked to one sandbox at a time
@@ -130,7 +130,7 @@ The key aspect of this design is that **the same physical memory pages** are sha
 │   For add_fat_image("/host/data.fat", "/data"):                             │
 │   ┌─────────────────────────────────────────────────────────────────────┐   │
 │   │ 1. Open existing file: /host/data.fat                               │   │
-│   │ 2. Validate FAT32 format                                            │   │
+│   │ 2. Validate FAT format                                             │   │
 │   │ 3. Acquire exclusive lock: flock(fd, LOCK_EX)                       │   │
 │   │ 4. mmap(fd, MAP_SHARED, PROT_READ|PROT_WRITE) → host_ptr            │   │
 │   └─────────────────────────────────────────────────────────────────────┘   │
@@ -138,7 +138,7 @@ The key aspect of this design is that **the same physical memory pages** are sha
 │   For add_empty_fat_mount("/tmp", 1MB):                                     │
 │   ┌─────────────────────────────────────────────────────────────────────┐   │
 │   │ 1. Create temp file: /tmp/hyperlight-fat-{sandbox_id}-{random} (1MB)│   │
-│   │ 2. Format as FAT32 using fatfs crate                                │   │
+│   │ 2. Format as FAT using fatfs crate                                 │   │
 │   │ 3. Acquire exclusive lock: flock(fd, LOCK_EX)                       │   │
 │   │ 4. mmap(fd, MAP_SHARED, PROT_READ|PROT_WRITE) → host_ptr            │   │
 │   └─────────────────────────────────────────────────────────────────────┘   │
@@ -225,7 +225,7 @@ The key aspect of this design is that **the same physical memory pages** are sha
 |----------|-------|
 | Backing | Host file mmap'd with `MAP_SHARED` (writes persist automatically) |
 | Access | Read-write |
-| Format | FAT32 (via `fatfs` crate) |
+| Format | FAT (via `fatfs` crate, auto-selects FAT12/16/32) |
 | Source | Host file, programmatic creation, or guest allocation |
 | Size | Fixed at creation time (cannot grow) |
 | Exclusivity | Each backing file can only be mapped to one sandbox at a time |
@@ -250,7 +250,7 @@ The key aspect of this design is that **the same physical memory pages** are sha
 | Auto-persist | N/A | ✅ (writes go to host file) |
 | Guest creation | ❌ | ✅ |
 | Multi-sandbox | ✅ (shared) | ❌ (exclusive) |
-| Max file size | uint64 (no practical limit) | ~4GB (FAT32 limit) |
+| Max file size | uint64 (no practical limit) | ~4GB (FAT limitation) |
 | Guest memory used | None (zero-copy) | None for host FAT; heap for guest-created |
 
 ### 3.4 Future Enhancement: Read-Only FAT Mounts
@@ -480,7 +480,7 @@ impl HyperlightFSBuilder {
     
     /// Create an empty FAT filesystem at a mount point.
     /// 
-    /// Creates a temporary host file of the specified size and formats it as FAT32.
+    /// Creates a temporary host file of the specified size and formats it as FAT.
     /// The file is mmap'd with `MAP_SHARED` so writes persist automatically.
     /// This provides consistency with `add_fat_image()` - both methods create a
     /// backing host file. The temp file is deleted when the HyperlightFSImage is dropped.
@@ -511,7 +511,7 @@ impl HyperlightFSBuilder {
     /// The file is mmap'd with `MAP_SHARED` so writes persist automatically.
     /// This is useful for debugging, inspection, or reusing images across runs.
     /// 
-    /// The file is created (or truncated if it exists) and formatted as FAT32.
+    /// The file is created (or truncated if it exists) and formatted as FAT.
     /// An exclusive lock is acquired - same file cannot be used by another sandbox.
     /// 
     /// # Arguments
@@ -787,7 +787,7 @@ pub fn read_dir(path: &str) -> Result<Vec<DirEntry>, FsError>;
 /// # Errors
 /// * Insufficient memory
 /// * Mount point already in use
-/// * Size too small for FAT32
+/// * Size too small for FAT
 pub fn create_fat_mount(mount_point: &str, size_bytes: usize) -> Result<(), FsError>;
 
 /// Unmount a guest-created FAT filesystem.
@@ -1067,9 +1067,9 @@ The following operations return `-2` (ENOTSUP):
 
 | Operation | Reason |
 |-----------|--------|
-| Symlink creation/reading | FAT32 doesn't support symlinks |
-| Hard link creation | FAT32 doesn't support hard links |
-| chmod/chown | FAT32 has no Unix permissions |
+| Symlink creation/reading | FAT doesn't support symlinks |
+| Hard link creation | FAT doesn't support hard links |
+| chmod/chown | FAT has no Unix permissions |
 | mknod | No device files |
 | File locking (fcntl F_SETLK) | Not implemented |
 
@@ -1236,7 +1236,17 @@ root_type HyperlightFS;
 
 ### 9.2 FAT Image Structure
 
-Each FAT image (host-provided or guest-created) follows standard FAT32 layout:
+Each FAT image (host-provided or guest-created) follows standard FAT layout.
+The `fatfs` crate auto-selects the appropriate FAT variant based on volume size:
+- **FAT12**: Small volumes (< ~16 MB, up to 4084 clusters)
+- **FAT16**: Medium volumes (16 MB - 2 GB, 4085-65524 clusters)
+- **FAT32**: Large volumes (> ~33 MB, 65525+ clusters)
+
+For the 1 MB minimum image size, FAT12 or FAT16 will be used.
+
+**Note**: FAT12/16 have a fixed root directory limit (~224-512 entries).
+This is unlikely to be hit in typical Hyperlight usage but should be
+considered for workloads creating many files in the root directory.
 
 ```
 ┌────────────────────────────┐
@@ -1262,7 +1272,7 @@ Each FAT image (host-provided or guest-created) follows standard FAT32 layout:
 
 ### 10.1 Faked Unix Permissions
 
-Since FAT32 doesn't support Unix permissions, HyperlightFS fakes them:
+Since FAT doesn't support Unix permissions, HyperlightFS fakes them:
 
 | Entry Type | st_mode | Octal |
 |------------|---------|-------|
@@ -1478,20 +1488,28 @@ This ensures:
 
 **Windows/WHP Support**: The Windows hypervisor (WHP) uses a surrogate process model that currently blocks memory mappings. HyperlightFS (both RO and FAT) is not yet implemented on Windows and is tracked as a TODO.
 
-### 13.2 FAT32 Limitations
+### 13.2 FAT Filesystem Limitations
+
+The `fatfs` crate auto-selects the appropriate FAT variant based on volume size:
+- **FAT12**: Small volumes (< ~16 MB)
+- **FAT16**: Medium volumes (16 MB - 2 GB)
+- **FAT32**: Large volumes (> ~33 MB)
 
 | Limitation | Value | Impact |
 |------------|-------|--------|
 | Fixed size | Cannot grow after creation | Must specify size upfront; ENOSPC when full |
-| Min image size | 1 MB | Implementation practical minimum |
-| Max image size | 16 GB | Implementation limit (FAT32 itself supports ~2TB) |
-| Max file size | 4 GB - 1 byte | Large individual files not supported |
+| Min image size | 1 MB | Practical minimum; FAT12/16 used for small volumes |
+| Max image size | 16 GB | Implementation limit (FAT itself supports larger) |
+| Max file size | 4 GB - 1 byte | FAT32 file size limit |
 | Max filename | 255 chars (LFN) | Long names supported |
 | Max path | ~260 chars | Deep nesting limited |
 | Timestamps | 2-second resolution | Not precise; requires `guest_time` feature for real timestamps |
 | Permissions | None | Faked as 644/755 |
 | Symlinks | None | ENOTSUP |
 | Hard links | None | ENOTSUP |
+| Root dir entries (FAT12) | ~224 | Fixed limit for small volumes |
+| Root dir entries (FAT16) | ~512 | Fixed limit for medium volumes |
+| Root dir entries (FAT32) | Unlimited | Dynamic allocation |
 
 ### 13.3 Implementation Limitations
 
@@ -1518,15 +1536,15 @@ HyperlightFS enforces limits on resources that consume guest memory or have fixe
 | Max open file descriptors | 256 | ✅ `FsLimits` | FD table size |
 | Max single RO file size | **No limit** | N/A | Zero-copy, no guest memory used |
 | Max total RO file size | **No limit** | N/A | Zero-copy, shared via page cache |
-| Min FAT image size (host) | 1 MB | ❌ | FAT32 metadata + practical minimum |
-| Max FAT image size (host) | 16 GB | ❌ | Practical mmap limit (FAT32 supports ~2TB) |
+| Min FAT image size (host) | 1 MB | ❌ | Practical minimum; FAT12/16 for small sizes |
+| Max FAT image size (host) | 16 GB | ❌ | Practical mmap limit |
 | Max guest-created FAT size | Guest heap size | N/A | Allocated from guest heap |
 
 ### 13.5 Known Issues
 
 1. **SIGBUS on RO file modification**: If host modifies mmap'd file during sandbox execution, SIGBUS may occur
 2. **FAT fragmentation**: Long-running guests with many create/delete cycles may fragment
-3. **no_std fatfs**: Requires specific Rust nightly for `core_io` feature
+3. **Root directory limits**: FAT12/16 (small volumes) have fixed root directory limits (~224-512 entries)
 
 ---
 
@@ -1539,57 +1557,65 @@ The FAT filesystem implementation depends on the [`fatfs`](https://crates.io/cra
 | Metric | Value | Assessment |
 |--------|-------|------------|
 | Downloads | ~900K | Moderate adoption |
-| Last release | 0.3.6 (June 2019) | ⚠️ Stale |
+| Last release | 0.3.6 (Jan 2023) | ⚠️ 3 years stale |
 | Last commit | March 2025 | Active development |
-| Unreleased version | 0.4.0 | Breaking API changes pending |
+| Unreleased version | 0.4.0 | Never published |
 
-**Current situation**: The crate is actively maintained with 154+ commits since 0.3.6, including important bug fixes. However, these fixes are unreleased because 0.4.0 includes breaking API changes.
+**Why we use git master (0.4.0)**: The published 0.3.6 requires `core_io` crate for `no_std` builds, which only works on nightly Rust. The unreleased 0.4.0 on master replaced `core_io` with custom I/O types that work on stable Rust. This is required for the hyperlight-guest crate.
 
-**Unreleased bug fixes (on master) that may affect us**:
-- Fill FAT32 root directory clusters with zeros (avoids interpreting garbage as entries)
+**Bug fixes included in 0.4.0 (vs 0.3.6)**:
+- Fill FAT32 root directory clusters with zeros (avoids garbage entries)
 - Fix `.` and `..` directory entries (fixes fsck errors)
 - Fix `..` cluster number for first-level directories
 - Don't create LFN entries for `.` and `..`
 - Time encoding/decoding fixes
+- Removed `core_io` dependency for stable `no_std` support
 
 ### 14.2 Dependency Configuration
 
-**Initial approach**: Use published 0.3.6
+**Current configuration** (pinned to specific commit for both host and guest):
 ```toml
-fatfs = "0.3"
+# hyperlight-host/Cargo.toml
+fatfs = { git = "https://github.com/rafalh/rust-fatfs", rev = "4eccb50d011146fbed20e133d33b22f3c27292e7" }
+
+# hyperlight-guest/Cargo.toml  
+fatfs = { git = "https://github.com/rafalh/rust-fatfs", rev = "4eccb50d011146fbed20e133d33b22f3c27292e7", default-features = false, features = ["alloc"] }
 ```
 
-### 14.3 Mitigation Options
+**Note**: Both host and guest use the same git commit to ensure consistent FAT formatting and avoid version skew issues.
 
-If we encounter bugs fixed in unreleased master, we have several options:
+### 14.3 Risks and Mitigations
 
-#### Option 1: Pin to Git Commit
-```toml
-fatfs = { git = "https://github.com/rafalh/rust-fatfs.git", rev = "4eccb50" }
-```
-- **Pros**: Get all fixes, minimal effort
-- **Cons**: Breaking 0.4.0 API requires code changes, not on crates.io
+| Risk | Mitigation |
+|------|------------|
+| Git dependency not on crates.io | Pinned to specific commit hash; reproducible builds |
+| Upstream force-push | Commit hash ensures exact code version |
+| Upstream abandonment | Can vendor or fork if needed |
+| API changes | Pinned commit won't change |
 
-#### Option 2: Vendor the Crate
-Copy the crate source into `src/hyperlight_host/vendor/fatfs/`.
-- **Pros**: Full control, can cherry-pick fixes, no external dependency
-- **Cons**: Maintenance burden, need to track upstream
+### 14.4 Alternative Options (if needed)
 
-#### Option 3: Fork and Publish
-Fork to `hyperlight-dev/fatfs`, apply fixes, publish as `hyperlight-fatfs`.
-- **Pros**: Control + crates.io availability, community can benefit
+#### Option 1: Vendor the Crate
+Copy the crate source into `src/hyperlight_guest/vendor/fatfs/`.
+- **Pros**: Full control, no external dependency
+- **Cons**: Maintenance burden, need to track upstream fixes
+
+#### Option 2: Fork and Publish
+Fork to `hyperlight-dev/fatfs`, publish as `hyperlight-fatfs`.
+- **Pros**: Control + crates.io availability
 - **Cons**: Ongoing maintenance, version coordination
 
-#### Option 4: Implement Minimal FAT
+#### Option 3: Implement Minimal FAT
 Write our own minimal FAT32 implementation.
 - **Pros**: Tailored to our needs, no external dependency
-- **Cons**: Significant effort (~2-4 weeks), potential for bugs, reinventing wheel
+- **Cons**: Significant effort (~2-4 weeks), potential for bugs
 
-### 14.4 Decision Record
+### 14.5 Decision Record
 
 | Date | Decision | Rationale |
 |------|----------|----------|
-| 2026-01-19 | Start with fatfs 0.3.6 | Published, stable API; switch if we hit known bugs |
+| 2026-01-19 | Start with fatfs 0.3.6 | Published, stable API |
+| 2026-01-20 | Switch to fatfs git @ `4eccb50` | **Required for no_std guest**: v0.3.6 needs `core_io` (nightly only). Master works on stable. |
 
 ---
 
