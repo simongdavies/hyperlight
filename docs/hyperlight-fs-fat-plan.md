@@ -14,13 +14,13 @@
 | Phase | Status | Progress |
 |-------|--------|----------|
 | Phase 1: Host-Side Foundation | ✅ Complete | 6/6 |
-| Phase 2: Guest-Side Foundation | 🔄 In Progress | 1/5 |
+| Phase 2: Guest-Side Foundation | 🔄 In Progress | 2/5 |
 | Phase 3: Host-Guest Integration | ⬜ Not Started | 0/4 |
 | Phase 4: C API Implementation | ⬜ Not Started | 0/4 |
 | Phase 5: Host Extraction APIs | ⬜ Not Started | 0/3 |
 | Phase 6: Testing & Documentation | ⬜ Not Started | 0/4 |
 
-**Overall: 7/26 steps complete**
+**Overall: 8/26 steps complete**
 
 ---
 
@@ -532,43 +532,46 @@ impl fatfs::TimeProvider for HyperlightTimeProvider {
 
 ### Step 2.2: Create Guest Memory Block Device
 
-**Status:** ⬜ Not Started
+**Status:** ✅ Complete
+
+**Commit:** `db16ac33` - feat(guest): Add RawMemoryStorage for FAT filesystem access
 
 **Goal:** Create a block device adapter for in-memory FAT access.
 
-**Files to create:**
+**Files created:**
 - `src/hyperlight_guest/src/fs/fat_backend.rs`
 
-**Types to implement:**
+**Types implemented:**
 ```rust
-/// Block device backed by guest memory region.
-pub struct MemoryBlockDevice {
-    /// Pointer to start of FAT image in guest memory
+/// Error type for memory I/O operations.
+pub enum MemoryIoError {
+    OutOfBounds,
+    InvalidSeek,
+    UnexpectedEof,
+    WriteZero,
+}
+
+/// Raw memory storage adapter for fatfs.
+/// Wraps a memory region and implements fatfs I/O traits.
+pub struct RawMemoryStorage {
     base: *mut u8,
-    /// Size of the image
     size: usize,
-    /// Current position for Read/Write/Seek
     position: usize,
 }
-
-impl MemoryBlockDevice {
-    /// Create from a memory region.
-    /// 
-    /// # Safety
-    /// Caller must ensure the memory region is valid and accessible.
-    pub unsafe fn new(base: *mut u8, size: usize) -> Self;
-}
-
-// Implement traits required by fatfs
-impl Read for MemoryBlockDevice { ... }
-impl Write for MemoryBlockDevice { ... }
-impl Seek for MemoryBlockDevice { ... }
 ```
 
+**Implementation notes:**
+- Named `RawMemoryStorage` instead of `MemoryBlockDevice` to match fatfs terminology
+- Implements fatfs traits: `IoBase`, `Read`, `Write`, `Seek` (not std::io)
+- Constructor validates non-null pointer and non-zero size (panics on invalid)
+- Seek handles edge cases including `offset > i64::MAX` overflow
+- `MemoryIoError` implements `fatfs::IoError` trait
+
 **Acceptance criteria:**
-- [ ] Implements fatfs::ReadWriteSeek trait
-- [ ] Proper bounds checking
-- [ ] Works with fatfs::FileSystem
+- [x] Implements fatfs I/O traits (IoBase, Read, Write, Seek)
+- [x] Proper bounds checking
+- [x] Works with fatfs::FileSystem
+- [x] Comprehensive test coverage (9 unit tests)
 
 ---
 
