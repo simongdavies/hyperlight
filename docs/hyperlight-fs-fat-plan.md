@@ -575,64 +575,247 @@ pub struct RawMemoryStorage {
 
 ---
 
-### Step 2.3: Create Guest VFS Mount Table
+### Step 2.3: GuestFat Wrapper and VFS Mount Table
 
 **Status:** ⬜ Not Started
 
-**Goal:** Create the mount table for routing paths to backends.
+**Goal:** Create the `GuestFat` high-level wrapper and VFS mount table for routing paths to backends.
+
+This step has two parts:
+- **Part A:** `GuestFat` - wraps `RawMemoryStorage` + `fatfs::FileSystem` with file operations
+- **Part B:** VFS mount table - routes paths to RO or FAT backends
 
 **Files to modify:**
-- `src/hyperlight_guest/src/fs/manifest.rs`
-- Create: `src/hyperlight_guest/src/fs/vfs.rs`
+- `src/hyperlight_guest/src/fs/fat_backend.rs` (add GuestFat, GuestFatFile, TimeProvider)
+- Create: `src/hyperlight_guest/src/fs/vfs.rs` (mount table)
+- `src/hyperlight_guest/src/fs/mod.rs` (export vfs module)
 
-**Types to implement:**
+---
+
+#### Part A: GuestFat Wrapper
+
+**Types to implement in `fat_backend.rs`:**
+
 ```rust
-/// A mounted filesystem.
-pub enum MountBackend {
-    /// Read-only memory-mapped files from host
-    ReadOnly,
-    /// Read-write FAT filesystem
-    Fat(FatFs),
+/// Time provider for FAT timestamps.
+/// 
+/// Returns fixed epoch (1980-01-01) since guests don't have a clock source.
+/// Future: integrate with guest_time feature when available.
+struct HyperlightTimeProvider;
+
+impl fatfs::TimeProvider for HyperlightTimeProvider {
+    fn get_current_date(&self) -> fatfs::Date {
+        fatfs::Date::new(1980, 1, 1)
+    }
+    fn get_current_date_time(&self) -> fatfs::DateTime {
+        fatfs::DateTime::new(fatfs::Date::new(1980, 1, 1), fatfs::Time::new(0, 0, 0, 0))
+    }
 }
 
-/// Mount table entry.
-struct Mount {
-    /// Mount point path (e.g., "/data")
-    path: String,
-    /// Backend handling this mount
-    backend: MountBackend,
+/// Type aliases for fatfs generics
+type GuestFatFs = fatfs::FileSystem<RawMemoryStorage, HyperlightTimeProvider, fatfs::LossyOemCpConverter>;
+type FatFileInner<'a> = fatfs::File<'a, RawMemoryStorage, HyperlightTimeProvider, fatfs::LossyOemCpConverter>;
+type FatDirInner<'a> = fatfs::Dir<'a, RawMemoryStorage, HyperlightTimeProvider, fatfs::LossyOemCpConverter>;
+
+/// A FAT filesystem backed by guest memory.
+///
+/// Wraps `RawMemoryStorage` + `fatfs::FileSystem` to provide
+/// file operations on a FAT image in guest memory.
+pub struct GuestFat {
+    fs: GuestFatFs,
 }
 
-/// Virtual filesystem state.
-pub struct Vfs {
-    /// Mounts sorted by path length (longest first)
-    mounts: Vec<Mount>,
-    /// Current working directory
-    cwd: String,
-}
-
-impl Vfs {
-    /// Resolve a path to a mount and relative path within it.
-    pub fn resolve(&self, path: &str) -> Result<(&Mount, &str), FsError>;
+impl GuestFat {
+    /// Open a FAT filesystem from a memory region.
+    ///
+    /// # Safety
+    /// Caller must ensure the memory region:
+    /// - Is valid and accessible for the lifetime of this GuestFat
+    /// - Contains a valid FAT filesystem image
+    /// - Is not accessed concurrently by other code
+    pub unsafe fn from_memory(base: *mut u8, size: usize) -> Result<Self, FsError>;
     
-    /// Get current working directory.
-    pub fn getcwd(&self) -> &str;
+    /// Open a file for reading.
+    pub fn open_file(&self, path: &str) -> Result<GuestFatFile<'_>, FsError>;
     
-    /// Change current working directory.
-    pub fn chdir(&mut self, path: &str) -> Result<(), FsError>;
+    /// Create or truncate a file for writing.
+    pub fn create_file(&self, path: &str) -> Result<GuestFatFile<'_>, FsError>;
+    
+    /// Open a file with specified options (read, write, create, append, truncate).
+    pub fn open_file_with_options(
+        &self,
+        path: &str,
+        read: bool,
+        write: bool,
+        create: bool,
+        append: bool,
+        truncate: bool,
+    ) -> Result<GuestFatFile<'_>, FsError>;
+    
+    /// Read directory contents.
+    pub fn read_dir(&self, path: &str) -> Result<GuestFatReadDir<'_>, FsError>;
+    
+    /// Get file/directory metadata.
+    pub fn stat(&self, path: &str) -> Result<FatStat, FsError>;
+    
+    /// Create a directory.
+    pub fn create_dir(&self, path: &str) -> Result<(), FsError>;
+    
+    /// Create a directory and all parent directories.
+    pub fn create_dir_all(&self, path: &str) -> Result<(), FsError>;
+    
+    /// Remove a file.
+    pub fn remove_file(&self, path: &str) -> Result<(), FsError>;
+    
+    /// Remove an empty directory.
+    pub fn remove_dir(&self, path: &str) -> Result<(), FsError>;
+    
+    /// Rename/move a file or directory.
+    pub fn rename(&self, from: &str, to: &str) -> Result<(), FsError>;
+}
+
+/// File metadata from a FAT filesystem.
+pub struct FatStat {
+    pub size: u64,
+    pub is_dir: bool,
+    pub is_file: bool,
+    pub created: Option<FatDateTime>,
+    pub modified: Option<FatDateTime>,
+    pub accessed: Option<FatDateTime>,
+}
+
+/// Timestamp from FAT filesystem (no timezone, limited precision).
+pub struct FatDateTime {
+    pub year: u16,   // 1980-2107
+    pub month: u8,   // 1-12
+    pub day: u8,     // 1-31
+    pub hour: u8,    // 0-23
+    pub minute: u8,  // 0-59
+    pub second: u8,  // 0-59 (2-second resolution in FAT)
+}
+
+/// A file handle for reading/writing within a GuestFat.
+pub struct GuestFatFile<'a> {
+    inner: FatFileInner<'a>,
+}
+
+impl GuestFatFile<'_> {
+    pub fn read(&mut self, buf: &mut [u8]) -> Result<usize, FsError>;
+    pub fn write(&mut self, buf: &[u8]) -> Result<usize, FsError>;
+    pub fn seek(&mut self, pos: SeekFrom) -> Result<u64, FsError>;
+    pub fn flush(&mut self) -> Result<(), FsError>;
+}
+
+/// Directory entry iterator.
+pub struct GuestFatReadDir<'a> {
+    inner: fatfs::DirIter<'a, RawMemoryStorage, HyperlightTimeProvider, fatfs::LossyOemCpConverter>,
+}
+
+/// A directory entry.
+pub struct GuestFatDirEntry {
+    pub name: String,  // Actually heapless::String or fixed array in no_std
+    pub is_dir: bool,
+    pub is_file: bool,
+    pub size: u64,
 }
 ```
 
+**Error mapping:**
+- Map `fatfs::Error<MemoryIoError>` to `FsError` variants
+- `fatfs::Error::NotFound` → `FsError::NotFound`
+- `fatfs::Error::AlreadyExists` → `FsError::AlreadyExists`
+- `fatfs::Error::DirectoryNotEmpty` → `FsError::DirectoryNotEmpty`
+- `fatfs::Error::InvalidInput` → `FsError::InvalidPath`
+- `fatfs::Error::Io(_)` → `FsError::IoError`
+
+---
+
+#### Part B: VFS Mount Table
+
+**Types to implement in `vfs.rs`:**
+
+```rust
+use alloc::string::String;
+use alloc::vec::Vec;
+use crate::fs::fat_backend::GuestFat;
+use crate::fs::FsError;
+
+/// A mounted filesystem backend.
+pub enum MountBackend {
+    /// Read-only memory-mapped files from host manifest
+    ReadOnly,
+    /// Read-write FAT filesystem
+    Fat(GuestFat),
+}
+
+/// Mount table entry.
+pub struct Mount {
+    /// Mount point path (e.g., "/data", always absolute, no trailing slash except "/")
+    pub path: String,
+    /// Backend handling this mount
+    pub backend: MountBackend,
+}
+
+/// Virtual filesystem routing table.
+///
+/// Routes paths to the appropriate backend based on mount points.
+/// Uses longest-prefix matching (e.g., "/data/foo" matches "/data" not "/").
+pub struct Vfs {
+    /// Mounts sorted by path length descending (longest first for matching)
+    mounts: Vec<Mount>,
+}
+
+impl Vfs {
+    /// Create a new empty VFS.
+    pub fn new() -> Self;
+    
+    /// Add a mount point.
+    ///
+    /// Returns error if mount point conflicts with existing mount.
+    pub fn mount(&mut self, path: String, backend: MountBackend) -> Result<(), FsError>;
+    
+    /// Resolve a path to its mount and the path relative to that mount.
+    ///
+    /// Returns `(mount, relative_path)` where `relative_path` is the portion
+    /// of the path after the mount point (always starts with "/").
+    ///
+    /// # Example
+    /// - Path "/data/foo/bar.txt" with mount at "/data"
+    /// - Returns `(&mount, "/foo/bar.txt")`
+    pub fn resolve(&self, path: &str) -> Result<(&Mount, &str), FsError>;
+    
+    /// Check if a path falls under a FAT mount.
+    pub fn is_fat_path(&self, path: &str) -> bool;
+}
+```
+
+**Path resolution rules:**
+1. Paths must be absolute (start with "/")
+2. Longest prefix match wins: "/data/logs" matches before "/data"
+3. Root mount "/" is the fallback if no other mount matches
+4. Relative path returned always starts with "/"
+
 **Acceptance criteria:**
-- [ ] Longest-prefix matching works
-- [ ] Relative path resolution with cwd
-- [ ] Mount conflict detection
-- [ ] cwd validation (must exist, must be directory)
+- [ ] `GuestFat::from_memory` opens fatfs filesystem
+- [ ] `GuestFat` file operations work (open, create, read, write, seek)
+- [ ] `GuestFat` directory operations work (readdir, mkdir, stat)
+- [ ] Error mapping from fatfs to FsError is complete
+- [ ] `Vfs::mount` adds mounts sorted by path length
+- [ ] `Vfs::resolve` uses longest-prefix matching
+- [ ] Mount conflict detection (nested mounts rejected)
+- [ ] Unit tests for GuestFat operations
+- [ ] Unit tests for VFS routing
 
 **Tests to add:**
+- `test_guest_fat_open_filesystem`
+- `test_guest_fat_create_read_file`
+- `test_guest_fat_write_read_roundtrip`
+- `test_guest_fat_directory_operations`
+- `test_guest_fat_stat`
+- `test_guest_fat_error_not_found`
+- `test_vfs_resolve_root_mount`
 - `test_vfs_resolve_longest_prefix`
-- `test_vfs_resolve_relative`
-- `test_vfs_chdir`
+- `test_vfs_mount_conflict_detection`
 
 ---
 
