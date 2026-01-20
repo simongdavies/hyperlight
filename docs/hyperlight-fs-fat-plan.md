@@ -14,13 +14,13 @@
 | Phase | Status | Progress |
 |-------|--------|----------|
 | Phase 1: Host-Side Foundation | ✅ Complete | 6/6 |
-| Phase 2: Guest-Side Foundation | 🔄 In Progress | 4/5 |
+| Phase 2: Guest-Side Foundation | ✅ Complete | 5/5 |
 | Phase 3: Host-Guest Integration | ⬜ Not Started | 0/4 |
 | Phase 4: C API Implementation | ⬜ Not Started | 0/4 |
 | Phase 5: Host Extraction APIs | ⬜ Not Started | 0/3 |
 | Phase 6: Testing & Documentation | ⬜ Not Started | 0/4 |
 
-**Overall: 10/26 steps complete**
+**Overall: 11/26 steps complete**
 
 ---
 
@@ -622,20 +622,39 @@ pub struct RawMemoryStorage {
 
 ### Step 2.5: Unified File Operations
 
-**Status:** ⬜ Not Started
+**Status:** ✅ Complete
+
+**Commit:** `7247b498` - feat(guest-fs): unified File API with VFS routing (Step 2.5)
 
 **Goal:** Route file operations through VFS to appropriate backend.
 
-**Files to modify:**
-- `src/hyperlight_guest/src/fs/file.rs`
-- `src/hyperlight_guest/src/fs/mod.rs`
+**Files modified:**
+- `src/hyperlight_guest/src/fs/file.rs` - Unified `File` enum, `OpenOptions` builder
+- `src/hyperlight_guest/src/fs/mod.rs` - Updated exports, module docs
+- `src/hyperlight_guest/src/fs/error.rs` - Added `InvalidArgument` variant
+- `src/hyperlight_guest/src/fs/fat/file.rs` - Performance docs on `len()`
+- `src/hyperlight_guest/src/fs/fat/mod.rs` - Cleaned unused re-exports
+- `src/hyperlight_guest/src/fs/fat/storage.rs` - `#[allow(dead_code)]` for future methods
+- `src/hyperlight_guest_capi/cbindgen.toml` - Exclude hyperlight-guest from parsing
+- `src/hyperlight_guest_capi/src/fs.rs` - Handle FAT files gracefully (returns -1)
+
+**Implementation notes:**
+- Created unified `File` enum with `ReadOnly(RoFile)` and `Fat(GuestFatFile<'static>)` variants
+- Added `OpenOptions` builder pattern for flexible file open modes (replaces `open_with_options`)
+- Implements `embedded_io` traits: `Read`, `Seek`, `Write` on `File`
+- VFS resolves paths using longest-prefix matching to determine backend
+- `RoFile` must be `pub` because it's in a public enum variant (Rust requirement)
+- C API only supports read-only files; FAT support deferred to future phase
+- Fixed cbindgen panic by excluding hyperlight-guest from include list
 
 **Acceptance criteria:**
-- [ ] `open()` routes to correct backend based on VFS resolution
-- [ ] `read()` works for both RO and FAT backends
-- [ ] `write()` works for FAT, returns `FsError::ReadOnly` for RO
-- [ ] `seek()` works for both backends
-- [ ] `stat()` works for both backends
+- [x] `open()` routes to correct backend based on VFS resolution
+- [x] `read()` works for both RO and FAT backends
+- [x] `write()` works for FAT, returns `FsError::ReadOnly` for RO
+- [x] `seek()` works for both backends
+- [x] `stat()` works for both backends
+- [x] `OpenOptions` builder provides clean API
+- [x] C API handles FAT files gracefully (deferred full support)
 
 ---
 
