@@ -928,7 +928,29 @@ impl SandboxMemoryLayout {
     }
 }
 
-fn round_up_to(value: usize, multiple: usize) -> usize {
+/// Round a value up to the nearest multiple of an alignment.
+///
+/// This is commonly used to align sizes to page boundaries:
+/// ```ignore
+/// let aligned = round_up_to(size, PAGE_SIZE_USIZE);
+/// ```
+///
+/// # Arguments
+///
+/// * `value` - The value to align
+/// * `multiple` - The alignment boundary (must be a power of 2)
+///
+/// # Returns
+///
+/// The smallest value >= `value` that is a multiple of `multiple`.
+/// Returns 0 if `value` is 0.
+///
+/// # Note
+///
+/// This function uses bitwise operations and requires `multiple` to be a power of 2.
+/// Using a non-power-of-2 multiple will produce incorrect results.
+#[inline]
+pub(crate) fn round_up_to(value: usize, multiple: usize) -> usize {
     (value + multiple - 1) & !(multiple - 1)
 }
 

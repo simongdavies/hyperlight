@@ -35,6 +35,23 @@ use tracing::info;
 use super::builder::MappedFile;
 use crate::Result;
 use crate::error::HyperlightError;
+use crate::mem::layout::round_up_to;
+
+/// Get the parent path of a guest path.
+///
+/// For "/test.txt", returns "/". For "/foo/bar.txt", returns "/foo".
+/// For "/" (root), returns "/" (root is its own parent).
+fn get_parent_path(path: &str) -> String {
+    path.rsplit_once('/')
+        .map(|(p, _)| {
+            if p.is_empty() {
+                "/".to_string()
+            } else {
+                p.to_string()
+            }
+        })
+        .unwrap_or_else(|| "/".to_string())
+}
 
 /// File metadata for guest memory setup.
 ///
@@ -66,19 +83,49 @@ impl FileMapping {
     }
 }
 
+/// Type of an internal inode entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InodeEntryType {
+    /// Regular read-only file
+    File,
+    /// Directory
+    Directory,
+    /// FAT mount point
+    FatMount,
+}
+
 /// Internal representation of an inode before guest addresses are assigned.
 #[derive(Debug, Clone)]
 // TODO(Phase 3): Remove this allow when HyperlightFSImage is integrated with Sandbox
 #[allow(dead_code)]
 struct InodeEntry {
-    /// Type of inode (file or directory)
-    is_dir: bool,
+    /// Type of inode
+    entry_type: InodeEntryType,
     /// Guest path
     path: String,
     /// Parent inode index
     parent: u32,
-    /// For files: size in bytes. For directories: 0
+    /// For files/FAT mounts: size in bytes. For directories: 0
     size: u64,
+    /// For FAT mounts: mount ID (1-based index). For others: 0
+    mount_id: u32,
+}
+
+/// Storage for a FAT mount in the image.
+///
+/// This stores the mount point path, raw size, and mount ID. The actual FatImage
+/// is kept in the builder until sandbox initialization.
+// TODO(Phase 3): Remove this allow when FAT mounts are wired into sandbox
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+#[cfg(unix)]
+struct FatMountStorage {
+    /// Mount point path in the guest filesystem
+    mount_point: String,
+    /// Size of the FAT image in bytes (raw, not page-aligned)
+    size: usize,
+    /// Mount ID (1-based, used to identify this mount in the manifest)
+    mount_id: u32,
 }
 
 /// A built HyperlightFS image with zero-copy file mappings.
@@ -94,13 +141,18 @@ struct InodeEntry {
 // TODO(Phase 3): Remove this allow when HyperlightFSImage is integrated with Sandbox
 #[allow(dead_code)]
 pub struct HyperlightFSImage {
-    /// Inode entries (files and directories)
+    /// Inode entries (files, directories, and FAT mounts)
     inode_entries: Vec<InodeEntry>,
-    /// Memory-mapped files with metadata
+    /// Memory-mapped files with metadata (read-only)
     #[cfg(unix)]
     file_mappings: Vec<FileMapping>,
-    /// Total size of the mapped files region (sum of page-aligned file sizes)
-    mapped_files_region_size: usize,
+    /// FAT mount storage info (actual FatImages handled separately)
+    #[cfg(unix)]
+    fat_mounts: Vec<FatMountStorage>,
+    /// Total size of the read-only mapped files region (page-aligned)
+    ro_files_region_size: usize,
+    /// Total size of the FAT mounts region (page-aligned)
+    fat_region_size: usize,
 }
 
 // TODO(Phase 3): Remove this allow when HyperlightFSImage is integrated with Sandbox
@@ -108,34 +160,55 @@ pub struct HyperlightFSImage {
 impl HyperlightFSImage {
     /// Generate a manifest with final guest addresses.
     ///
-    /// The `mapped_files_region_base` is the GVA/GPA where file contents will be mapped
-    /// in the guest's address space. Each file's guest_address is computed by
-    /// accumulating page-aligned file sizes in sorted order.
+    /// The `mapped_files_region_base` is the GVA/GPA where the combined mapped region starts.
+    /// Layout: [RO files region][FAT mounts region]
+    ///
+    /// Each entry's guest_address is computed by accumulating page-aligned sizes:
+    /// - RO files start at mapped_files_region_base
+    /// - FAT mounts start at mapped_files_region_base + ro_files_region_size
     ///
     /// # Arguments
     ///
-    /// * `mapped_files_region_base` - The guest address where the mapped files region starts
+    /// * `mapped_files_region_base` - The guest address where the mapped region starts
     ///
     /// # Returns
     ///
     /// A FlatBuffer-serialized manifest with guest addresses.
     pub(crate) fn generate_manifest(&self, mapped_files_region_base: u64) -> Result<Vec<u8>> {
         // Compute offsets on-the-fly by accumulating page-aligned sizes
-        let mut current_offset: u64 = 0;
+        // RO files are placed first, then FAT mounts
+        let mut ro_offset: u64 = 0;
+        let fat_region_base = mapped_files_region_base + self.ro_files_region_size as u64;
+        let mut fat_offset: u64 = 0;
+
         let inodes: Vec<InodeData> = self
             .inode_entries
             .iter()
             .map(|entry| {
-                if entry.is_dir {
-                    InodeData::directory(entry.path.clone(), entry.parent)
-                } else {
-                    // Compute the final guest address from current offset
-                    let guest_address = mapped_files_region_base + current_offset;
-                    // Advance offset by page-aligned size for next file
-                    let aligned_size = ((entry.size as usize + PAGE_SIZE_USIZE - 1)
-                        & !(PAGE_SIZE_USIZE - 1)) as u64;
-                    current_offset += aligned_size;
-                    InodeData::file(entry.path.clone(), entry.parent, guest_address, entry.size)
+                match entry.entry_type {
+                    InodeEntryType::Directory => {
+                        InodeData::directory(entry.path.clone(), entry.parent)
+                    }
+                    InodeEntryType::File => {
+                        // Compute the final guest address from current RO offset
+                        let guest_address = mapped_files_region_base + ro_offset;
+                        // Advance offset by page-aligned size for next file
+                        ro_offset += round_up_to(entry.size as usize, PAGE_SIZE_USIZE) as u64;
+                        InodeData::file(entry.path.clone(), entry.parent, guest_address, entry.size)
+                    }
+                    InodeEntryType::FatMount => {
+                        // Compute the final guest address from FAT region base
+                        let guest_address = fat_region_base + fat_offset;
+                        // Advance FAT offset by page-aligned size
+                        fat_offset += round_up_to(entry.size as usize, PAGE_SIZE_USIZE) as u64;
+                        InodeData::fat_mount(
+                            entry.path.clone(),
+                            entry.parent,
+                            guest_address,
+                            entry.size,
+                            entry.mount_id,
+                        )
+                    }
                 }
             })
             .collect();
@@ -149,9 +222,21 @@ impl HyperlightFSImage {
         Ok(manifest)
     }
 
-    /// Get the total size of the mapped files region (sum of page-aligned file sizes).
+    /// Get the total size of the mapped files region (RO files + FAT mounts).
     pub(crate) fn mapped_files_region_size(&self) -> usize {
-        self.mapped_files_region_size
+        self.ro_files_region_size + self.fat_region_size
+    }
+
+    /// Get the size of the read-only files region.
+    #[cfg(unix)]
+    pub(crate) fn ro_files_region_size(&self) -> usize {
+        self.ro_files_region_size
+    }
+
+    /// Get the size of the FAT mounts region.
+    #[cfg(unix)]
+    pub(crate) fn fat_region_size(&self) -> usize {
+        self.fat_region_size
     }
 
     /// Estimate the size of the manifest in bytes (page-aligned).
@@ -174,7 +259,7 @@ impl HyperlightFSImage {
         let total = ROOT_OVERHEAD + inodes_size;
 
         // Round up to page size
-        (total + PAGE_SIZE_USIZE - 1) & !(PAGE_SIZE_USIZE - 1)
+        round_up_to(total, PAGE_SIZE_USIZE)
     }
 
     /// Get the file mappings for wiring into guest memory.
@@ -185,52 +270,87 @@ impl HyperlightFSImage {
 }
 
 /// Build a HyperlightFS image with file metadata.
+///
+/// # Arguments
+///
+/// * `files` - Read-only file mappings from the builder
+/// * `fat_mount_sizes` - FAT mount info: (mount_point, size_in_bytes)
 #[cfg(unix)]
-pub(super) fn build_image(mut files: Vec<MappedFile>) -> Result<HyperlightFSImage> {
+pub(super) fn build_image(
+    mut files: Vec<MappedFile>,
+    fat_mount_sizes: Vec<(String, usize)>,
+) -> Result<HyperlightFSImage> {
     use std::collections::HashMap;
 
     // Sort files by guest path for consistent ordering
     files.sort_by(|a, b| a.guest_path.cmp(&b.guest_path));
 
-    // Calculate total data size (sum of page-aligned file sizes)
-    let total_data_size: usize = files
+    // Calculate RO files region size (sum of page-aligned file sizes)
+    let ro_files_region_size: usize = files
         .iter()
         .filter(|f| !f.is_dir)
-        .map(|f| (f.size as usize + PAGE_SIZE_USIZE - 1) & !(PAGE_SIZE_USIZE - 1))
+        .map(|f| round_up_to(f.size as usize, PAGE_SIZE_USIZE))
         .sum();
 
-    // Build parent index map
+    // Calculate FAT region size (sum of page-aligned FAT image sizes)
+    let fat_region_size: usize = fat_mount_sizes
+        .iter()
+        .map(|(_, size)| round_up_to(*size, PAGE_SIZE_USIZE))
+        .sum();
+
+    // Build parent index map for directories only
+    // FAT mounts are not added - they're leaf nodes, not containers for other inodes
     let mut parent_map: HashMap<String, u32> = HashMap::new();
     for (idx, file) in files.iter().enumerate() {
         parent_map.insert(file.guest_path.clone(), idx as u32);
     }
 
-    // Create inode entries with relative offsets (guest addresses assigned later)
-    let inode_entries: Vec<InodeEntry> = files
+    // Create inode entries for RO files (guest addresses assigned later)
+    let mut inode_entries: Vec<InodeEntry> = files
         .iter()
         .map(|file| {
             // Find parent directory
-            let parent_path = file
-                .guest_path
-                .rsplit_once('/')
-                .map(|(p, _)| p.to_string())
-                .unwrap_or_default();
+            let parent_path = get_parent_path(&file.guest_path);
             let parent_idx = parent_map.get(&parent_path).copied().unwrap_or(0);
 
             InodeEntry {
-                is_dir: file.is_dir,
+                entry_type: if file.is_dir {
+                    InodeEntryType::Directory
+                } else {
+                    InodeEntryType::File
+                },
                 path: file.guest_path.clone(),
                 parent: parent_idx,
                 size: file.size,
+                mount_id: 0,
             }
         })
         .collect();
 
-    info!(
-        inode_count = inode_entries.len(),
-        mapped_files_region_size = total_data_size,
-        "Built HyperlightFS inode entries"
-    );
+    // Add FAT mount inode entries
+    let mut fat_mounts_storage: Vec<FatMountStorage> = Vec::new();
+    for (mount_idx, (mount_point, size)) in fat_mount_sizes.iter().enumerate() {
+        // Find parent directory for the mount point
+        let parent_path = get_parent_path(mount_point);
+        let parent_idx = parent_map.get(&parent_path).copied().unwrap_or(0);
+
+        // Mount IDs are 1-based
+        let mount_id = (mount_idx + 1) as u32;
+
+        inode_entries.push(InodeEntry {
+            entry_type: InodeEntryType::FatMount,
+            path: mount_point.clone(),
+            parent: parent_idx,
+            size: *size as u64,
+            mount_id,
+        });
+
+        fat_mounts_storage.push(FatMountStorage {
+            mount_point: mount_point.clone(),
+            size: *size, // Store raw size, align when needed
+            mount_id,
+        });
+    }
 
     // Collect file mappings (actual mmap happens at sandbox init via map_file_cow)
     let mut file_mappings: Vec<FileMapping> = Vec::new();
@@ -270,20 +390,27 @@ pub(super) fn build_image(mut files: Vec<MappedFile>) -> Result<HyperlightFSImag
     info!(
         inode_count = inode_entries.len(),
         file_count = file_mappings.len(),
-        total_data_size = total_data_size,
+        ro_files_region_size = ro_files_region_size,
+        fat_region_size = fat_region_size,
+        fat_mount_count = fat_mounts_storage.len(),
         "HyperlightFS image built"
     );
 
     Ok(HyperlightFSImage {
         inode_entries,
         file_mappings,
-        mapped_files_region_size: total_data_size,
+        fat_mounts: fat_mounts_storage,
+        ro_files_region_size,
+        fat_region_size,
     })
 }
 
 /// Windows stub - not yet implemented.
 #[cfg(windows)]
-pub(super) fn build_image(_files: Vec<MappedFile>) -> Result<HyperlightFSImage> {
+pub(super) fn build_image(
+    _files: Vec<MappedFile>,
+    _fat_mount_sizes: Vec<(String, usize)>,
+) -> Result<HyperlightFSImage> {
     Err(HyperlightError::Error(
         "HyperlightFS is not yet supported on Windows".to_string(),
     ))
@@ -295,6 +422,135 @@ mod tests {
 
     use super::*;
 
+    // Tests for helper functions
+
+    #[test]
+    fn test_get_parent_path() {
+        // Root's parent is itself
+        assert_eq!(get_parent_path("/"), "/");
+
+        // Top-level file's parent is root
+        assert_eq!(get_parent_path("/test.txt"), "/");
+        assert_eq!(get_parent_path("/data"), "/");
+
+        // Nested file's parent is its directory
+        assert_eq!(get_parent_path("/foo/bar.txt"), "/foo");
+        assert_eq!(get_parent_path("/a/b/c"), "/a/b");
+        assert_eq!(
+            get_parent_path("/deep/nested/path/file.txt"),
+            "/deep/nested/path"
+        );
+    }
+
+    #[test]
+    fn test_parent_index_for_root_level_file() {
+        // Verify that a file at "/test.txt" has parent index pointing to "/"
+        let files = vec![
+            MappedFile {
+                host_path: std::path::PathBuf::new(),
+                guest_path: "/".to_string(),
+                size: 0,
+                is_dir: true,
+            },
+            MappedFile {
+                host_path: std::path::PathBuf::new(),
+                guest_path: "/test.txt".to_string(),
+                size: 100,
+                is_dir: false,
+            },
+        ];
+
+        let image = build_image(files, vec![]).expect("Failed to build image");
+
+        // Root dir should be at index 0
+        let root = &image.inode_entries[0];
+        assert_eq!(root.path, "/");
+        assert_eq!(root.entry_type, InodeEntryType::Directory);
+
+        // File should have parent index 0 (pointing to root)
+        let file = &image.inode_entries[1];
+        assert_eq!(file.path, "/test.txt");
+        assert_eq!(
+            file.parent, 0,
+            "File at /test.txt should have parent index 0 (root)"
+        );
+    }
+
+    #[test]
+    fn test_fat_mount_parent_is_root() {
+        // FAT mount at "/data" should have parent "/" (index 0)
+        let files = vec![MappedFile {
+            host_path: std::path::PathBuf::new(),
+            guest_path: "/".to_string(),
+            size: 0,
+            is_dir: true,
+        }];
+
+        let fat_mount_sizes = vec![("/data".to_string(), 4096)];
+        let image = build_image(files, fat_mount_sizes).expect("Failed to build image");
+
+        let fat_entry = image
+            .inode_entries
+            .iter()
+            .find(|e| e.entry_type == InodeEntryType::FatMount)
+            .expect("FAT mount not found");
+
+        assert_eq!(fat_entry.path, "/data");
+        assert_eq!(
+            fat_entry.parent, 0,
+            "FAT mount at /data should have parent index 0 (root)"
+        );
+    }
+
+    #[test]
+    fn test_nested_file_parent_index() {
+        // File at "/subdir/file.txt" should have parent "/subdir"
+        let files = vec![
+            MappedFile {
+                host_path: std::path::PathBuf::new(),
+                guest_path: "/".to_string(),
+                size: 0,
+                is_dir: true,
+            },
+            MappedFile {
+                host_path: std::path::PathBuf::new(),
+                guest_path: "/subdir".to_string(),
+                size: 0,
+                is_dir: true,
+            },
+            MappedFile {
+                host_path: std::path::PathBuf::new(),
+                guest_path: "/subdir/file.txt".to_string(),
+                size: 100,
+                is_dir: false,
+            },
+        ];
+
+        let image = build_image(files, vec![]).expect("Failed to build image");
+
+        // Find subdir index
+        let subdir_idx = image
+            .inode_entries
+            .iter()
+            .position(|e| e.path == "/subdir")
+            .expect("subdir not found");
+
+        // File should have parent index pointing to subdir
+        let file = image
+            .inode_entries
+            .iter()
+            .find(|e| e.path == "/subdir/file.txt")
+            .expect("file not found");
+
+        assert_eq!(
+            file.parent, subdir_idx as u32,
+            "File at /subdir/file.txt should have parent index {} (subdir)",
+            subdir_idx
+        );
+    }
+
+    // Original tests
+
     #[test]
     fn test_build_empty_image() {
         let files = vec![MappedFile {
@@ -304,7 +560,7 @@ mod tests {
             is_dir: true,
         }];
 
-        let image = build_image(files).expect("Failed to build image");
+        let image = build_image(files, vec![]).expect("Failed to build image");
 
         assert_eq!(image.inode_entries.len(), 1);
         assert_eq!(image.file_mappings.len(), 0); // Root dir only, no files
@@ -327,7 +583,7 @@ mod tests {
             },
         ];
 
-        let image = build_image(files).expect("Failed to build image");
+        let image = build_image(files, vec![]).expect("Failed to build image");
 
         // Generate manifest with a specific base address
         let mapped_files_region_base: u64 = 0x1000_0000;
@@ -359,7 +615,7 @@ mod tests {
             is_dir: false,
         }];
 
-        let image = build_image(files).expect("Failed to build image");
+        let image = build_image(files, vec![]).expect("Failed to build image");
 
         assert_eq!(image.file_mappings().len(), 1);
         assert_eq!(image.file_mappings()[0].guest_path(), "/test.txt");
@@ -373,5 +629,209 @@ mod tests {
         let parsed: HyperlightFSData = manifest.as_slice().try_into().unwrap();
         let file_inode = parsed.inodes.iter().find(|i| i.is_file()).unwrap();
         assert_eq!(file_inode.guest_address, 0x2000_0000);
+    }
+
+    #[test]
+    fn test_build_with_fat_mount() {
+        // Build image with a single FAT mount
+        let files = vec![MappedFile {
+            host_path: std::path::PathBuf::new(),
+            guest_path: "/".to_string(),
+            size: 0,
+            is_dir: true,
+        }];
+
+        let fat_mount_sizes = vec![("/data".to_string(), 4096)]; // 4KB FAT mount
+
+        let image = build_image(files, fat_mount_sizes).expect("Failed to build image");
+
+        // Should have 2 inodes: root dir + FAT mount
+        assert_eq!(image.inode_entries.len(), 2);
+
+        // Check FAT mount entry
+        let fat_entry = image
+            .inode_entries
+            .iter()
+            .find(|e| e.entry_type == InodeEntryType::FatMount)
+            .expect("FAT mount entry not found");
+        assert_eq!(fat_entry.path, "/data");
+        assert_eq!(fat_entry.size, 4096);
+        assert_eq!(fat_entry.mount_id, 1); // First mount = ID 1
+
+        // Check FAT mount storage
+        assert_eq!(image.fat_mounts.len(), 1);
+        assert_eq!(image.fat_mounts[0].mount_point, "/data");
+        assert_eq!(image.fat_mounts[0].mount_id, 1);
+
+        // Check region sizes
+        assert_eq!(image.ro_files_region_size, 0); // No RO files
+        assert_eq!(image.fat_region_size, 4096); // Page-aligned FAT size
+        assert_eq!(image.mapped_files_region_size(), 4096);
+    }
+
+    #[test]
+    fn test_generate_manifest_with_fat_mount() {
+        let files = vec![
+            MappedFile {
+                host_path: std::path::PathBuf::new(),
+                guest_path: "/".to_string(),
+                size: 0,
+                is_dir: true,
+            },
+            MappedFile {
+                host_path: std::path::PathBuf::new(),
+                guest_path: "/readme.txt".to_string(),
+                size: 100,
+                is_dir: false,
+            },
+        ];
+
+        // 8KB FAT mount
+        let fat_mount_sizes = vec![("/mnt/fat".to_string(), 8192)];
+
+        let image = build_image(files, fat_mount_sizes).expect("Failed to build image");
+
+        // Generate manifest
+        let base_addr: u64 = 0x1000_0000;
+        let manifest = image.generate_manifest(base_addr).unwrap();
+        let parsed: HyperlightFSData = manifest.as_slice().try_into().unwrap();
+
+        // Should have 3 inodes: root, file, FAT mount
+        assert_eq!(parsed.inodes.len(), 3);
+
+        // Find the file inode - should be at base_addr (RO region starts first)
+        let file_inode = parsed.inodes.iter().find(|i| i.is_file()).unwrap();
+        assert_eq!(file_inode.guest_address, base_addr);
+
+        // Find the FAT mount inode - should be after RO region
+        let fat_inode = parsed.inodes.iter().find(|i| i.is_fat_mount()).unwrap();
+        // RO file is 100 bytes, page-aligned = 4096 bytes
+        let expected_fat_addr = base_addr + 4096; // After page-aligned RO file
+        assert_eq!(fat_inode.guest_address, expected_fat_addr);
+        assert_eq!(fat_inode.size, 8192);
+        assert_eq!(fat_inode.mount_id, 1);
+        assert_eq!(fat_inode.path, "/mnt/fat");
+    }
+
+    #[test]
+    fn test_multiple_fat_mounts() {
+        let files = vec![MappedFile {
+            host_path: std::path::PathBuf::new(),
+            guest_path: "/".to_string(),
+            size: 0,
+            is_dir: true,
+        }];
+
+        // Two FAT mounts
+        let fat_mount_sizes = vec![("/data".to_string(), 4096), ("/scratch".to_string(), 8192)];
+
+        let image = build_image(files, fat_mount_sizes).expect("Failed to build image");
+
+        // Should have 3 inodes: root + 2 FAT mounts
+        assert_eq!(image.inode_entries.len(), 3);
+
+        // Check mount IDs are sequential
+        let fat_entries: Vec<_> = image
+            .inode_entries
+            .iter()
+            .filter(|e| e.entry_type == InodeEntryType::FatMount)
+            .collect();
+        assert_eq!(fat_entries.len(), 2);
+        assert_eq!(fat_entries[0].mount_id, 1);
+        assert_eq!(fat_entries[1].mount_id, 2);
+
+        // Check region size includes both FAT mounts
+        assert_eq!(image.fat_region_size, 4096 + 8192);
+
+        // Generate manifest and verify addresses
+        let base_addr: u64 = 0x2000_0000;
+        let manifest = image.generate_manifest(base_addr).unwrap();
+        let parsed: HyperlightFSData = manifest.as_slice().try_into().unwrap();
+
+        let fat_inodes: Vec<_> = parsed.inodes.iter().filter(|i| i.is_fat_mount()).collect();
+        assert_eq!(fat_inodes.len(), 2);
+
+        // First FAT mount at base (no RO files)
+        assert_eq!(fat_inodes[0].guest_address, base_addr);
+        assert_eq!(fat_inodes[0].mount_id, 1);
+
+        // Second FAT mount after first (page-aligned)
+        assert_eq!(fat_inodes[1].guest_address, base_addr + 4096);
+        assert_eq!(fat_inodes[1].mount_id, 2);
+    }
+
+    #[test]
+    fn test_estimate_manifest_size_includes_fat_mounts() {
+        let files = vec![MappedFile {
+            host_path: std::path::PathBuf::new(),
+            guest_path: "/".to_string(),
+            size: 0,
+            is_dir: true,
+        }];
+
+        // Build without FAT mounts
+        let image_no_fat = build_image(files.clone(), vec![]).unwrap();
+        let size_no_fat = image_no_fat.estimate_manifest_size();
+
+        // Build with FAT mount
+        let fat_mount_sizes = vec![("/data".to_string(), 4096)];
+        let image_with_fat = build_image(files, fat_mount_sizes).unwrap();
+        let size_with_fat = image_with_fat.estimate_manifest_size();
+
+        // Size with FAT should be larger (more inodes)
+        assert!(
+            size_with_fat >= size_no_fat,
+            "Manifest size with FAT ({}) should be >= without FAT ({})",
+            size_with_fat,
+            size_no_fat
+        );
+    }
+
+    #[test]
+    fn test_mixed_ro_files_and_fat_region_layout() {
+        // Verify that RO files come before FAT mounts in memory layout
+        let files = vec![
+            MappedFile {
+                host_path: std::path::PathBuf::new(),
+                guest_path: "/".to_string(),
+                size: 0,
+                is_dir: true,
+            },
+            MappedFile {
+                host_path: std::path::PathBuf::new(),
+                guest_path: "/file1.txt".to_string(),
+                size: 1000,
+                is_dir: false,
+            },
+            MappedFile {
+                host_path: std::path::PathBuf::new(),
+                guest_path: "/file2.txt".to_string(),
+                size: 2000,
+                is_dir: false,
+            },
+        ];
+
+        let fat_mount_sizes = vec![("/data".to_string(), 8192)];
+
+        let image = build_image(files, fat_mount_sizes).unwrap();
+
+        // RO region: 1000 bytes -> 4096 (page-aligned) + 2000 -> 4096 = 8192 total
+        assert_eq!(image.ro_files_region_size, 8192);
+        assert_eq!(image.fat_region_size, 8192);
+        assert_eq!(image.mapped_files_region_size(), 16384);
+
+        // Generate manifest
+        let base_addr: u64 = 0x1000_0000;
+        let manifest = image.generate_manifest(base_addr).unwrap();
+        let parsed: HyperlightFSData = manifest.as_slice().try_into().unwrap();
+
+        // Files should be in RO region (starting at base)
+        let file_inodes: Vec<_> = parsed.inodes.iter().filter(|i| i.is_file()).collect();
+        assert_eq!(file_inodes[0].guest_address, base_addr); // file1 at base
+        assert_eq!(file_inodes[1].guest_address, base_addr + 4096); // file2 at +4096
+
+        // FAT mount should be after RO region
+        let fat_inode = parsed.inodes.iter().find(|i| i.is_fat_mount()).unwrap();
+        assert_eq!(fat_inode.guest_address, base_addr + 8192); // After RO region
     }
 }

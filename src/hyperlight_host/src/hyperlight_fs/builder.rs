@@ -926,13 +926,15 @@ impl HyperlightFSBuilder {
     /// - Any file cannot be opened
     /// - mmap fails
     /// - Platform is not supported (Windows)
-    ///
-    /// # Note
-    ///
-    /// FAT mount integration is not yet implemented (Phase 3). Currently only
-    /// read-only files are included in the built image.
     pub fn build(self) -> Result<HyperlightFSImage> {
-        super::image::build_image(self.files)
+        // Extract mount point and size from FAT mounts
+        let fat_mount_sizes: Vec<(String, usize)> = self
+            .fat_mounts
+            .iter()
+            .map(|m| (m.mount_point.clone(), m.image.size()))
+            .collect();
+
+        super::image::build_image(self.files, fat_mount_sizes)
     }
 }
 

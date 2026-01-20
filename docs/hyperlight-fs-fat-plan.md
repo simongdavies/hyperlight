@@ -664,12 +664,13 @@ Wire FAT images into sandbox memory.
 
 ### Step 3.1: Update HyperlightFSImage for FAT
 
-**Status:** ⬜ Not Started
+**Status:** 🔄 In Progress
 
 **Goal:** Include FAT image data in the built filesystem image.
 
 **Files to modify:**
 - `src/hyperlight_host/src/hyperlight_fs/image.rs`
+- `src/hyperlight_host/src/hyperlight_fs/builder.rs` (pass fat_mounts to build_image)
 
 **Acceptance criteria:**
 - [ ] FAT images stored in HyperlightFSImage

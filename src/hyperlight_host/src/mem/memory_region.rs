@@ -260,7 +260,7 @@ impl<K: MemoryRegionKind> MemoryRegionVecBuilder<K> {
         flags: MemoryRegionFlags,
         region_type: MemoryRegionType,
     ) -> usize {
-        let aligned_size = (size + PAGE_SIZE_USIZE - 1) & !(PAGE_SIZE_USIZE - 1);
+        let aligned_size = super::layout::round_up_to(size, PAGE_SIZE_USIZE);
         self.push(aligned_size, flags, region_type)
     }
 
