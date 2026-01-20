@@ -15,6 +15,7 @@
    - [Advisory Locking Limitations](#36-advisory-locking-limitations)
 4. [Host APIs](#host-apis)
 5. [Guest APIs](#guest-apis)
+   - [Guest VFS Internals](#55-guest-vfs-internals)
 6. [C API Reference](#c-api-reference)
 7. [Mount Points and Namespace](#mount-points-and-namespace)
 8. [Data Serialization](#data-serialization)
@@ -890,6 +891,132 @@ pub struct DirEntry {
 }
 ```
 
+### 5.5 Guest VFS Internals
+
+This section describes the internal architecture of the guest VFS layer. These types are not part of the public API but document the implementation design.
+
+#### 5.5.1 VFS Mount Table
+
+The VFS maintains a mount table that maps guest paths to storage backends:
+
+```rust
+/// Virtual filesystem managing mounts and path resolution.
+struct Vfs {
+    /// Mount table, sorted by path length descending for longest-prefix matching.
+    mounts: Vec<Mount>,
+    /// File descriptor table (fd → open file handle).
+    fd_table: FdTable,
+    /// Current working directory.
+    cwd: String,
+}
+
+/// A single mount point.
+struct Mount {
+    /// Absolute path where this mount is rooted (e.g., "/data").
+    path: String,
+    /// The storage backend.
+    backend: MountBackend,
+}
+
+/// Storage backend types.
+enum MountBackend {
+    /// Read-only memory-mapped file/directory from manifest.
+    ReadOnly(ReadOnlyBackend),
+    /// Read-write FAT filesystem.
+    Fat(GuestFat),
+}
+```
+
+**Path resolution algorithm:**
+1. Normalize path (resolve `.`, `..`, make absolute using cwd)
+2. Search mounts in order (pre-sorted by path length descending)
+3. Return first mount where `path.starts_with(mount.path)`
+4. Extract relative path by stripping mount prefix
+5. Delegate to appropriate backend
+
+#### 5.5.2 GuestFat Wrapper
+
+`GuestFat` wraps the `fatfs` crate to provide FAT filesystem access over raw guest memory:
+
+```rust
+/// FAT filesystem wrapper for guest memory regions.
+struct GuestFat {
+    /// fatfs FileSystem over RawMemoryStorage.
+    /// Uses 'static lifetime via UnsafeCell pattern (guest memory is stable).
+    fs: fatfs::FileSystem<RawMemoryStorage>,
+}
+
+/// Adapts raw guest memory to fatfs I/O traits.
+struct RawMemoryStorage {
+    /// Pointer to start of FAT image in guest memory.
+    base: *mut u8,
+    /// Total size of FAT image.
+    size: usize,
+    /// Current read/write position.
+    position: usize,
+}
+```
+
+**GuestFat operations:**
+- `from_memory(ptr, size)` - Open existing FAT filesystem in memory
+- `open(path, mode)` → `GuestFatFile` - Open file with specified mode
+- `read_dir(path)` → `Vec<DirEntry>` - List directory contents
+- `mkdir(path)` - Create directory
+- `rmdir(path)` - Remove empty directory
+- `unlink(path)` - Delete file
+- `stat(path)` → `Stat` - Get file/directory metadata
+- `rename(old, new)` - Move/rename file or directory
+
+#### 5.5.3 File Handle Abstraction
+
+```rust
+/// Unified file handle that works with any backend.
+enum FileHandle {
+    /// Read-only file from manifest.
+    ReadOnly {
+        /// Pointer to file data.
+        data: *const u8,
+        /// File size.
+        size: usize,
+        /// Current position.
+        position: usize,
+    },
+    /// File on FAT filesystem.
+    Fat(GuestFatFile),
+}
+```
+
+The public `File` type wraps `FileHandle` and provides the API documented in §5.2.
+
+#### 5.5.4 TimeProvider
+
+fatfs requires a `TimeProvider` trait for file timestamps. Since guest VMs have no reliable clock, HyperlightFS uses a fixed timestamp:
+
+```rust
+/// Always returns 1980-01-01 00:00:00 (FAT epoch).
+struct HyperlightTimeProvider;
+
+impl fatfs::TimeProvider for HyperlightTimeProvider {
+    fn get_current_date_time(&self) -> fatfs::DateTime {
+        fatfs::DateTime::new(1980, 1, 1, 0, 0, 0, 0)
+    }
+}
+```
+
+**Rationale:** The 1980-01-01 epoch is the earliest representable FAT timestamp and clearly indicates "timestamp not meaningful." Future enhancements may allow passing guest time via host calls (see `guest_time` feature).
+
+#### 5.5.5 Initialization Flow
+
+Guest filesystem initialization on startup:
+
+1. **Parse manifest** - Read FlatBuffer from manifest region
+2. **Identify mounts** - Separate RO files from FAT mounts by `InodeType`
+3. **Initialize backends:**
+   - RO files: Store pointer + size for direct memory access
+   - FAT mounts: Create `RawMemoryStorage` → open `fatfs::FileSystem`
+4. **Build mount table** - Sort mounts by path length descending
+5. **Set initial cwd** - `cwd = "/"`
+
 ---
 
 ## 6. C API Reference
@@ -1373,6 +1500,24 @@ pub enum FsError {
 | OutOfMemory | -1 | ENOMEM |
 | FileLocked | -1 | EAGAIN |
 | PlatformNotSupported | -2 | ENOTSUP |
+
+### 11.3 fatfs Error Mapping (Guest Implementation)
+
+The guest FAT backend uses the `fatfs` crate. Its errors map to `FsError` as follows:
+
+| fatfs::Error | FsError |
+|--------------|---------|
+| `NotFound` | `NotFound` |
+| `AlreadyExists` | `AlreadyExists` |
+| `DirectoryNotEmpty` | `NotEmpty` |
+| `InvalidInput` | `InvalidPath` |
+| `InvalidFileNameLength` | `InvalidPath` |
+| `NotEnoughSpace` | `NoSpace` |
+| `WriteZero` | `IoError` |
+| `UnexpectedEof` | `IoError` |
+| `Io(_)` | `IoError` |
+| `UnsupportedFileSystemVersion` | `InvalidManifest` |
+| `CorruptedFileSystem` | `InvalidManifest` |
 
 ---
 
