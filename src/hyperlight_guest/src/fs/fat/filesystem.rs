@@ -232,7 +232,7 @@ impl GuestFat {
             }
 
             entries.push(FatDirEntry {
-                name: alloc::string::String::from(name),
+                name,
                 is_dir: entry.is_dir(),
                 size: entry.len(),
             });

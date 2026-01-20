@@ -16,8 +16,21 @@ limitations under the License.
 
 //! HyperlightFS manifest parsing and inode lookup.
 //!
-//! This module parses the FlatBuffer manifest from the host and provides
-//! path-based lookup to resolve guest paths to inodes.
+//! This module parses the FlatBuffer manifest from the host and provides:
+//! - VFS (Virtual Filesystem) with mount table for path routing
+//! - Path-based lookup to resolve guest paths to inodes
+//!
+//! # Initialization Flow
+//!
+//! Per spec §5.5.5:
+//! 1. Parse FlatBuffer manifest
+//! 2. Identify FAT mounts vs RO files by `InodeType`
+//! 3. Initialize backends:
+//!    - FAT mounts: Create `GuestFat` from memory region
+//!    - RO files: Handled via root ReadOnly mount
+//! 4. Build VFS mount table (sorted by path length for longest-prefix matching)
+//!
+//! Note: Initial cwd defaults to "/" (set by `Vfs::new()`).
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -26,11 +39,15 @@ use core::cell::UnsafeCell;
 use hyperlight_common::flatbuffer_wrappers::hyperlight_fs::{HyperlightFSData, InodeData};
 
 use super::error::FsError;
+use super::fat::GuestFat;
+use super::vfs::{Mount, MountBackend, Vfs};
 
 /// Parsed filesystem state.
 struct FsState {
     /// Inode table from the manifest.
     inodes: Vec<InodeData>,
+    /// Virtual filesystem with mount table.
+    vfs: Vfs,
 }
 
 /// Global filesystem state.
@@ -49,15 +66,32 @@ impl FsStateCell {
         unsafe { (*self.0.get()).as_ref() }
     }
 
+    fn is_initialized(&self) -> bool {
+        // SAFETY: Guest is single-threaded.
+        unsafe { (*self.0.get()).is_some() }
+    }
+
     fn set(&self, state: FsState) {
         // SAFETY: Guest is single-threaded.
         unsafe {
             *self.0.get() = Some(state);
         }
     }
+
+    #[cfg(test)]
+    fn reset(&self) {
+        // SAFETY: Guest is single-threaded.
+        unsafe {
+            *self.0.get() = None;
+        }
+    }
 }
 
 /// Initialize the filesystem from a manifest.
+///
+/// Parses the FlatBuffer manifest and builds the VFS mount table:
+/// - FAT mount inodes become `MountBackend::Fat` mounts
+/// - A root ReadOnly mount is added for RO file access
 ///
 /// # Arguments
 ///
@@ -70,7 +104,16 @@ impl FsStateCell {
 /// - `manifest_ptr` points to valid memory containing the manifest
 /// - The memory remains valid for the lifetime of the filesystem
 /// - This function is only called once
+///
+/// # Spec Reference
+///
+/// See spec §5.5.5 for initialization flow.
 pub unsafe fn init(manifest_ptr: *const u8, manifest_len: usize) -> Result<(), FsError> {
+    // Check if already initialized - init() must only be called once
+    if FS_STATE.is_initialized() {
+        return Err(FsError::NotSupported);
+    }
+
     if manifest_ptr.is_null() || manifest_len == 0 {
         return Err(FsError::InvalidManifest);
     }
@@ -82,8 +125,44 @@ pub unsafe fn init(manifest_ptr: *const u8, manifest_len: usize) -> Result<(), F
         .try_into()
         .map_err(|_| FsError::InvalidManifest)?;
 
+    // Build the VFS mount table
+    let mut vfs = Vfs::new();
+
+    // Process FAT mount inodes first (they take precedence over RO root)
+    for inode in &fs_data.inodes {
+        if inode.is_fat_mount() {
+            // Validate FAT mount parameters before creating GuestFat
+            if inode.guest_address == 0 {
+                return Err(FsError::InvalidManifest);
+            }
+            if inode.size == 0 {
+                return Err(FsError::InvalidManifest);
+            }
+
+            // Create GuestFat from the memory region
+            // SAFETY: Host has mapped the FAT image at guest_address with size bytes.
+            // We validated guest_address != 0 and size != 0 above.
+            let fat = unsafe {
+                GuestFat::from_memory(inode.guest_address as *mut u8, inode.size as usize)
+            }
+            .map_err(|_| FsError::InvalidManifest)?;
+
+            let mount = Mount::new(inode.path.clone(), MountBackend::Fat(fat));
+            vfs.add_mount(mount).map_err(|_| FsError::InvalidManifest)?;
+        }
+    }
+
+    // Add root ReadOnly mount for RO files.
+    // Due to longest-prefix matching, this "/" mount has lowest priority and
+    // acts as a fallback for paths not covered by more specific FAT mounts.
+    // If a FAT mount at "/" already exists, this will return AlreadyExists
+    // which we intentionally ignore - the FAT mount takes precedence.
+    let ro_root = Mount::new(String::from("/"), MountBackend::ReadOnly);
+    let _ = vfs.add_mount(ro_root);
+
     let state = FsState {
         inodes: fs_data.inodes,
+        vfs,
     };
 
     FS_STATE.set(state);
@@ -94,6 +173,60 @@ pub unsafe fn init(manifest_ptr: *const u8, manifest_len: usize) -> Result<(), F
 /// Check if the filesystem is initialized.
 pub fn is_initialized() -> bool {
     FS_STATE.get().is_some()
+}
+
+/// Reset the filesystem state (for testing only).
+///
+/// This clears all filesystem state, allowing `init()` to be called again.
+#[cfg(test)]
+pub fn reset() {
+    FS_STATE.reset();
+}
+
+/// Get a reference to the VFS.
+///
+/// Returns the VFS mount table for routing file operations to the
+/// appropriate backend (ReadOnly or FAT).
+///
+/// # Errors
+///
+/// Returns `FsError::NotInitialized` if `init()` has not been called.
+pub fn vfs() -> Result<&'static Vfs, FsError> {
+    let state = FS_STATE.get().ok_or(FsError::NotInitialized)?;
+    Ok(&state.vfs)
+}
+
+/// Get a mutable reference to the VFS.
+///
+/// # Safety
+///
+/// The caller must ensure that no other references (mutable or immutable)
+/// to the VFS exist when calling this function. While the guest is
+/// single-threaded, holding a `&Vfs` from `vfs()` while calling `vfs_mut()`
+/// would create aliasing mutable references, which is undefined behavior.
+///
+/// # Errors
+///
+/// Returns `FsError::NotInitialized` if `init()` has not been called.
+///
+/// # Example
+///
+/// ```ignore
+/// // WRONG - UB!
+/// let vfs_ref = vfs().unwrap();
+/// let vfs_mut_ref = unsafe { vfs_mut().unwrap() }; // Aliasing!
+///
+/// // CORRECT
+/// unsafe {
+///     let vfs_mut_ref = vfs_mut().unwrap();
+///     vfs_mut_ref.set_cwd("/data").unwrap();
+/// } // vfs_mut_ref dropped here
+/// let vfs_ref = vfs().unwrap(); // Safe now
+/// ```
+pub unsafe fn vfs_mut() -> Result<&'static mut Vfs, FsError> {
+    // SAFETY: Caller guarantees no aliasing references exist
+    let state = unsafe { (*FS_STATE.0.get()).as_mut() }.ok_or(FsError::NotInitialized)?;
+    Ok(&mut state.vfs)
 }
 
 /// Look up an inode by guest path.

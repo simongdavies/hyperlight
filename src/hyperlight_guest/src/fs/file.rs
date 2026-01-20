@@ -32,6 +32,8 @@ use super::fd::{self, OpenFile};
 /// # Example
 ///
 /// ```ignore
+/// use embedded_io::Read;
+///
 /// let mut file = fs::open("/config.json")?;
 /// let mut buf = [0u8; 256];
 /// let bytes_read = file.read(&mut buf)?;

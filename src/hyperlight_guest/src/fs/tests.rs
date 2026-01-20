@@ -63,7 +63,8 @@ static TEST_FILE_DATA: TestBuffer = TestBuffer::new();
 fn reset_fs() {
     // Reset the fd table
     fd::reset();
-    // Note: We can't easily reset FS_STATE, so tests must be run with fresh init
+    // Reset the filesystem state so init() can be called again
+    manifest::reset();
 }
 
 /// Create a test manifest with the given inodes.
@@ -85,6 +86,8 @@ unsafe fn init_test_fs(manifest: &[u8]) {
 
 #[test]
 fn test_init_and_is_initialized() {
+    reset_fs();
+
     // Create minimal manifest with just root
     let manifest = create_manifest(vec![InodeData::directory("/".to_string(), 0)]);
 
@@ -97,6 +100,8 @@ fn test_init_and_is_initialized() {
 
 #[test]
 fn test_stat_directory() {
+    reset_fs();
+
     let manifest = create_manifest(vec![
         InodeData::directory("/".to_string(), 0),
         InodeData::directory("/data".to_string(), 0),
@@ -116,6 +121,8 @@ fn test_stat_directory() {
 
 #[test]
 fn test_stat_file() {
+    reset_fs();
+
     // Set up test file data
     let file_content = b"Hello, HyperlightFS!";
     TEST_FILE_DATA.write(file_content);
@@ -143,6 +150,8 @@ fn test_stat_file() {
 
 #[test]
 fn test_stat_not_found() {
+    reset_fs();
+
     let manifest = create_manifest(vec![InodeData::directory("/".to_string(), 0)]);
 
     unsafe {

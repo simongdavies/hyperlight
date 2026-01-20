@@ -25,6 +25,7 @@ limitations under the License.
 //! ## Reading files (read-only, memory-mapped)
 //!
 //! ```ignore
+//! use embedded_io::Read; // Required for file.read()
 //! use hyperlight_guest::fs;
 //!
 //! // Initialize (called by runtime with manifest location)
@@ -52,7 +53,7 @@ pub mod vfs;
 
 pub use error::FsError;
 pub use file::{DirEntry, File, Stat, open, read_dir, stat};
-pub use manifest::{init, is_initialized};
+pub use manifest::{init, is_initialized, vfs, vfs_mut};
 
 #[cfg(test)]
 mod tests;

@@ -125,8 +125,8 @@ impl Mount {
         } else if path.starts_with(&self.path) {
             // Check for proper prefix (must be followed by "/" or end)
             let rest = &path[self.path.len()..];
-            if rest.starts_with('/') {
-                Some(&rest[1..]) // Strip the leading "/"
+            if let Some(stripped) = rest.strip_prefix('/') {
+                Some(stripped)
             } else {
                 None // Not a proper prefix match (e.g., "/data" doesn't match "/datafile")
             }
