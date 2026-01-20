@@ -399,7 +399,7 @@ impl HyperlightFSBuilder {
 
     /// Create a builder from a TOML configuration.
     ///
-    /// This applies all file and directory mappings from the config
+    /// This applies all file, directory, and FAT mount mappings from the config
     /// to a new builder.
     ///
     /// # Arguments
@@ -409,7 +409,8 @@ impl HyperlightFSBuilder {
     /// # Errors
     ///
     /// Returns an error if any mapping in the config is invalid (e.g.,
-    /// host file doesn't exist, invalid paths, duplicate guest paths).
+    /// host file doesn't exist, invalid paths, duplicate guest paths,
+    /// FAT mount conflicts).
     ///
     /// # Example
     ///
@@ -424,12 +425,12 @@ impl HyperlightFSBuilder {
 
         // Add individual file mappings
         for file in &config.file {
-            builder = builder.add_file(&file.host, &file.guest)?;
+            builder = builder.add_file(&file.host_path, &file.guest)?;
         }
 
         // Add directory mappings
         for dir in &config.directory {
-            let mut dir_builder = builder.add_dir(&dir.host, &dir.guest)?;
+            let mut dir_builder = builder.add_dir(&dir.host_path, &dir.guest)?;
 
             // Add include patterns (default to "**/*" if none specified)
             if dir.include.is_empty() {
@@ -446,6 +447,28 @@ impl HyperlightFSBuilder {
             }
 
             builder = dir_builder.done()?;
+        }
+
+        // Add FAT image mounts (existing FAT files)
+        for fat_img in &config.fat_image {
+            builder = builder.add_fat_image(&fat_img.host_path, &fat_img.mount_point)?;
+        }
+
+        // Add empty FAT mounts
+        for fat_mount in &config.fat_mount {
+            let size = fat_mount.size.to_bytes().map_err(|e| {
+                HyperlightError::Error(format!(
+                    "invalid size for FAT mount '{}': {}",
+                    fat_mount.mount_point, e
+                ))
+            })?;
+
+            if let Some(ref host_path) = fat_mount.host_path {
+                builder =
+                    builder.add_empty_fat_mount_at(host_path, &fat_mount.mount_point, size)?;
+            } else {
+                builder = builder.add_empty_fat_mount(&fat_mount.mount_point, size)?;
+            }
         }
 
         Ok(builder)
@@ -472,7 +495,7 @@ impl HyperlightFSBuilder {
     ///
     /// let toml = r#"
     /// [[file]]
-    /// host = "/etc/config.json"
+    /// host_path = "/etc/config.json"
     /// guest = "/config.json"
     /// "#;
     ///
@@ -1534,7 +1557,7 @@ mod tests {
         let toml = format!(
             r#"
 [[file]]
-host = "{}"
+host_path = "{}"
 guest = "/config.json"
 "#,
             file_path.display()
@@ -1558,11 +1581,11 @@ guest = "/config.json"
         let toml = format!(
             r#"
 [[file]]
-host = "{}"
+host_path = "{}"
 guest = "/a/file1.txt"
 
 [[file]]
-host = "{}"
+host_path = "{}"
 guest = "/b/file2.txt"
 "#,
             file1.display(),
@@ -1586,7 +1609,7 @@ guest = "/b/file2.txt"
         let toml = format!(
             r#"
 [[directory]]
-host = "{}"
+host_path = "{}"
 guest = "/data"
 "#,
             tmp.path().display()
@@ -1617,7 +1640,7 @@ guest = "/data"
         let toml = format!(
             r#"
 [[directory]]
-host = "{}"
+host_path = "{}"
 guest = "/assets"
 include = ["**/*.txt"]
 exclude = ["**/exclude*"]
@@ -1654,11 +1677,11 @@ exclude = ["**/exclude*"]
         let toml = format!(
             r#"
 [[file]]
-host = "{}"
+host_path = "{}"
 guest = "/config.json"
 
 [[directory]]
-host = "{}"
+host_path = "{}"
 guest = "/data"
 "#,
             single_file.display(),
@@ -1689,7 +1712,7 @@ guest = "/data"
     fn test_from_config_invalid_host_path() {
         let toml = r#"
 [[file]]
-host = "/nonexistent/path/file.txt"
+host_path = "/nonexistent/path/file.txt"
 guest = "/file.txt"
 "#;
         let result = HyperlightFSBuilder::from_toml(toml);
@@ -2043,6 +2066,190 @@ guest = "/file.txt"
                 "Expected nested mount error, got: {}",
                 err
             );
+        }
+
+        // ---- from_config FAT Tests ----
+
+        #[test]
+        fn test_from_config_fat_image() {
+            let tmp = TempDir::new().unwrap();
+            let fat_path = tmp.path().join("test.fat");
+
+            // Create a FAT image first
+            {
+                let _img = crate::hyperlight_fs::FatImage::create_at(&fat_path, MIN_FAT_IMAGE_SIZE)
+                    .expect("Failed to create FAT image");
+            }
+
+            let toml = format!(
+                r#"
+[[fat_image]]
+host_path = "{}"
+mount_point = "/data"
+"#,
+                fat_path.display()
+            );
+
+            let builder = HyperlightFSBuilder::from_toml(&toml).unwrap();
+            assert_eq!(builder.fat_mounts.len(), 1);
+            assert_eq!(builder.fat_mounts[0].mount_point, "/data");
+        }
+
+        #[test]
+        fn test_from_config_fat_mount_temp() {
+            let toml = r#"
+[[fat_mount]]
+mount_point = "/tmp"
+size = "2MB"
+"#;
+
+            let builder = HyperlightFSBuilder::from_toml(toml).unwrap();
+            assert_eq!(builder.fat_mounts.len(), 1);
+            assert_eq!(builder.fat_mounts[0].mount_point, "/tmp");
+            assert!(builder.fat_mounts[0].image.is_temp());
+        }
+
+        #[test]
+        fn test_from_config_fat_mount_persistent() {
+            let tmp = TempDir::new().unwrap();
+            let fat_path = tmp.path().join("persistent.fat");
+
+            let toml = format!(
+                r#"
+[[fat_mount]]
+host_path = "{}"
+mount_point = "/logs"
+size = "2MB"
+"#,
+                fat_path.display()
+            );
+
+            let builder = HyperlightFSBuilder::from_toml(&toml).unwrap();
+            assert_eq!(builder.fat_mounts.len(), 1);
+            assert_eq!(builder.fat_mounts[0].mount_point, "/logs");
+            assert!(!builder.fat_mounts[0].image.is_temp());
+
+            // File should exist
+            assert!(fat_path.exists());
+        }
+
+        #[test]
+        fn test_from_config_fat_size_bytes() {
+            let toml = r#"
+[[fat_mount]]
+mount_point = "/tmp"
+size = 2097152
+"#;
+
+            let builder = HyperlightFSBuilder::from_toml(toml).unwrap();
+            assert_eq!(builder.fat_mounts.len(), 1);
+            assert_eq!(builder.fat_mounts[0].image.size(), 2097152);
+        }
+
+        #[test]
+        fn test_from_config_fat_size_human() {
+            let toml = r#"
+[[fat_mount]]
+mount_point = "/tmp"
+size = "2MiB"
+"#;
+
+            let builder = HyperlightFSBuilder::from_toml(toml).unwrap();
+            assert_eq!(builder.fat_mounts.len(), 1);
+            assert_eq!(builder.fat_mounts[0].image.size(), 2 * 1024 * 1024);
+        }
+
+        #[test]
+        fn test_from_config_fat_conflict_with_file() {
+            let tmp = TempDir::new().unwrap();
+            let file_path = tmp.path().join("file.txt");
+            std::fs::write(&file_path, b"content").unwrap();
+
+            // File at /data/file.txt conflicts with FAT mount at /data
+            let toml = format!(
+                r#"
+[[file]]
+host_path = "{}"
+guest = "/data/file.txt"
+
+[[fat_mount]]
+mount_point = "/data"
+size = "2MB"
+"#,
+                file_path.display()
+            );
+
+            let result = HyperlightFSBuilder::from_toml(&toml);
+            assert!(result.is_err());
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains("conflicts"),
+                "Expected conflict error, got: {}",
+                err
+            );
+        }
+
+        #[test]
+        fn test_from_config_mixed_ro_and_fat() {
+            let tmp = TempDir::new().unwrap();
+            let file_path = tmp.path().join("config.json");
+            std::fs::write(&file_path, b"{}").unwrap();
+
+            // RO file at /config.json and FAT at /data should coexist
+            let toml = format!(
+                r#"
+[[file]]
+host_path = "{}"
+guest = "/config.json"
+
+[[fat_mount]]
+mount_point = "/data"
+size = "2MB"
+"#,
+                file_path.display()
+            );
+
+            let builder = HyperlightFSBuilder::from_toml(&toml).unwrap();
+            assert_eq!(builder.files.len(), 1);
+            assert_eq!(builder.fat_mounts.len(), 1);
+        }
+
+        #[test]
+        fn test_from_config_fat_invalid_size() {
+            let toml = r#"
+[[fat_mount]]
+mount_point = "/tmp"
+size = "10TB"
+"#;
+
+            let result = HyperlightFSBuilder::from_toml(toml);
+            assert!(result.is_err());
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains("invalid size") || err.contains("unrecognized"),
+                "Expected size error, got: {}",
+                err
+            );
+        }
+
+        #[test]
+        fn test_from_config_multiple_fat_mounts() {
+            let toml = r#"
+[[fat_mount]]
+mount_point = "/data"
+size = "2MB"
+
+[[fat_mount]]
+mount_point = "/scratch"
+size = "2MB"
+
+[[fat_mount]]
+mount_point = "/logs"
+size = "2MB"
+"#;
+
+            let builder = HyperlightFSBuilder::from_toml(toml).unwrap();
+            assert_eq!(builder.fat_mounts.len(), 3);
         }
     }
 }
