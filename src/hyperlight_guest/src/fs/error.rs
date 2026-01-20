@@ -64,6 +64,8 @@ pub enum FsError {
     TooManyOpenFiles,
     /// Operation not supported.
     NotSupported,
+    /// Invalid argument.
+    InvalidArgument,
     /// I/O error.
     IoError,
     /// Out of memory.
@@ -93,6 +95,7 @@ impl FsError {
             FsError::NoSpace => -4,              // ENOSPC
             FsError::TooManyOpenFiles => -10,    // EMFILE
             FsError::NotSupported => -2,         // ENOTSUP
+            FsError::InvalidArgument => -9,      // EINVAL
             FsError::IoError => -1,              // Generic (EIO)
             FsError::OutOfMemory => -1,          // Generic (ENOMEM)
             FsError::FileLocked => -1,           // Generic (EAGAIN)
@@ -118,6 +121,7 @@ impl fmt::Display for FsError {
             FsError::NoSpace => write!(f, "no space left on device"),
             FsError::TooManyOpenFiles => write!(f, "too many open files"),
             FsError::NotSupported => write!(f, "operation not supported"),
+            FsError::InvalidArgument => write!(f, "invalid argument"),
             FsError::IoError => write!(f, "I/O error"),
             FsError::OutOfMemory => write!(f, "out of memory"),
             FsError::FileLocked => write!(f, "file is locked"),
@@ -145,6 +149,7 @@ impl embedded_io::Error for FsError {
             FsError::NoSpace => ErrorKind::OutOfMemory,
             FsError::TooManyOpenFiles => ErrorKind::OutOfMemory,
             FsError::NotSupported => ErrorKind::Unsupported,
+            FsError::InvalidArgument => ErrorKind::InvalidInput,
             FsError::IoError => ErrorKind::Other,
             FsError::OutOfMemory => ErrorKind::OutOfMemory,
             FsError::FileLocked => ErrorKind::PermissionDenied,

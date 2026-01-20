@@ -14,45 +14,82 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-//! HyperlightFS: Filesystem for guest code.
+//! HyperlightFS: Virtual Filesystem for guest code.
 //!
-//! This module provides a VFS for reading files that have been
-//! mapped from the host into guest memory, and for accessing
-//! read-write FAT filesystems.
+//! This module provides a unified VFS that supports:
+//! - **Read-only files**: Memory-mapped from the host, zero-copy access
+//! - **FAT filesystems**: Read-write access to FAT12/16/32 images
+//!
+//! The VFS routes operations to the appropriate backend based on mount points.
+//! Paths are resolved using longest-prefix matching.
 //!
 //! # Usage
 //!
 //! ## Reading files (read-only, memory-mapped)
 //!
 //! ```ignore
-//! use embedded_io::Read; // Required for file.read()
+//! use embedded_io::Read;
 //! use hyperlight_guest::fs;
 //!
-//! // Initialize (called by runtime with manifest location)
-//! unsafe { fs::init(manifest_ptr, manifest_len)?; }
-//!
-//! // Check file size first (optional)
-//! let info = fs::stat("/config.json")?;
-//! // info.size contains the file size in bytes
-//!
-//! // Read file contents
+//! // Open and read a file from a read-only mount
 //! let mut file = fs::open("/config.json")?;
 //! let mut buf = [0u8; 1024];
 //! let bytes_read = file.read(&mut buf)?;
-//! // bytes_read tells you how many bytes were actually read.
-//! // If bytes_read < buf.len(), you've reached EOF.
-//! // If bytes_read == buf.len(), there may be more data - call read() again.
 //! ```
+//!
+//! ## Writing files (FAT filesystem)
+//!
+//! ```ignore
+//! use embedded_io::{Read, Write};
+//! use hyperlight_guest::fs::{self, OpenOptions};
+//!
+//! // Create and write to a new file on a FAT mount
+//! let mut file = OpenOptions::new()
+//!     .write(true)
+//!     .create(true)
+//!     .open("/data/output.txt")?;
+//! file.write_all(b"Hello, FAT!")?;
+//! file.flush()?;
+//!
+//! // Read it back
+//! let mut file = fs::open("/data/output.txt")?;
+//! let content = file.read_to_vec()?;
+//! ```
+//!
+//! ## Querying metadata
+//!
+//! ```ignore
+//! use hyperlight_guest::fs;
+//!
+//! // Get file/directory info
+//! let info = fs::stat("/config.json")?;
+//! println!("Size: {} bytes, is_dir: {}", info.size, info.is_dir);
+//!
+//! // List directory contents
+//! for entry in fs::read_dir("/data")? {
+//!     println!("{}: {} bytes", entry.name, entry.size);
+//! }
+//! ```
+//!
+//! # Mount Resolution
+//!
+//! When you access a path like `/data/file.txt`, the VFS finds the mount
+//! with the longest matching prefix:
+//!
+//! - If `/data` is a FAT mount → routes to FAT backend with relative path `file.txt`
+//! - If `/` is a read-only mount → routes to RO backend with full path `/data/file.txt`
+//!
+//! This allows mixing read-only and read-write mounts in the same filesystem tree.
 
 mod error;
-pub mod fat;
+mod fat;
 mod fd;
-pub mod file;
+mod file;
 mod manifest;
 pub mod vfs;
 
 pub use error::FsError;
-pub use file::{DirEntry, File, Stat, open, read_dir, stat};
+pub use file::{DirEntry, File, OpenOptions, Stat, open, read_dir, stat};
 pub use manifest::{init, is_initialized, vfs, vfs_mut};
 
 #[cfg(test)]

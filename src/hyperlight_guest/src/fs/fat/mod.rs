@@ -41,11 +41,10 @@ mod filesystem;
 mod storage;
 mod time;
 
-pub use error::MemoryIoError;
-pub use file::GuestFatFile;
-pub use filesystem::{FatDirEntry, FatStat, GuestFat};
-pub use storage::RawMemoryStorage;
-pub use time::HyperlightTimeProvider;
+pub(crate) use file::GuestFatFile;
+pub(crate) use filesystem::GuestFat;
+pub(crate) use storage::RawMemoryStorage;
+pub(crate) use time::HyperlightTimeProvider;
 
 /// Type alias for the FAT filesystem with our storage and time provider.
 pub(crate) type FatFs =

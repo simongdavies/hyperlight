@@ -344,7 +344,7 @@ fn test_open_directory_fails() {
     }
 
     let result = open("/mydir");
-    assert_eq!(result, Err(FsError::NotAFile));
+    assert!(matches!(result, Err(FsError::NotAFile)));
 }
 
 #[test]
@@ -358,7 +358,7 @@ fn test_open_not_found() {
     }
 
     let result = open("/missing.txt");
-    assert_eq!(result, Err(FsError::NotFound));
+    assert!(matches!(result, Err(FsError::NotFound)));
 }
 
 #[test]

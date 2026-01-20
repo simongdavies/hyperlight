@@ -87,10 +87,20 @@ pub extern "C" fn hl_fs_open(path: *const c_char, flags: i32) -> i32 {
 
     match fs::open(path_str) {
         Ok(file) => {
-            let fd = file.fd();
-            // Don't run destructor - we're transferring ownership to C code
-            core::mem::forget(file);
-            fd
+            // CAPI only supports read-only files (which have fds)
+            // FAT files return None and are not supported via CAPI
+            match file.fd() {
+                Some(fd) => {
+                    // Don't run destructor - we're transferring ownership to C code
+                    core::mem::forget(file);
+                    fd
+                }
+                None => {
+                    // FAT file - not supported via CAPI, drop and return error
+                    drop(file);
+                    -1
+                }
+            }
         }
         Err(_) => -1,
     }
@@ -111,7 +121,7 @@ pub extern "C" fn hl_fs_close(fd: i32) -> i32 {
     }
 
     // Create a File from the fd so it gets properly closed on drop
-    let file = fs::file::File::from_fd(fd);
+    let file = fs::File::from_fd(fd);
     drop(file);
     0
 }
@@ -139,7 +149,7 @@ pub extern "C" fn hl_fs_read(fd: i32, buf: *mut u8, count: u64) -> i64 {
     }
 
     // Create a temporary File wrapper (we won't drop it - just use for reading)
-    let mut file = fs::file::File::from_fd(fd);
+    let mut file = fs::File::from_fd(fd);
 
     let slice = unsafe { core::slice::from_raw_parts_mut(buf, count as usize) };
 
@@ -192,7 +202,7 @@ pub extern "C" fn hl_fs_lseek(fd: i32, offset: i64, whence: i32) -> i64 {
         _ => return -1,
     };
 
-    let mut file = fs::file::File::from_fd(fd);
+    let mut file = fs::File::from_fd(fd);
 
     match file.seek(seek_from) {
         Ok(pos) => {
@@ -221,7 +231,7 @@ pub extern "C" fn hl_fs_fstat(fd: i32, stat: *mut Stat) -> i32 {
         return -1;
     }
 
-    let file = fs::file::File::from_fd(fd);
+    let mut file = fs::File::from_fd(fd);
 
     match file.size() {
         Ok(size) => {

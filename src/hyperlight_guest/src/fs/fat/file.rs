@@ -60,8 +60,13 @@ impl<'a> GuestFatFile<'a> {
 
     /// Get the current file size in bytes.
     ///
-    /// Note: This seeks to the end and back, so it modifies the file position
-    /// temporarily.
+    /// # Performance
+    ///
+    /// This method performs 3 seek operations (current pos, end, restore).
+    /// For repeated size queries, store the result rather than calling this
+    /// multiple times. If you only need the size once before reading the
+    /// entire file, consider using `seek(SeekFrom::End(0))` to get the size
+    /// and then `seek(SeekFrom::Start(0))` to rewind (2 seeks instead of 3).
     ///
     /// # Errors
     ///

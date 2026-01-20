@@ -80,12 +80,14 @@ impl RawMemoryStorage {
 
     /// Returns the size of the memory region in bytes.
     #[inline]
+    #[allow(dead_code)] // Will be used in Phase 3+ for diagnostics
     pub fn size(&self) -> usize {
         self.size
     }
 
     /// Returns the current position within the memory region.
     #[inline]
+    #[allow(dead_code)] // Will be used in Phase 3+ for diagnostics
     pub fn position(&self) -> usize {
         self.position
     }
