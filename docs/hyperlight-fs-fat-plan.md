@@ -14,13 +14,13 @@
 | Phase | Status | Progress |
 |-------|--------|----------|
 | Phase 1: Host-Side Foundation | ✅ Complete | 6/6 |
-| Phase 2: Guest-Side Foundation | 🔄 In Progress | 2/5 |
+| Phase 2: Guest-Side Foundation | 🔄 In Progress | 4/5 |
 | Phase 3: Host-Guest Integration | ⬜ Not Started | 0/4 |
 | Phase 4: C API Implementation | ⬜ Not Started | 0/4 |
 | Phase 5: Host Extraction APIs | ⬜ Not Started | 0/3 |
 | Phase 6: Testing & Documentation | ⬜ Not Started | 0/4 |
 
-**Overall: 8/26 steps complete**
+**Overall: 10/26 steps complete**
 
 ---
 
@@ -549,61 +549,74 @@ pub struct RawMemoryStorage {
 
 ### Step 2.3: GuestFat Wrapper and VFS Mount Table
 
-**Status:** ⬜ Not Started
+**Status:** ✅ Complete
+
+**Commit:** `405f6997` - feat(guest-fs): Refactor FAT backend into modular structure with VFS layer
 
 **Goal:** Create `GuestFat` wrapper over `RawMemoryStorage` + `fatfs::FileSystem`, and VFS mount table for path routing.
 
-**Files to modify:**
-- `src/hyperlight_guest/src/fs/fat_backend.rs` - add `GuestFat`, `GuestFatFile`, `HyperlightTimeProvider`
-- `src/hyperlight_guest/src/fs/vfs.rs` - create new file with `Vfs`, `Mount`, `MountBackend`
-- `src/hyperlight_guest/src/fs/mod.rs` - export vfs module
+**Files created:**
+- `src/hyperlight_guest/src/fs/fat/mod.rs` - module organization
+- `src/hyperlight_guest/src/fs/fat/storage.rs` - `RawMemoryStorage` (moved from fat_backend.rs)
+- `src/hyperlight_guest/src/fs/fat/time.rs` - `HyperlightTimeProvider`
+- `src/hyperlight_guest/src/fs/fat/error.rs` - `MemoryIoError` and error mapping
+- `src/hyperlight_guest/src/fs/fat/filesystem.rs` - `GuestFat`, `FatStat`, `FatDirEntry`
+- `src/hyperlight_guest/src/fs/fat/file.rs` - `GuestFatFile`
+- `src/hyperlight_guest/src/fs/vfs.rs` - `Vfs`, `Mount`, `MountBackend`
 
-**Key types:**
-- `GuestFat` - wraps fatfs::FileSystem, provides file/dir operations
-- `GuestFatFile` - file handle with read/write/seek
-- `Vfs` - mount table with longest-prefix path resolution (per spec §7.3)
-- `MountBackend` - enum: `ReadOnly` | `Fat(GuestFat)`
+**Implementation notes:**
+- Refactored flat `fat_backend.rs` into `fat/` module with proper separation
+- `HyperlightTimeProvider` returns FAT epoch (1980-01-01 00:00:00) - per spec §10.3
+- VFS uses longest-prefix matching with mounts sorted by path length descending
+- `GuestFat` provides high-level API over fatfs with `FsError` mapping
+- `GuestFatFile` tracks read/write permissions per open mode
 
 **Acceptance criteria:**
-- [ ] `GuestFat::from_memory` opens fatfs filesystem
-- [ ] File operations: open, create, read, write, seek, flush
-- [ ] Directory operations: readdir, mkdir, rmdir, stat
-- [ ] Error mapping per spec §11.3
-- [ ] `Vfs::resolve` uses longest-prefix matching
-- [ ] Mount conflict detection
+- [x] `GuestFat::from_memory` opens fatfs filesystem
+- [x] File operations: open, read, write, seek, flush, truncate
+- [x] Directory operations: read_dir, mkdir, rmdir, stat
+- [x] Error mapping per spec §11.3
+- [x] `Vfs::resolve` uses longest-prefix matching
+- [x] Mount conflict detection (duplicate path returns `AlreadyExists`)
 
-**Tests to add:**
-- `test_guest_fat_open_filesystem`
-- `test_guest_fat_create_read_file`
-- `test_guest_fat_write_read_roundtrip`
-- `test_guest_fat_directory_operations`
-- `test_guest_fat_error_not_found`
-- `test_vfs_resolve_root_mount`
-- `test_vfs_resolve_longest_prefix`
-- `test_vfs_mount_conflict_detection`
+**Tests added:**
+- [x] VFS path normalization tests
+- [x] Mount matching tests (exact, prefix, root)
+- [x] VFS resolution with multiple mounts
+- [x] Error mapping tests for fatfs errors
 
 ---
 
 ### Step 2.4: Parse FAT Mounts from Manifest
 
-**Status:** ⬜ Not Started
+**Status:** ✅ Complete
+
+**Commit:** `3ebe5e50` - feat(guest-fs): Parse FAT mounts from manifest and build VFS
 
 **Goal:** Initialize FAT filesystems from manifest during guest startup.
 
-**Files to modify:**
-- `src/hyperlight_guest/src/fs/manifest.rs`
+**Files modified:**
+- `src/hyperlight_guest/src/fs/manifest.rs` - VFS integration, accessors, validation
+- `src/hyperlight_guest/src/fs/mod.rs` - export vfs, vfs_mut
+- `src/hyperlight_guest/src/fs/file.rs` - doc example fix
+- `src/hyperlight_guest/src/fs/tests.rs` - test isolation fixes
 
-**Changes:**
-- Parse `InodeType::FatMount` entries
-- Create `MemoryBlockDevice` for each FAT mount
-- Initialize `fatfs::FileSystem` for each
-- Register in VFS mount table
+**Implementation notes:**
+- Added `vfs: Vfs` field to `FsState`
+- `init()` iterates FAT mount inodes, creates `GuestFat` for each
+- Root ReadOnly mount added as fallback (lowest priority due to longest-prefix)
+- `vfs()` returns immutable ref, `vfs_mut()` is `unsafe fn` with safety docs
+- Added validation: `guest_address != 0` and `size != 0` before GuestFat creation
+- Added `is_initialized()` check to prevent double-init (returns `NotSupported`)
+- Added `reset()` for test cleanup
 
 **Acceptance criteria:**
-- [ ] FAT mounts detected in manifest
-- [ ] fatfs initialized for each mount
-- [ ] VFS populated with mounts
-- [ ] RO files still work as before
+- [x] FAT mounts detected in manifest by `InodeType::FatMount`
+- [x] `GuestFat` initialized for each FAT mount
+- [x] VFS populated with FAT mounts + RO root fallback
+- [x] RO files still work as before (unchanged paths)
+- [x] Double-init returns error
+- [x] Invalid FAT mount params validated
 
 ---
 
