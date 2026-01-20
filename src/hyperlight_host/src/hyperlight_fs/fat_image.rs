@@ -281,6 +281,19 @@ pub const MAX_FAT_IMAGE_SIZE: usize = 16 * 1_024 * 1_024 * 1_024;
 /// 3. **Usage**: `as_ptr()` and `size()` provide access for guest memory mapping.
 /// 4. **Cleanup**: On `drop()`, the lock is released. For temp files, the file is deleted.
 ///
+/// # Locking Model
+///
+/// This type uses `flock(LOCK_EX | LOCK_NB)` for exclusive access. This is an
+/// **advisory** lock, meaning:
+///
+/// - It prevents multiple Hyperlight sandboxes from accessing the same file
+/// - It works across processes (multi-process protection)
+/// - It does NOT prevent external processes that don't use `flock()` from accessing the file
+///
+/// External tools that need to access FAT files while Hyperlight might use them should
+/// also use `flock()` to cooperate with this locking scheme. See the HyperlightFS
+/// specification (section 3.6) for full details on the advisory locking model.
+///
 /// # Internal Design: The `'static` Lifetime Lie
 ///
 /// This struct stores a `FileSystem<Cursor<&'static mut [u8]>>` internally to avoid

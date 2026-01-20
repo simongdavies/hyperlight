@@ -12,6 +12,7 @@
 2. [Architecture](#architecture)
 3. [File System Types](#file-system-types)
    - [Data Persistence Guarantees](#35-data-persistence-guarantees)
+   - [Advisory Locking Limitations](#36-advisory-locking-limitations)
 4. [Host APIs](#host-apis)
 5. [Guest APIs](#guest-apis)
 6. [C API Reference](#c-api-reference)
@@ -311,6 +312,45 @@ When a sandbox with RW FAT mounts halts (HLT), the host automatically calls `msy
 - `msync()` can be slow for large dirty regions
 - For latency-sensitive use cases, consider smaller FAT images
 - The `MS_ASYNC` variant (non-blocking) may be offered as an opt-in in future
+
+### 3.6 Advisory Locking Limitations
+
+Hyperlight uses `flock(LOCK_EX)` to ensure exclusive access to FAT backing files. This is an **advisory** lock, which has important implications:
+
+**What flock protects against:**
+- Multiple Hyperlight sandboxes (same or different processes) opening the same FAT image
+- Race conditions between sandbox creation and file access
+- Accidental concurrent access by well-behaved processes
+
+**What flock does NOT protect against:**
+- External processes that open the file without calling `flock()`
+- Malicious or buggy code that ignores locking conventions
+- Direct block device access bypassing the filesystem
+
+**Advisory vs Mandatory locking:**
+
+| Aspect | Advisory (flock) | Mandatory |
+|--------|------------------|------------|
+| Enforcement | Cooperative - processes must opt-in | Kernel-enforced |
+| External bypass | Possible if process ignores lock | Not possible |
+| Linux support | ✅ Well supported | ❌ Deprecated |
+| Complexity | Simple | Complex (mount options, etc.) |
+| Performance | Minimal overhead | Higher overhead |
+
+**Why this is acceptable for Hyperlight:**
+
+1. **Threat model**: External processes tampering with FAT files is outside our security boundary. If an attacker can write to arbitrary files on the host, they have already compromised the system.
+
+2. **Integrity, not secrecy**: We protect against accidental corruption from multiple sandboxes, not against malicious actors with host access.
+
+3. **Simplicity**: Advisory locking is simple, portable, and well-understood. Mandatory locking on Linux is deprecated and complex.
+
+4. **User responsibility**: Users deploying FAT images should ensure no other processes access them during sandbox execution. This is documented and expected.
+
+**Recommendations for users:**
+- Do not access FAT backing files from external processes while a sandbox is running
+- If you need external access, use `flock()` from your external tool to cooperate with Hyperlight's locking
+- Consider using temp files (`add_empty_fat_mount`) for ephemeral data that doesn't need external access
 
 ---
 
