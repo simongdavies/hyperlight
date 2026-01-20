@@ -14,12 +14,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-//! HyperlightFS: Read-only filesystem for guest code.
+//! HyperlightFS: Filesystem for guest code.
 //!
-//! This module provides a simple VFS for reading files that have been
-//! mapped from the host into guest memory.
+//! This module provides a VFS for reading files that have been
+//! mapped from the host into guest memory, and for accessing
+//! read-write FAT filesystems.
 //!
 //! # Usage
+//!
+//! ## Reading files (read-only, memory-mapped)
 //!
 //! ```ignore
 //! use hyperlight_guest::fs;
@@ -27,13 +30,21 @@ limitations under the License.
 //! // Initialize (called by runtime with manifest location)
 //! unsafe { fs::init(manifest_ptr, manifest_len)?; }
 //!
-//! // Open and read a file
+//! // Check file size first (optional)
+//! let info = fs::stat("/config.json")?;
+//! // info.size contains the file size in bytes
+//!
+//! // Read file contents
 //! let mut file = fs::open("/config.json")?;
 //! let mut buf = [0u8; 1024];
-//! let n = file.read(&mut buf)?;
+//! let bytes_read = file.read(&mut buf)?;
+//! // bytes_read tells you how many bytes were actually read.
+//! // If bytes_read < buf.len(), you've reached EOF.
+//! // If bytes_read == buf.len(), there may be more data - call read() again.
 //! ```
 
 mod error;
+pub mod fat_backend;
 mod fd;
 pub mod file;
 mod manifest;
