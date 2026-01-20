@@ -13,14 +13,14 @@
 
 | Phase | Status | Progress |
 |-------|--------|----------|
-| Phase 1: Host-Side Foundation | 🟡 In Progress | 5/6 |
+| Phase 1: Host-Side Foundation | ✅ Complete | 6/6 |
 | Phase 2: Guest-Side Foundation | ⬜ Not Started | 0/5 |
 | Phase 3: Host-Guest Integration | ⬜ Not Started | 0/4 |
 | Phase 4: C API Implementation | ⬜ Not Started | 0/4 |
 | Phase 5: Host Extraction APIs | ⬜ Not Started | 0/3 |
 | Phase 6: Testing & Documentation | ⬜ Not Started | 0/4 |
 
-**Overall: 5/26 steps complete**
+**Overall: 6/26 steps complete**
 
 ---
 
@@ -412,7 +412,7 @@ pub struct HyperlightFsConfig {
 
 ### Step 1.6: Update FlatBuffer Schema
 
-**Status:** ⬜ Not Started
+**Status:** ✅ Complete
 
 **Goal:** Extend the manifest schema to support FAT mount metadata.
 
@@ -453,15 +453,15 @@ table HyperlightFS {
 - Remove 2GB file size limit check in builder
 
 **Acceptance criteria:**
-- [ ] Schema updated
-- [ ] `just flatc` regenerates bindings
-- [ ] Wrapper types updated
-- [ ] Roundtrip serialization works
-- [ ] v1 manifests still parseable
+- [x] Schema updated
+- [x] `just gen-all-fbs-rust-code` regenerates bindings
+- [x] Wrapper types updated
+- [x] Roundtrip serialization works
+- [x] v1 manifests still parseable (via default mount_id=0)
 
-**Tests to add:**
-- `test_manifest_fat_mount_roundtrip`
-- `test_manifest_v1_compatibility`
+**Tests added:**
+- [x] `test_fat_mount_roundtrip` - FAT mount serialization/deserialization
+- [x] `test_inode_type_conversion` - updated for FatMount
 
 ---
 
