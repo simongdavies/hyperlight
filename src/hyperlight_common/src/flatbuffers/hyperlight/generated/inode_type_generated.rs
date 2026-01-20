@@ -19,13 +19,14 @@ pub const ENUM_MIN_INODE_TYPE: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_INODE_TYPE: u8 = 1;
+pub const ENUM_MAX_INODE_TYPE: u8 = 2;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_INODE_TYPE: [InodeType; 2] = [InodeType::File, InodeType::Directory];
+pub const ENUM_VALUES_INODE_TYPE: [InodeType; 3] =
+    [InodeType::File, InodeType::Directory, InodeType::FatMount];
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[repr(transparent)]
@@ -34,15 +35,17 @@ pub struct InodeType(pub u8);
 impl InodeType {
     pub const File: Self = Self(0);
     pub const Directory: Self = Self(1);
+    pub const FatMount: Self = Self(2);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 1;
-    pub const ENUM_VALUES: &'static [Self] = &[Self::File, Self::Directory];
+    pub const ENUM_MAX: u8 = 2;
+    pub const ENUM_VALUES: &'static [Self] = &[Self::File, Self::Directory, Self::FatMount];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
         match self {
             Self::File => Some("File"),
             Self::Directory => Some("Directory"),
+            Self::FatMount => Some("FatMount"),
             _ => None,
         }
     }

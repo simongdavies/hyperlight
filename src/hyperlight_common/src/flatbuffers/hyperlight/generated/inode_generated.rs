@@ -33,6 +33,7 @@ impl<'a> Inode<'a> {
     pub const VT_PARENT: flatbuffers::VOffsetT = 8;
     pub const VT_GUEST_ADDRESS: flatbuffers::VOffsetT = 10;
     pub const VT_SIZE: flatbuffers::VOffsetT = 12;
+    pub const VT_MOUNT_ID: flatbuffers::VOffsetT = 14;
 
     #[inline]
     pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -46,6 +47,7 @@ impl<'a> Inode<'a> {
         let mut builder = InodeBuilder::new(_fbb);
         builder.add_size(args.size);
         builder.add_guest_address(args.guest_address);
+        builder.add_mount_id(args.mount_id);
         builder.add_parent(args.parent);
         if let Some(x) = args.path {
             builder.add_path(x);
@@ -101,6 +103,13 @@ impl<'a> Inode<'a> {
         // which contains a valid value in this slot
         unsafe { self._tab.get::<u64>(Inode::VT_SIZE, Some(0)).unwrap() }
     }
+    #[inline]
+    pub fn mount_id(&self) -> u32 {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe { self._tab.get::<u32>(Inode::VT_MOUNT_ID, Some(0)).unwrap() }
+    }
 }
 
 impl flatbuffers::Verifiable for Inode<'_> {
@@ -116,6 +125,7 @@ impl flatbuffers::Verifiable for Inode<'_> {
             .visit_field::<u32>("parent", Self::VT_PARENT, false)?
             .visit_field::<u64>("guest_address", Self::VT_GUEST_ADDRESS, false)?
             .visit_field::<u64>("size", Self::VT_SIZE, false)?
+            .visit_field::<u32>("mount_id", Self::VT_MOUNT_ID, false)?
             .finish();
         Ok(())
     }
@@ -126,6 +136,7 @@ pub struct InodeArgs<'a> {
     pub parent: u32,
     pub guest_address: u64,
     pub size: u64,
+    pub mount_id: u32,
 }
 impl<'a> Default for InodeArgs<'a> {
     #[inline]
@@ -136,6 +147,7 @@ impl<'a> Default for InodeArgs<'a> {
             parent: 0,
             guest_address: 0,
             size: 0,
+            mount_id: 0,
         }
     }
 }
@@ -169,6 +181,10 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> InodeBuilder<'a, 'b, A> {
         self.fbb_.push_slot::<u64>(Inode::VT_SIZE, size, 0);
     }
     #[inline]
+    pub fn add_mount_id(&mut self, mount_id: u32) {
+        self.fbb_.push_slot::<u32>(Inode::VT_MOUNT_ID, mount_id, 0);
+    }
+    #[inline]
     pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> InodeBuilder<'a, 'b, A> {
         let start = _fbb.start_table();
         InodeBuilder {
@@ -192,6 +208,7 @@ impl core::fmt::Debug for Inode<'_> {
         ds.field("parent", &self.parent());
         ds.field("guest_address", &self.guest_address());
         ds.field("size", &self.size());
+        ds.field("mount_id", &self.mount_id());
         ds.finish()
     }
 }

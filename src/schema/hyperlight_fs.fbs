@@ -3,6 +3,7 @@ namespace Hyperlight.Generated;
 enum InodeType : ubyte {
     File = 0,
     Directory = 1,
+    FatMount = 2,
 }
 
 table Inode {
@@ -10,7 +11,8 @@ table Inode {
     path: string (required);
     parent: uint32;
     guest_address: uint64;  // For files: GVA/GPA where data is mapped (0 for directories)
-    size: uint64;           // For files: file size in bytes
+    size: uint64;           // For files/FatMounts: size in bytes
+    mount_id: uint32;       // For FatMounts: unique mount identifier for extraction
 }
 
 table HyperlightFS {

@@ -52,7 +52,8 @@ use crate::flatbuffers::hyperlight::generated::{
 };
 
 /// Current version of the HyperlightFS format.
-pub const HYPERLIGHT_FS_VERSION: u16 = 1;
+/// Version 2 adds FatMount inode type and mount_id field.
+pub const HYPERLIGHT_FS_VERSION: u16 = 2;
 
 /// Type of an inode entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +62,8 @@ pub enum InodeType {
     File,
     /// Directory
     Directory,
+    /// FAT filesystem mount
+    FatMount,
 }
 
 impl From<FbInodeType> for InodeType {
@@ -68,7 +71,8 @@ impl From<FbInodeType> for InodeType {
         match fb {
             FbInodeType::File => InodeType::File,
             FbInodeType::Directory => InodeType::Directory,
-            // Default to File for unknown types
+            FbInodeType::FatMount => InodeType::FatMount,
+            // Default to File for unknown types (forward compatibility)
             _ => InodeType::File,
         }
     }
@@ -79,6 +83,7 @@ impl From<InodeType> for FbInodeType {
         match t {
             InodeType::File => FbInodeType::File,
             InodeType::Directory => FbInodeType::Directory,
+            InodeType::FatMount => FbInodeType::FatMount,
         }
     }
 }
@@ -86,18 +91,21 @@ impl From<InodeType> for FbInodeType {
 /// An inode entry describing a file or directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InodeData {
-    /// Type of this inode (file or directory)
+    /// Type of this inode (file, directory, or FAT mount)
     pub inode_type: InodeType,
     /// Path of this entry in the guest filesystem
     pub path: String,
     /// Index of the parent directory's inode (0 for root)
     pub parent: u32,
-    /// For files: GVA/GPA where file data is mapped
+    /// For files/FatMounts: GVA/GPA where data is mapped
     /// For directories: 0
     pub guest_address: u64,
-    /// For files: size of the file in bytes
+    /// For files/FatMounts: size in bytes
     /// For directories: 0
     pub size: u64,
+    /// For FatMounts: unique identifier for extraction
+    /// For files/directories: 0
+    pub mount_id: u32,
 }
 
 impl InodeData {
@@ -109,6 +117,7 @@ impl InodeData {
             parent,
             guest_address,
             size,
+            mount_id: 0,
         }
     }
 
@@ -120,6 +129,25 @@ impl InodeData {
             parent,
             guest_address: 0,
             size: 0,
+            mount_id: 0,
+        }
+    }
+
+    /// Create a new FAT mount inode.
+    pub fn fat_mount(
+        path: String,
+        parent: u32,
+        guest_address: u64,
+        size: u64,
+        mount_id: u32,
+    ) -> Self {
+        Self {
+            inode_type: InodeType::FatMount,
+            path,
+            parent,
+            guest_address,
+            size,
+            mount_id,
         }
     }
 
@@ -131,6 +159,11 @@ impl InodeData {
     /// Check if this inode is a directory.
     pub fn is_dir(&self) -> bool {
         self.inode_type == InodeType::Directory
+    }
+
+    /// Check if this inode is a FAT mount.
+    pub fn is_fat_mount(&self) -> bool {
+        self.inode_type == InodeType::FatMount
     }
 }
 
@@ -176,6 +209,7 @@ impl TryFrom<&[u8]> for HyperlightFSData {
                 parent: inode.parent(),
                 guest_address: inode.guest_address(),
                 size: inode.size(),
+                mount_id: inode.mount_id(),
             })
             .collect();
 
@@ -204,6 +238,7 @@ impl TryFrom<&HyperlightFSData> for Vec<u8> {
                         parent: inode.parent,
                         guest_address: inode.guest_address,
                         size: inode.size,
+                        mount_id: inode.mount_id,
                     },
                 )
             })
@@ -279,10 +314,42 @@ mod tests {
             InodeType::from(FbInodeType::Directory),
             InodeType::Directory
         );
+        assert_eq!(InodeType::from(FbInodeType::FatMount), InodeType::FatMount);
         assert_eq!(FbInodeType::from(InodeType::File), FbInodeType::File);
         assert_eq!(
             FbInodeType::from(InodeType::Directory),
             FbInodeType::Directory
         );
+        assert_eq!(
+            FbInodeType::from(InodeType::FatMount),
+            FbInodeType::FatMount
+        );
+    }
+
+    #[test]
+    fn test_fat_mount_roundtrip() {
+        let inodes = vec![
+            InodeData::directory("/".to_string(), 0),
+            InodeData::fat_mount("/data".to_string(), 0, 0x2000_0000, 10 * 1024 * 1024, 1),
+            InodeData::file("/config.json".to_string(), 0, 0x1000_0000, 256),
+        ];
+
+        let data = HyperlightFSData::new(inodes);
+        let bytes: Vec<u8> = (&data).try_into().unwrap();
+        let parsed: HyperlightFSData = bytes.as_slice().try_into().unwrap();
+
+        assert_eq!(parsed.version, HYPERLIGHT_FS_VERSION);
+        assert_eq!(parsed.inodes.len(), 3);
+
+        // Check FAT mount
+        assert_eq!(parsed.inodes[1].path, "/data");
+        assert!(parsed.inodes[1].is_fat_mount());
+        assert_eq!(parsed.inodes[1].size, 10 * 1024 * 1024);
+        assert_eq!(parsed.inodes[1].mount_id, 1);
+        assert_eq!(parsed.inodes[1].guest_address, 0x2000_0000);
+
+        // Check file still works
+        assert!(parsed.inodes[2].is_file());
+        assert_eq!(parsed.inodes[2].mount_id, 0);
     }
 }
