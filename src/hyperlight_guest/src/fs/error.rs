@@ -21,6 +21,19 @@ use core::fmt;
 use embedded_io::ErrorKind;
 
 /// Filesystem errors.
+///
+/// Maps to C error codes per spec §11.2:
+/// - `-1`: Generic error (NotFound, IoError, etc.)
+/// - `-2`: Not supported (NotSupported, PlatformNotSupported)
+/// - `-3`: Read-only (ReadOnly)
+/// - `-4`: No space (NoSpace)
+/// - `-5`: Already exists (AlreadyExists)
+/// - `-6`: Not a directory (NotADirectory)
+/// - `-7`: Is a directory (NotAFile)
+/// - `-8`: Not empty (NotEmpty)
+/// - `-9`: Invalid argument (InvalidPath, InvalidSeek)
+/// - `-10`: Too many open files (TooManyOpenFiles)
+/// - `-11`: Invalid file descriptor (InvalidFd)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FsError {
     /// File or directory not found.
@@ -39,6 +52,53 @@ pub enum FsError {
     InvalidSeek,
     /// Manifest parsing failed.
     InvalidManifest,
+    /// Path is read-only (cannot write to RO file/mount).
+    ReadOnly,
+    /// File or directory already exists.
+    AlreadyExists,
+    /// Directory is not empty.
+    NotEmpty,
+    /// No space left on device.
+    NoSpace,
+    /// Too many open files.
+    TooManyOpenFiles,
+    /// Operation not supported.
+    NotSupported,
+    /// I/O error.
+    IoError,
+    /// Out of memory.
+    OutOfMemory,
+    /// File is locked by another process/sandbox.
+    FileLocked,
+    /// Platform does not support this operation.
+    PlatformNotSupported,
+}
+
+impl FsError {
+    /// Convert to C-style error code per spec §11.2.
+    #[inline]
+    pub fn to_c_error(self) -> i32 {
+        match self {
+            FsError::NotFound => -1,
+            FsError::NotAFile => -7,             // EISDIR
+            FsError::NotADirectory => -6,        // ENOTDIR
+            FsError::InvalidFd => -11,           // EBADF
+            FsError::InvalidPath => -9,          // EINVAL
+            FsError::NotInitialized => -1,       // Generic
+            FsError::InvalidSeek => -9,          // EINVAL
+            FsError::InvalidManifest => -1,      // Generic (EIO)
+            FsError::ReadOnly => -3,             // EROFS
+            FsError::AlreadyExists => -5,        // EEXIST
+            FsError::NotEmpty => -8,             // ENOTEMPTY
+            FsError::NoSpace => -4,              // ENOSPC
+            FsError::TooManyOpenFiles => -10,    // EMFILE
+            FsError::NotSupported => -2,         // ENOTSUP
+            FsError::IoError => -1,              // Generic (EIO)
+            FsError::OutOfMemory => -1,          // Generic (ENOMEM)
+            FsError::FileLocked => -1,           // Generic (EAGAIN)
+            FsError::PlatformNotSupported => -2, // ENOTSUP
+        }
+    }
 }
 
 impl fmt::Display for FsError {
@@ -52,6 +112,16 @@ impl fmt::Display for FsError {
             FsError::NotInitialized => write!(f, "filesystem not initialized"),
             FsError::InvalidSeek => write!(f, "invalid seek position"),
             FsError::InvalidManifest => write!(f, "invalid filesystem manifest"),
+            FsError::ReadOnly => write!(f, "read-only filesystem"),
+            FsError::AlreadyExists => write!(f, "file or directory already exists"),
+            FsError::NotEmpty => write!(f, "directory not empty"),
+            FsError::NoSpace => write!(f, "no space left on device"),
+            FsError::TooManyOpenFiles => write!(f, "too many open files"),
+            FsError::NotSupported => write!(f, "operation not supported"),
+            FsError::IoError => write!(f, "I/O error"),
+            FsError::OutOfMemory => write!(f, "out of memory"),
+            FsError::FileLocked => write!(f, "file is locked"),
+            FsError::PlatformNotSupported => write!(f, "platform not supported"),
         }
     }
 }
@@ -69,6 +139,16 @@ impl embedded_io::Error for FsError {
             FsError::NotInitialized => ErrorKind::NotFound,
             FsError::InvalidSeek => ErrorKind::InvalidInput,
             FsError::InvalidManifest => ErrorKind::InvalidData,
+            FsError::ReadOnly => ErrorKind::PermissionDenied,
+            FsError::AlreadyExists => ErrorKind::AlreadyExists,
+            FsError::NotEmpty => ErrorKind::InvalidInput,
+            FsError::NoSpace => ErrorKind::OutOfMemory,
+            FsError::TooManyOpenFiles => ErrorKind::OutOfMemory,
+            FsError::NotSupported => ErrorKind::Unsupported,
+            FsError::IoError => ErrorKind::Other,
+            FsError::OutOfMemory => ErrorKind::OutOfMemory,
+            FsError::FileLocked => ErrorKind::PermissionDenied,
+            FsError::PlatformNotSupported => ErrorKind::Unsupported,
         }
     }
 }

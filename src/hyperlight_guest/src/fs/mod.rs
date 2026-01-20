@@ -44,10 +44,11 @@ limitations under the License.
 //! ```
 
 mod error;
-pub mod fat_backend;
+pub mod fat;
 mod fd;
 pub mod file;
 mod manifest;
+pub mod vfs;
 
 pub use error::FsError;
 pub use file::{DirEntry, File, Stat, open, read_dir, stat};

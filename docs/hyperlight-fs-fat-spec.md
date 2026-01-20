@@ -994,11 +994,19 @@ fatfs requires a `TimeProvider` trait for file timestamps. Since guest VMs have 
 
 ```rust
 /// Always returns 1980-01-01 00:00:00 (FAT epoch).
+#[derive(Debug, Clone, Copy, Default)]
 struct HyperlightTimeProvider;
 
 impl fatfs::TimeProvider for HyperlightTimeProvider {
+    fn get_current_date(&self) -> fatfs::Date {
+        fatfs::Date::new(1980, 1, 1)
+    }
+
     fn get_current_date_time(&self) -> fatfs::DateTime {
-        fatfs::DateTime::new(1980, 1, 1, 0, 0, 0, 0)
+        fatfs::DateTime::new(
+            fatfs::Date::new(1980, 1, 1),
+            fatfs::Time::new(0, 0, 0, 0),
+        )
     }
 }
 ```
@@ -1509,15 +1517,16 @@ The guest FAT backend uses the `fatfs` crate. Its errors map to `FsError` as fol
 |--------------|---------|
 | `NotFound` | `NotFound` |
 | `AlreadyExists` | `AlreadyExists` |
-| `DirectoryNotEmpty` | `NotEmpty` |
+| `DirectoryIsNotEmpty` | `NotEmpty` |
 | `InvalidInput` | `InvalidPath` |
 | `InvalidFileNameLength` | `InvalidPath` |
+| `UnsupportedFileNameCharacter` | `InvalidPath` |
 | `NotEnoughSpace` | `NoSpace` |
 | `WriteZero` | `IoError` |
 | `UnexpectedEof` | `IoError` |
 | `Io(_)` | `IoError` |
-| `UnsupportedFileSystemVersion` | `InvalidManifest` |
-| `CorruptedFileSystem` | `InvalidManifest` |
+| `CorruptedFileSystem` | `IoError` |
+| `_` (catch-all) | `IoError` |
 
 ---
 
