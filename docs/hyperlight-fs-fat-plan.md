@@ -6,7 +6,7 @@
 |-------|-------|
 | Status | **In Progress** |
 | Created | 2026-01-19 |
-| Last Updated | 2026-01-19 |
+| Last Updated | 2026-01-20 |
 | Specification | [hyperlight-fs-fat-spec.md](./hyperlight-fs-fat-spec.md) |
 
 ## Progress Summary
@@ -14,13 +14,13 @@
 | Phase | Status | Progress |
 |-------|--------|----------|
 | Phase 1: Host-Side Foundation | ✅ Complete | 6/6 |
-| Phase 2: Guest-Side Foundation | ⬜ Not Started | 0/5 |
+| Phase 2: Guest-Side Foundation | 🔄 In Progress | 1/5 |
 | Phase 3: Host-Guest Integration | ⬜ Not Started | 0/4 |
 | Phase 4: C API Implementation | ⬜ Not Started | 0/4 |
 | Phase 5: Host Extraction APIs | ⬜ Not Started | 0/3 |
 | Phase 6: Testing & Documentation | ⬜ Not Started | 0/4 |
 
-**Overall: 6/26 steps complete**
+**Overall: 7/26 steps complete**
 
 ---
 
@@ -471,7 +471,7 @@ Build the guest-side VFS infrastructure.
 
 ### Step 2.1: Add fatfs to Guest
 
-**Status:** ⬜ Not Started
+**Status:** ✅ Complete
 
 **Goal:** Add fatfs crate to hyperlight-guest with no_std support.
 
@@ -481,20 +481,25 @@ Build the guest-side VFS infrastructure.
 **Changes:**
 ```toml
 [dependencies]
-fatfs = { version = "0.3", default-features = false, features = ["alloc"] }
+fatfs = { git = "https://github.com/rafalh/rust-fatfs", rev = "4eccb50d011146fbed20e133d33b22f3c27292e7", default-features = false, features = ["alloc"] }
 ```
 
-**Note:** The `core_io` feature may require nightly. Need to verify compatibility with hyperlight's toolchain.
+**Note:** We use the git version (0.4.0 unreleased) because:
+- v0.3.6 requires `core_io` crate which only works on nightly Rust
+- v0.4.0 on master replaced `core_io` with custom I/O traits that work on stable
+- Both host and guest use the same commit hash for consistent FAT formatting
 
 **Acceptance criteria:**
-- [ ] Dependency added
-- [ ] `cargo build --target x86_64-unknown-none` succeeds
-- [ ] No_std compatibility verified
+- [x] Dependency added
+- [x] `cargo build --target x86_64-unknown-none` succeeds  
+- [x] No_std compatibility verified
+- [x] Host updated to same fatfs version for consistency
 
-**Risks:**
-- fatfs `core_io` feature requires specific nightly
-- May need to use `lfn` feature for long filenames
-- Custom `TimeProvider` implementation needed (see below)
+**Implementation notes:**
+- Used git dependency pinned to commit `4eccb50d011146fbed20e133d33b22f3c27292e7`
+- fatfs 0.4.0 auto-selects FAT12/16/32 based on volume size
+- FAT12/16 used for small volumes (<33MB), keeping 1MB minimum image size
+- Spec updated to reflect FAT variant selection and limitations
 
 **TimeProvider for FAT timestamps:**
 
