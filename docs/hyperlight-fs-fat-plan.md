@@ -13,14 +13,14 @@
 
 | Phase | Status | Progress |
 |-------|--------|----------|
-| Phase 1: Host-Side Foundation | 🟡 In Progress | 4/6 |
+| Phase 1: Host-Side Foundation | 🟡 In Progress | 5/6 |
 | Phase 2: Guest-Side Foundation | ⬜ Not Started | 0/5 |
 | Phase 3: Host-Guest Integration | ⬜ Not Started | 0/4 |
 | Phase 4: C API Implementation | ⬜ Not Started | 0/4 |
 | Phase 5: Host Extraction APIs | ⬜ Not Started | 0/3 |
 | Phase 6: Testing & Documentation | ⬜ Not Started | 0/4 |
 
-**Overall: 4/26 steps complete**
+**Overall: 5/26 steps complete**
 
 ---
 
@@ -308,7 +308,7 @@ impl HyperlightFSBuilder {
 
 ### Step 1.5: TOML Config Support for FAT Mounts
 
-**Status:** ⬜ Not Started
+**Status:** ✅ Complete
 
 **Goal:** Extend the TOML configuration parser to support FAT mount declarations.
 
@@ -319,7 +319,7 @@ impl HyperlightFSBuilder {
 ```toml
 # Mount an existing FAT image file
 [[fat_image]]
-host = "/host/path/to/data.fat"
+host_path = "/host/path/to/data.fat"
 mount_point = "/data"
 
 # Create an empty FAT mount (temp file, deleted on drop)
@@ -329,7 +329,7 @@ size = "10MB"
 
 # Create an empty FAT mount at a specific host path (persists after drop)
 [[fat_mount]]
-host = "/host/path/to/persistent.fat"
+host_path = "/host/path/to/persistent.fat"
 mount_point = "/logs"
 size = "50MB"
 ```
@@ -340,7 +340,7 @@ size = "50MB"
 #[derive(Debug, Clone, Deserialize)]
 pub struct FatImageConfig {
     /// Path to the FAT image file on the host
-    pub host: String,
+    pub host_path: String,
     /// Mount point in the guest filesystem
     pub mount_point: String,
 }
@@ -349,7 +349,7 @@ pub struct FatImageConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct FatMountConfig {
     /// Optional path for persistent FAT image (temp if omitted)
-    pub host: Option<String>,
+    pub host_path: Option<String>,
     /// Mount point in the guest filesystem
     pub mount_point: String,
     /// Size of the FAT image (e.g., "10MB", "1GB", or bytes as integer)
@@ -385,21 +385,28 @@ pub struct HyperlightFsConfig {
 - Parse human-readable sizes ("10MB", "1GB", etc.)
 
 **Acceptance criteria:**
-- [ ] `FatImageConfig` struct implemented
-- [ ] `FatMountConfig` struct implemented  
-- [ ] `SizeValue` parses both bytes and human-readable sizes
-- [ ] `from_config()` processes FAT entries
-- [ ] Conflict detection works via builder
-- [ ] Unit tests pass
+- [x] `FatImageConfig` struct implemented
+- [x] `FatMountConfig` struct implemented  
+- [x] `SizeValue` parses both bytes and human-readable sizes
+- [x] `from_config()` processes FAT entries
+- [x] Conflict detection works via builder
+- [x] Unit tests pass
 
-**Tests to add:**
-- `test_from_config_fat_image`
-- `test_from_config_fat_mount_temp`
-- `test_from_config_fat_mount_persistent`
-- `test_from_config_fat_size_bytes`
-- `test_from_config_fat_size_human`
-- `test_from_config_fat_conflict_with_file`
-- `test_from_config_mixed_ro_and_fat`
+**Tests added:**
+- [x] `test_from_config_fat_image`
+- [x] `test_from_config_fat_mount_temp`
+- [x] `test_from_config_fat_mount_persistent`
+- [x] `test_from_config_fat_size_bytes`
+- [x] `test_from_config_fat_size_human`
+- [x] `test_from_config_fat_conflict_with_file`
+- [x] `test_from_config_mixed_ro_and_fat`
+- [x] `test_from_config_fat_invalid_size`
+- [x] `test_from_config_multiple_fat_mounts`
+
+**Implementation notes:**
+- Renamed `host` field to `host_path` in all config structs for clarity
+- Added support for size suffixes: B, KB, KiB, MB, MiB, GB, GiB
+- Size parsing supports decimal values (e.g., "1.5GB")
 
 ---
 
