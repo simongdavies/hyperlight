@@ -133,6 +133,13 @@ impl FatMountStorage {
         &self.image
     }
 
+    /// Get a mutable reference to the FAT image.
+    ///
+    /// Used by sandbox extraction APIs to read/write files in FAT mounts.
+    pub(crate) fn image_mut(&mut self) -> &mut super::fat_image::FatImage {
+        &mut self.image
+    }
+
     /// Get the mount point path.
     pub(crate) fn mount_point(&self) -> &str {
         &self.mount_point
@@ -267,6 +274,66 @@ impl HyperlightFSImage {
     #[cfg(unix)]
     pub(crate) fn fat_mounts(&self) -> &[FatMountStorage] {
         &self.fat_mounts
+    }
+
+    /// Get mutable access to FAT mounts.
+    ///
+    /// This is used by the sandbox extraction APIs to read/write files
+    /// in FAT mounts while the VM is paused.
+    #[cfg(unix)]
+    pub(crate) fn fat_mounts_mut(&mut self) -> &mut [FatMountStorage] {
+        &mut self.fat_mounts
+    }
+
+    /// Find a FAT mount that contains the given guest path.
+    ///
+    /// Returns the index of the mount and the path relative to the mount point.
+    ///
+    /// # Arguments
+    ///
+    /// * `guest_path` - Absolute guest path (e.g., "/mnt/fat/subdir/file.txt")
+    ///
+    /// # Returns
+    ///
+    /// `Some((mount_index, relative_path))` if the path is within a FAT mount,
+    /// `None` if no mount contains this path.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // With mount point "/mnt/fat"
+    /// let result = image.find_fat_mount("/mnt/fat/subdir/file.txt");
+    /// // Returns Some((0, "/subdir/file.txt"))
+    ///
+    /// let result = image.find_fat_mount("/other/path");
+    /// // Returns None
+    /// ```
+    #[cfg(unix)]
+    pub(crate) fn find_fat_mount(&self, guest_path: &str) -> Option<(usize, String)> {
+        // Normalize the path: ensure it starts with "/" and doesn't have trailing "/"
+        let normalized_path = if guest_path.starts_with('/') {
+            guest_path.trim_end_matches('/')
+        } else {
+            return None; // Require absolute paths
+        };
+
+        for (idx, mount) in self.fat_mounts.iter().enumerate() {
+            let mount_point = mount.mount_point().trim_end_matches('/');
+
+            // Check if path is within this mount
+            if normalized_path == mount_point {
+                // Path is exactly the mount point (root of the FAT)
+                return Some((idx, "/".to_string()));
+            } else if normalized_path.starts_with(mount_point)
+                && normalized_path[mount_point.len()..].starts_with('/')
+            {
+                // Path is under the mount point
+                let relative = &normalized_path[mount_point.len()..];
+                return Some((idx, relative.to_string()));
+            }
+        }
+
+        None
     }
 
     /// Get a summary of all entries in this image.
@@ -910,5 +977,118 @@ mod tests {
         // FAT mount should be after RO region
         let fat_inode = parsed.inodes.iter().find(|i| i.is_fat_mount()).unwrap();
         assert_eq!(fat_inode.guest_address, base_addr + 8192); // After RO region
+    }
+
+    // ---- Tests for find_fat_mount path resolution ----
+
+    #[test]
+    fn test_find_fat_mount_exact_match() {
+        // Build image with FAT mount at /data
+        let files = vec![MappedFile {
+            host_path: std::path::PathBuf::new(),
+            guest_path: "/".to_string(),
+            size: 0,
+            is_dir: true,
+        }];
+        let fat_mounts = vec![make_fat_mount("/data")];
+        let image = build_image(files, fat_mounts).unwrap();
+
+        // Exact mount point should return "/"
+        let result = image.find_fat_mount("/data");
+        assert_eq!(result, Some((0, "/".to_string())));
+    }
+
+    #[test]
+    fn test_find_fat_mount_nested_path() {
+        let files = vec![MappedFile {
+            host_path: std::path::PathBuf::new(),
+            guest_path: "/".to_string(),
+            size: 0,
+            is_dir: true,
+        }];
+        let fat_mounts = vec![make_fat_mount("/mnt/fat")];
+        let image = build_image(files, fat_mounts).unwrap();
+
+        // Path within mount
+        let result = image.find_fat_mount("/mnt/fat/subdir/file.txt");
+        assert_eq!(result, Some((0, "/subdir/file.txt".to_string())));
+
+        // Immediate child
+        let result = image.find_fat_mount("/mnt/fat/file.txt");
+        assert_eq!(result, Some((0, "/file.txt".to_string())));
+    }
+
+    #[test]
+    fn test_find_fat_mount_not_in_mount() {
+        let files = vec![MappedFile {
+            host_path: std::path::PathBuf::new(),
+            guest_path: "/".to_string(),
+            size: 0,
+            is_dir: true,
+        }];
+        let fat_mounts = vec![make_fat_mount("/mnt/fat")];
+        let image = build_image(files, fat_mounts).unwrap();
+
+        // Path not in any mount
+        assert_eq!(image.find_fat_mount("/other/path"), None);
+        assert_eq!(image.find_fat_mount("/mnt/other"), None);
+
+        // Path that starts with mount point prefix but isn't inside it
+        // e.g., "/mnt/fatty" should NOT match "/mnt/fat"
+        assert_eq!(image.find_fat_mount("/mnt/fatty/file.txt"), None);
+    }
+
+    #[test]
+    fn test_find_fat_mount_multiple_mounts() {
+        let files = vec![MappedFile {
+            host_path: std::path::PathBuf::new(),
+            guest_path: "/".to_string(),
+            size: 0,
+            is_dir: true,
+        }];
+        let fat_mounts = vec![make_fat_mount("/data"), make_fat_mount("/output")];
+        let image = build_image(files, fat_mounts).unwrap();
+
+        // Should find correct mount
+        let result = image.find_fat_mount("/data/file.txt");
+        assert_eq!(result, Some((0, "/file.txt".to_string())));
+
+        let result = image.find_fat_mount("/output/results/test.log");
+        assert_eq!(result, Some((1, "/results/test.log".to_string())));
+    }
+
+    #[test]
+    fn test_find_fat_mount_handles_trailing_slash() {
+        let files = vec![MappedFile {
+            host_path: std::path::PathBuf::new(),
+            guest_path: "/".to_string(),
+            size: 0,
+            is_dir: true,
+        }];
+        let fat_mounts = vec![make_fat_mount("/data")];
+        let image = build_image(files, fat_mounts).unwrap();
+
+        // Path with trailing slash
+        let result = image.find_fat_mount("/data/");
+        assert_eq!(result, Some((0, "/".to_string())));
+
+        let result = image.find_fat_mount("/data/subdir/");
+        assert_eq!(result, Some((0, "/subdir".to_string())));
+    }
+
+    #[test]
+    fn test_find_fat_mount_requires_absolute_path() {
+        let files = vec![MappedFile {
+            host_path: std::path::PathBuf::new(),
+            guest_path: "/".to_string(),
+            size: 0,
+            is_dir: true,
+        }];
+        let fat_mounts = vec![make_fat_mount("/data")];
+        let image = build_image(files, fat_mounts).unwrap();
+
+        // Relative path should fail
+        assert_eq!(image.find_fat_mount("data/file.txt"), None);
+        assert_eq!(image.find_fat_mount(""), None);
     }
 }

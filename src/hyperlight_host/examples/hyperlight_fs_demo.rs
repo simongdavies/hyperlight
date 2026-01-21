@@ -112,10 +112,10 @@ fn run_demo() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
-    let mut uninit = UninitializedSandbox::new(GuestBinary::FilePath(guest_path.into()), None)?;
-    uninit.set_hyperlight_fs(fs_image);
-
-    let mut sandbox: MultiUseSandbox = uninit.evolve()?;
+    let mut sandbox: MultiUseSandbox =
+        UninitializedSandbox::new(GuestBinary::FilePath(guest_path.into()), None)?
+            .with_hyperlight_fs(fs_image)
+            .evolve()?;
     println!("   ✓ Sandbox created and initialized");
     println!();
 

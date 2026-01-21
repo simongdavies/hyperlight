@@ -106,8 +106,11 @@ pub struct MultiUseSandbox {
     /// This must be kept alive for the lifetime of the sandbox because:
     /// 1. FAT images are mmap'd and registered with KVM as memory regions
     /// 2. Dropping this would munmap the memory while KVM still references it
+    ///
+    /// Note: This field also provides access to FAT mounts for the host extraction APIs
+    /// (fs_stat, fs_read_file, fs_read_dir, fs_write_file).
     #[cfg(unix)]
-    _hyperlight_fs: Option<crate::hyperlight_fs::HyperlightFSImage>,
+    hyperlight_fs: Option<crate::hyperlight_fs::HyperlightFSImage>,
 }
 
 impl MultiUseSandbox {
@@ -136,7 +139,7 @@ impl MultiUseSandbox {
             dbg_mem_access_fn,
             snapshot: None,
             #[cfg(unix)]
-            _hyperlight_fs: hyperlight_fs,
+            hyperlight_fs,
         }
     }
 
@@ -748,6 +751,625 @@ impl MultiUseSandbox {
     #[instrument(err(Debug), skip_all, parent = Span::current())]
     pub fn generate_crashdump(&self) -> Result<()> {
         crate::hypervisor::crashdump::generate_crashdump(&self.vm)
+    }
+
+    // ---- Sandbox Filesystem APIs ----
+    //
+    // These methods allow the host to read/write files in FAT mounts
+    // while the sandbox is paused (between guest function calls).
+    //
+    // Note: Read-only files mapped via HyperlightFS are directly accessible
+    // via the host filesystem - these APIs are specifically for FAT mounts.
+
+    /// Resolve a guest path to a FAT image and relative path.
+    ///
+    /// This is a helper that eliminates boilerplate in the public fs_* methods.
+    /// It validates that HyperlightFS is configured and that the path is within
+    /// a FAT mount.
+    #[cfg(unix)]
+    fn resolve_fat_image(
+        &mut self,
+        guest_path: &str,
+    ) -> Result<(&mut crate::hyperlight_fs::FatImage, String)> {
+        use crate::HyperlightError;
+
+        let fs = self.hyperlight_fs.as_mut().ok_or_else(|| {
+            HyperlightError::Error("No HyperlightFS configured for this sandbox".to_string())
+        })?;
+
+        let (mount_idx, relative_path) = fs.find_fat_mount(guest_path).ok_or_else(|| {
+            HyperlightError::Error(format!("Path '{}' is not within a FAT mount.", guest_path))
+        })?;
+
+        let fat_mounts = fs.fat_mounts_mut();
+        let fat_image = fat_mounts[mount_idx].image_mut();
+
+        Ok((fat_image, relative_path))
+    }
+
+    /// Get metadata (stat) for a file or directory in a FAT mount.
+    ///
+    /// This allows the host to inspect file sizes, timestamps, and types
+    /// in FAT mounts while the sandbox is paused.
+    ///
+    /// # Arguments
+    ///
+    /// * `guest_path` - Absolute path within a FAT mount (e.g., "/mnt/fat/output.txt")
+    ///
+    /// # Returns
+    ///
+    /// [`FatStat`](crate::hyperlight_fs::FatStat) with file metadata on success.
+    ///
+    /// # Errors
+    ///
+    /// - `HyperlightError::Error` if no FAT mounts are configured
+    /// - `HyperlightError::Error` if the path is not within a FAT mount
+    /// - `HyperlightError::Error` if the file/directory doesn't exist
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use hyperlight_host::{MultiUseSandbox, UninitializedSandbox, GuestBinary};
+    /// # use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let fs = HyperlightFSBuilder::new()
+    ///     .add_empty_fat_mount("/mnt/fat", 1024 * 1024)?
+    ///     .build()?;
+    ///
+    /// let mut sandbox: MultiUseSandbox = UninitializedSandbox::new(
+    ///     GuestBinary::FilePath("guest.bin".into()),
+    ///     None
+    /// )?
+    /// .with_hyperlight_fs(fs)
+    /// .evolve()?;
+    ///
+    /// // After guest writes to /mnt/fat/result.txt, check its size
+    /// sandbox.call::<()>("DoWork", ())?;
+    /// let stat = sandbox.fs_stat("/mnt/fat/result.txt")?;
+    /// println!("Result file size: {} bytes", stat.size);
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(unix)]
+    pub fn fs_stat(&mut self, guest_path: &str) -> Result<crate::hyperlight_fs::FatStat> {
+        let (fat_image, relative_path) = self.resolve_fat_image(guest_path)?;
+        fat_image.stat(&relative_path)
+    }
+
+    /// Read a file from a FAT mount into memory.
+    ///
+    /// This allows the host to extract file contents written by the guest.
+    /// For large files, consider using streaming access instead.
+    ///
+    /// # Arguments
+    ///
+    /// * `guest_path` - Absolute path within a FAT mount (e.g., "/mnt/fat/output.txt")
+    ///
+    /// # Returns
+    ///
+    /// The entire file contents as a `Vec<u8>` on success.
+    ///
+    /// # Errors
+    ///
+    /// - `HyperlightError::Error` if no FAT mounts are configured
+    /// - `HyperlightError::Error` if the path is not within a FAT mount
+    /// - `HyperlightError::Error` if the file doesn't exist or is a directory
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use hyperlight_host::{MultiUseSandbox, UninitializedSandbox, GuestBinary};
+    /// # use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let fs = HyperlightFSBuilder::new()
+    ///     .add_empty_fat_mount("/mnt/fat", 1024 * 1024)?
+    ///     .build()?;
+    ///
+    /// let mut sandbox: MultiUseSandbox = UninitializedSandbox::new(
+    ///     GuestBinary::FilePath("guest.bin".into()),
+    ///     None
+    /// )?
+    /// .with_hyperlight_fs(fs)
+    /// .evolve()?;
+    ///
+    /// // After guest writes output, extract it
+    /// sandbox.call::<()>("ProcessData", ())?;
+    /// let output = sandbox.fs_read_file("/mnt/fat/output.json")?;
+    /// let json: serde_json::Value = serde_json::from_slice(&output)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(unix)]
+    pub fn fs_read_file(&mut self, guest_path: &str) -> Result<Vec<u8>> {
+        use std::io::Read;
+
+        use crate::HyperlightError;
+
+        let (fat_image, relative_path) = self.resolve_fat_image(guest_path)?;
+        let mut reader = fat_image.open_file(&relative_path)?;
+        let mut contents = Vec::new();
+        reader.read_to_end(&mut contents).map_err(|e| {
+            HyperlightError::Error(format!("Failed to read '{}': {}", guest_path, e))
+        })?;
+
+        Ok(contents)
+    }
+
+    /// List the contents of a directory in a FAT mount.
+    ///
+    /// Returns entries for all files and subdirectories (excluding "." and "..").
+    ///
+    /// # Arguments
+    ///
+    /// * `guest_path` - Absolute path to a directory within a FAT mount
+    ///
+    /// # Returns
+    ///
+    /// A vector of [`FatEntry`](crate::hyperlight_fs::FatEntry) structs on success.
+    ///
+    /// # Errors
+    ///
+    /// - `HyperlightError::Error` if no FAT mounts are configured
+    /// - `HyperlightError::Error` if the path is not within a FAT mount
+    /// - `HyperlightError::Error` if the path doesn't exist or is not a directory
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use hyperlight_host::{MultiUseSandbox, UninitializedSandbox, GuestBinary};
+    /// # use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let fs = HyperlightFSBuilder::new()
+    ///     .add_empty_fat_mount("/mnt/fat", 1024 * 1024)?
+    ///     .build()?;
+    ///
+    /// let mut sandbox: MultiUseSandbox = UninitializedSandbox::new(
+    ///     GuestBinary::FilePath("guest.bin".into()),
+    ///     None
+    /// )?
+    /// .with_hyperlight_fs(fs)
+    /// .evolve()?;
+    ///
+    /// // After guest creates files, list them
+    /// sandbox.call::<()>("GenerateReports", ())?;
+    /// let entries = sandbox.fs_read_dir("/mnt/fat/reports")?;
+    /// for entry in entries {
+    ///     if entry.stat.is_dir {
+    ///         println!("Directory: {}", entry.name);
+    ///     } else {
+    ///         println!("File: {} ({} bytes)", entry.name, entry.stat.size);
+    ///     }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(unix)]
+    pub fn fs_read_dir(&mut self, guest_path: &str) -> Result<Vec<crate::hyperlight_fs::FatEntry>> {
+        let (fat_image, relative_path) = self.resolve_fat_image(guest_path)?;
+        fat_image.read_dir(&relative_path)
+    }
+
+    /// Write data to a file in a FAT mount.
+    ///
+    /// Creates the file if it doesn't exist, or overwrites it if it does.
+    /// Parent directories must already exist.
+    ///
+    /// This allows the host to inject data into the guest's writable filesystem
+    /// between function calls.
+    ///
+    /// # Arguments
+    ///
+    /// * `guest_path` - Absolute path within a FAT mount (e.g., "/mnt/fat/input.txt")
+    /// * `data` - Data to write to the file
+    ///
+    /// # Errors
+    ///
+    /// - `HyperlightError::Error` if no FAT mounts are configured
+    /// - `HyperlightError::Error` if the path is not within a FAT mount
+    /// - `HyperlightError::Error` if parent directory doesn't exist
+    /// - `HyperlightError::Error` if the filesystem is full
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use hyperlight_host::{MultiUseSandbox, UninitializedSandbox, GuestBinary};
+    /// # use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let fs = HyperlightFSBuilder::new()
+    ///     .add_empty_fat_mount("/mnt/fat", 1024 * 1024)?
+    ///     .build()?;
+    ///
+    /// let mut sandbox: MultiUseSandbox = UninitializedSandbox::new(
+    ///     GuestBinary::FilePath("guest.bin".into()),
+    ///     None
+    /// )?
+    /// .with_hyperlight_fs(fs)
+    /// .evolve()?;
+    ///
+    /// // Inject input data before calling guest function
+    /// sandbox.fs_write_file("/mnt/fat/input.json", b"{\"key\": \"value\"}")?;
+    /// let result: String = sandbox.call("ProcessInput", ())?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(unix)]
+    pub fn fs_write_file(&mut self, guest_path: &str, data: &[u8]) -> Result<()> {
+        use std::io::Write;
+
+        use crate::HyperlightError;
+
+        let (fat_image, relative_path) = self.resolve_fat_image(guest_path)?;
+        let mut writer = fat_image.create_file(&relative_path)?;
+        writer.write_all(data).map_err(|e| {
+            HyperlightError::Error(format!("Failed to write '{}': {}", guest_path, e))
+        })?;
+        writer.flush().map_err(|e| {
+            HyperlightError::Error(format!("Failed to flush '{}': {}", guest_path, e))
+        })?;
+
+        Ok(())
+    }
+
+    /// Create a directory in a FAT mount.
+    ///
+    /// Creates a new directory at the specified path. Parent directories
+    /// must already exist.
+    ///
+    /// # Arguments
+    ///
+    /// * `guest_path` - Absolute path within a FAT mount (e.g., "/mnt/fat/newdir")
+    ///
+    /// # Errors
+    ///
+    /// - `HyperlightError::Error` if no FAT mounts are configured
+    /// - `HyperlightError::Error` if the path is not within a FAT mount
+    /// - `HyperlightError::Error` if the parent directory doesn't exist
+    /// - `HyperlightError::Error` if the directory already exists
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use hyperlight_host::{MultiUseSandbox, UninitializedSandbox, GuestBinary};
+    /// # use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let fs = HyperlightFSBuilder::new()
+    ///     .add_empty_fat_mount("/mnt/fat", 1024 * 1024)?
+    ///     .build()?;
+    ///
+    /// let mut sandbox: MultiUseSandbox = UninitializedSandbox::new(
+    ///     GuestBinary::FilePath("guest.bin".into()),
+    ///     None
+    /// )?
+    /// .with_hyperlight_fs(fs)
+    /// .evolve()?;
+    ///
+    /// // Create a directory for the guest to write files into
+    /// sandbox.fs_mkdir("/mnt/fat/output")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(unix)]
+    pub fn fs_mkdir(&mut self, guest_path: &str) -> Result<()> {
+        let (fat_image, relative_path) = self.resolve_fat_image(guest_path)?;
+        fat_image.create_dir(&relative_path)
+    }
+
+    /// Remove a file from a FAT mount.
+    ///
+    /// # Arguments
+    ///
+    /// * `guest_path` - Absolute path to the file within a FAT mount
+    ///
+    /// # Errors
+    ///
+    /// - `HyperlightError::Error` if no FAT mounts are configured
+    /// - `HyperlightError::Error` if the path is not within a FAT mount
+    /// - `HyperlightError::Error` if the file doesn't exist
+    /// - `HyperlightError::Error` if the path is a directory (use `fs_remove_dir`)
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use hyperlight_host::{MultiUseSandbox, UninitializedSandbox, GuestBinary};
+    /// # use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let fs = HyperlightFSBuilder::new()
+    ///     .add_empty_fat_mount("/mnt/fat", 1024 * 1024)?
+    ///     .build()?;
+    ///
+    /// let mut sandbox: MultiUseSandbox = UninitializedSandbox::new(
+    ///     GuestBinary::FilePath("guest.bin".into()),
+    ///     None
+    /// )?
+    /// .with_hyperlight_fs(fs)
+    /// .evolve()?;
+    ///
+    /// // Remove a file
+    /// sandbox.fs_remove_file("/mnt/fat/temp.txt")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(unix)]
+    pub fn fs_remove_file(&mut self, guest_path: &str) -> Result<()> {
+        let (fat_image, relative_path) = self.resolve_fat_image(guest_path)?;
+        fat_image.delete_file(&relative_path)
+    }
+
+    /// Remove an empty directory from a FAT mount.
+    ///
+    /// # Arguments
+    ///
+    /// * `guest_path` - Absolute path to the directory within a FAT mount
+    ///
+    /// # Errors
+    ///
+    /// - `HyperlightError::Error` if no FAT mounts are configured
+    /// - `HyperlightError::Error` if the path is not within a FAT mount
+    /// - `HyperlightError::Error` if the directory doesn't exist
+    /// - `HyperlightError::Error` if the directory is not empty
+    /// - `HyperlightError::Error` if the path is a file (use `fs_remove_file`)
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use hyperlight_host::{MultiUseSandbox, UninitializedSandbox, GuestBinary};
+    /// # use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let fs = HyperlightFSBuilder::new()
+    ///     .add_empty_fat_mount("/mnt/fat", 1024 * 1024)?
+    ///     .build()?;
+    ///
+    /// let mut sandbox: MultiUseSandbox = UninitializedSandbox::new(
+    ///     GuestBinary::FilePath("guest.bin".into()),
+    ///     None
+    /// )?
+    /// .with_hyperlight_fs(fs)
+    /// .evolve()?;
+    ///
+    /// // Remove an empty directory
+    /// sandbox.fs_remove_dir("/mnt/fat/empty_dir")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(unix)]
+    pub fn fs_remove_dir(&mut self, guest_path: &str) -> Result<()> {
+        let (fat_image, relative_path) = self.resolve_fat_image(guest_path)?;
+        fat_image.delete_dir(&relative_path)
+    }
+
+    /// Rename or move a file/directory within a FAT mount.
+    ///
+    /// Both paths must be within the same FAT mount.
+    ///
+    /// # Arguments
+    ///
+    /// * `old_path` - Current absolute path within a FAT mount
+    /// * `new_path` - New absolute path within the same FAT mount
+    ///
+    /// # Errors
+    ///
+    /// - `HyperlightError::Error` if no FAT mounts are configured
+    /// - `HyperlightError::Error` if either path is not within a FAT mount
+    /// - `HyperlightError::Error` if paths are in different FAT mounts
+    /// - `HyperlightError::Error` if the source doesn't exist
+    /// - `HyperlightError::Error` if the destination already exists
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use hyperlight_host::{MultiUseSandbox, UninitializedSandbox, GuestBinary};
+    /// # use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let fs = HyperlightFSBuilder::new()
+    ///     .add_empty_fat_mount("/mnt/fat", 1024 * 1024)?
+    ///     .build()?;
+    ///
+    /// let mut sandbox: MultiUseSandbox = UninitializedSandbox::new(
+    ///     GuestBinary::FilePath("guest.bin".into()),
+    ///     None
+    /// )?
+    /// .with_hyperlight_fs(fs)
+    /// .evolve()?;
+    ///
+    /// // Rename a file
+    /// sandbox.fs_rename("/mnt/fat/old.txt", "/mnt/fat/new.txt")?;
+    ///
+    /// // Move a file to a subdirectory
+    /// sandbox.fs_rename("/mnt/fat/file.txt", "/mnt/fat/subdir/file.txt")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(unix)]
+    pub fn fs_rename(&mut self, old_path: &str, new_path: &str) -> Result<()> {
+        use crate::HyperlightError;
+
+        let fs = self.hyperlight_fs.as_mut().ok_or_else(|| {
+            HyperlightError::Error("No HyperlightFS configured for this sandbox".to_string())
+        })?;
+
+        let (old_mount_idx, old_relative) = fs.find_fat_mount(old_path).ok_or_else(|| {
+            HyperlightError::Error(format!("Path '{}' is not within a FAT mount.", old_path))
+        })?;
+
+        let (new_mount_idx, new_relative) = fs.find_fat_mount(new_path).ok_or_else(|| {
+            HyperlightError::Error(format!("Path '{}' is not within a FAT mount.", new_path))
+        })?;
+
+        if old_mount_idx != new_mount_idx {
+            return Err(HyperlightError::Error(
+                "Cannot rename across different FAT mounts".to_string(),
+            ));
+        }
+
+        let fat_mounts = fs.fat_mounts_mut();
+        let fat_image = fat_mounts[old_mount_idx].image_mut();
+
+        fat_image.rename(&old_relative, &new_relative)
+    }
+
+    /// Check if a path exists within a FAT mount.
+    ///
+    /// # Arguments
+    ///
+    /// * `guest_path` - Absolute path within a FAT mount
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(true)` if the path exists (file or directory)
+    /// - `Ok(false)` if the path does not exist
+    ///
+    /// # Errors
+    ///
+    /// - `HyperlightError::Error` if no FAT mounts are configured
+    /// - `HyperlightError::Error` if the path is not within a FAT mount
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use hyperlight_host::{MultiUseSandbox, UninitializedSandbox, GuestBinary};
+    /// # use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let fs = HyperlightFSBuilder::new()
+    ///     .add_empty_fat_mount("/mnt/fat", 1024 * 1024)?
+    ///     .build()?;
+    ///
+    /// let mut sandbox: MultiUseSandbox = UninitializedSandbox::new(
+    ///     GuestBinary::FilePath("guest.bin".into()),
+    ///     None
+    /// )?
+    /// .with_hyperlight_fs(fs)
+    /// .evolve()?;
+    ///
+    /// // Check if a file exists after guest execution
+    /// sandbox.call::<()>("ProcessData", ())?;
+    /// if sandbox.fs_exists("/mnt/fat/output.json")? {
+    ///     let data = sandbox.fs_read_file("/mnt/fat/output.json")?;
+    ///     // process data...
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(unix)]
+    pub fn fs_exists(&mut self, guest_path: &str) -> Result<bool> {
+        let (fat_image, relative_path) = self.resolve_fat_image(guest_path)?;
+        fat_image.exists(&relative_path)
+    }
+
+    /// Open a file for streaming read access from a FAT mount.
+    ///
+    /// Returns a reader that implements [`Read`](std::io::Read) and
+    /// [`Seek`](std::io::Seek), allowing efficient access to large files
+    /// without loading them entirely into memory.
+    ///
+    /// # Arguments
+    ///
+    /// * `guest_path` - Absolute path to the file within a FAT mount
+    ///
+    /// # Returns
+    ///
+    /// A [`FatFileReader`](crate::hyperlight_fs::FatFileReader) for streaming reads.
+    ///
+    /// # Errors
+    ///
+    /// - `HyperlightError::Error` if no FAT mounts are configured
+    /// - `HyperlightError::Error` if the path is not within a FAT mount
+    /// - `HyperlightError::Error` if the file doesn't exist or is a directory
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use hyperlight_host::{MultiUseSandbox, UninitializedSandbox, GuestBinary};
+    /// # use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    /// # use std::io::{BufReader, BufRead};
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let fs = HyperlightFSBuilder::new()
+    ///     .add_empty_fat_mount("/mnt/fat", 1024 * 1024)?
+    ///     .build()?;
+    ///
+    /// let mut sandbox: MultiUseSandbox = UninitializedSandbox::new(
+    ///     GuestBinary::FilePath("guest.bin".into()),
+    ///     None
+    /// )?
+    /// .with_hyperlight_fs(fs)
+    /// .evolve()?;
+    ///
+    /// // Stream a large log file line by line
+    /// sandbox.call::<()>("GenerateLogs", ())?;
+    /// let reader = sandbox.fs_open_file("/mnt/fat/large.log")?;
+    /// let buf_reader = BufReader::new(reader);
+    /// for line in buf_reader.lines() {
+    ///     println!("{}", line?);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(unix)]
+    pub fn fs_open_file(
+        &mut self,
+        guest_path: &str,
+    ) -> Result<crate::hyperlight_fs::FatFileReader<'_>> {
+        let (fat_image, relative_path) = self.resolve_fat_image(guest_path)?;
+        fat_image.open_file(&relative_path)
+    }
+
+    /// Create or overwrite a file for streaming write access in a FAT mount.
+    ///
+    /// Returns a writer that implements [`Write`](std::io::Write) and
+    /// [`Seek`](std::io::Seek), allowing efficient writing of large files
+    /// without buffering them entirely in memory.
+    ///
+    /// # Arguments
+    ///
+    /// * `guest_path` - Absolute path to the file within a FAT mount
+    ///
+    /// # Returns
+    ///
+    /// A [`FatFileWriter`](crate::hyperlight_fs::FatFileWriter) for streaming writes.
+    ///
+    /// # Errors
+    ///
+    /// - `HyperlightError::Error` if no FAT mounts are configured
+    /// - `HyperlightError::Error` if the path is not within a FAT mount
+    /// - `HyperlightError::Error` if the parent directory doesn't exist
+    /// - `HyperlightError::Error` if the path is a directory
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use hyperlight_host::{MultiUseSandbox, UninitializedSandbox, GuestBinary};
+    /// # use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    /// # use std::io::Write;
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let fs = HyperlightFSBuilder::new()
+    ///     .add_empty_fat_mount("/mnt/fat", 1024 * 1024)?
+    ///     .build()?;
+    ///
+    /// let mut sandbox: MultiUseSandbox = UninitializedSandbox::new(
+    ///     GuestBinary::FilePath("guest.bin".into()),
+    ///     None
+    /// )?
+    /// .with_hyperlight_fs(fs)
+    /// .evolve()?;
+    ///
+    /// // Stream data into a file
+    /// let mut writer = sandbox.fs_create_file("/mnt/fat/large_input.bin")?;
+    /// for i in 0..1000 {
+    ///     writer.write_all(&[i as u8; 1024])?;
+    /// }
+    /// writer.flush()?;
+    /// drop(writer);  // Release borrow before calling guest
+    ///
+    /// sandbox.call::<()>("ProcessLargeInput", ())?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(unix)]
+    pub fn fs_create_file(
+        &mut self,
+        guest_path: &str,
+    ) -> Result<crate::hyperlight_fs::FatFileWriter<'_>> {
+        let (fat_image, relative_path) = self.resolve_fat_image(guest_path)?;
+        fat_image.create_file(&relative_path)
     }
 
     /// Returns whether the sandbox is currently poisoned.

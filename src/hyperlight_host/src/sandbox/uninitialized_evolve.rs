@@ -447,8 +447,8 @@ mod tests {
     use hyperlight_testing::{c_simple_guest_as_string, simple_guest_as_string};
 
     use super::evolve_impl_multi_use;
-    use crate::UninitializedSandbox;
     use crate::sandbox::uninitialized::GuestBinary;
+    use crate::{MultiUseSandbox, UninitializedSandbox};
 
     #[test]
     fn test_evolve() {
@@ -497,12 +497,11 @@ mod tests {
 
         // Create sandbox with HyperlightFS
         let guest_bin_path = simple_guest_as_string().unwrap();
-        let mut u_sbox =
-            UninitializedSandbox::new(GuestBinary::FilePath(guest_bin_path), None).unwrap();
-        u_sbox.set_hyperlight_fs(fs_image);
-
-        // Evolve the sandbox
-        let sandbox = evolve_impl_multi_use(u_sbox).unwrap();
+        let sandbox = UninitializedSandbox::new(GuestBinary::FilePath(guest_bin_path), None)
+            .unwrap()
+            .with_hyperlight_fs(fs_image)
+            .evolve()
+            .unwrap();
 
         // Verify the PEB has the FS region and manifest set
         let fs_region_ptr_offset = sandbox.mem_mgr.layout.get_guest_fs_region_pointer_offset();
@@ -608,10 +607,12 @@ mod tests {
 
         // Create and evolve sandbox with HyperlightFS (supports both Rust and C guests)
         let guest_bin_path = get_c_or_rust_simpleguest_path();
-        let mut u_sbox =
-            UninitializedSandbox::new(GuestBinary::FilePath(guest_bin_path), None).unwrap();
-        u_sbox.set_hyperlight_fs(fs_image);
-        let mut sandbox = evolve_impl_multi_use(u_sbox).unwrap();
+        let mut sandbox: MultiUseSandbox =
+            UninitializedSandbox::new(GuestBinary::FilePath(guest_bin_path), None)
+                .unwrap()
+                .with_hyperlight_fs(fs_image)
+                .evolve()
+                .unwrap();
 
         // Check that FS is initialized in guest
         let is_init: i32 = sandbox.call("IsFsInitialized", ()).unwrap();

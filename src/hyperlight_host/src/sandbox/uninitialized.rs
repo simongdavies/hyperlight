@@ -284,29 +284,32 @@ impl UninitializedSandbox {
     /// # Arguments
     ///
     /// * `fs_image` - The HyperlightFS image containing files to map into the guest.
-    ///   The image is wrapped in an `Arc` to allow sharing across multiple sandboxes.
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
-    ///
+    /// ```no_run
+    /// # use hyperlight_host::{MultiUseSandbox, UninitializedSandbox, GuestBinary};
+    /// # use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// // Build the FS image for this sandbox
     /// let fs_image = HyperlightFSBuilder::new()
     ///     .add_file("/app/config.json", "/guest/config.json")?
     ///     .build()?;
     ///
-    /// // Each sandbox owns its HyperlightFSImage
-    /// let mut sandbox = UninitializedSandbox::new(guest_binary, None)?;
-    /// sandbox.set_hyperlight_fs(fs_image);
-    ///
-    /// // For read-only FS (no FAT mounts), the builder can be cloned:
-    /// // let builder = HyperlightFSBuilder::new().add_file(...)?;
-    /// // sandbox1.set_hyperlight_fs(builder.build()?);
-    /// // sandbox2.set_hyperlight_fs(builder.build()?);
+    /// // Chain with sandbox creation using builder pattern
+    /// let sandbox: MultiUseSandbox = UninitializedSandbox::new(
+    ///     GuestBinary::FilePath("guest.bin".into()),
+    ///     None
+    /// )?
+    /// .with_hyperlight_fs(fs_image)
+    /// .evolve()?;
+    /// # Ok(())
+    /// # }
     /// ```
-    pub fn set_hyperlight_fs(&mut self, fs_image: HyperlightFSImage) {
+    #[must_use]
+    pub fn with_hyperlight_fs(mut self, fs_image: HyperlightFSImage) -> Self {
         self.hyperlight_fs = Some(fs_image);
+        self
     }
 
     /// Registers a host function that the guest can call.
@@ -1300,7 +1303,7 @@ mod tests {
     }
 
     #[test]
-    fn test_set_hyperlight_fs() {
+    fn test_with_hyperlight_fs() {
         use std::io::Write;
 
         use tempfile::tempdir;
@@ -1322,13 +1325,10 @@ mod tests {
             .build()
             .unwrap();
 
-        // Create sandbox and set the FS image
-        let mut sandbox =
-            UninitializedSandbox::new(GuestBinary::FilePath(binary_path), None).unwrap();
-
-        assert!(sandbox.hyperlight_fs.is_none());
-
-        sandbox.set_hyperlight_fs(fs_image);
+        // Create sandbox and set the FS image using builder pattern
+        let sandbox = UninitializedSandbox::new(GuestBinary::FilePath(binary_path), None)
+            .unwrap()
+            .with_hyperlight_fs(fs_image);
 
         assert!(sandbox.hyperlight_fs.is_some());
 

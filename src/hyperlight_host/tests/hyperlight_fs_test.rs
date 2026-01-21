@@ -51,9 +51,11 @@ fn create_fat_sandbox(
     fs_image: hyperlight_host::hyperlight_fs::HyperlightFSImage,
 ) -> MultiUseSandbox {
     let guest_path = guest_binary_path();
-    let mut uninit = UninitializedSandbox::new(GuestBinary::FilePath(guest_path), None).unwrap();
-    uninit.set_hyperlight_fs(fs_image);
-    uninit.evolve().unwrap()
+    UninitializedSandbox::new(GuestBinary::FilePath(guest_path), None)
+        .unwrap()
+        .with_hyperlight_fs(fs_image)
+        .evolve()
+        .unwrap()
 }
 
 /// Helper to create a temp directory with an empty FAT mount sandbox.
@@ -785,5 +787,544 @@ fn test_guest_fat_cwd_operations() {
     assert_eq!(
         read_from_parent, content,
         "relative path from parent should work"
+    );
+}
+
+// =============================================================================
+// Sandbox Filesystem API Tests
+// =============================================================================
+
+/// Test: fs_write_file and fs_read_file for host ↔ FAT data exchange.
+#[test]
+fn test_sandbox_fs_write_and_read_file() {
+    let (_temp_dir, mut sandbox) = create_empty_fat_test_sandbox();
+
+    // Host writes data to FAT mount
+    let input_data = b"Host injected data for guest";
+    sandbox
+        .fs_write_file("/data/input.txt", input_data)
+        .unwrap();
+
+    // Guest reads it back
+    let guest_read: Vec<u8> = sandbox
+        .call("ReadFatFile", "/data/input.txt".to_string())
+        .unwrap();
+    assert_eq!(
+        guest_read,
+        input_data.to_vec(),
+        "guest should read host-written data"
+    );
+
+    // Guest writes data
+    let guest_output = b"Guest generated output".to_vec();
+    let _: bool = sandbox
+        .call(
+            "WriteFatFile",
+            ("/data/output.txt".to_string(), guest_output.clone()),
+        )
+        .unwrap();
+
+    // Host reads it back
+    let host_read = sandbox.fs_read_file("/data/output.txt").unwrap();
+    assert_eq!(
+        host_read, guest_output,
+        "host should read guest-written data"
+    );
+}
+
+/// Test: fs_stat returns correct metadata.
+#[test]
+fn test_sandbox_fs_stat() {
+    let (_temp_dir, mut sandbox) = create_empty_fat_test_sandbox();
+
+    // Write a file with known content
+    let content = b"Hello, stat test!";
+    sandbox
+        .fs_write_file("/data/statfile.txt", content)
+        .unwrap();
+
+    // Create a directory
+    sandbox.fs_mkdir("/data/statdir").unwrap();
+
+    // Stat the file
+    let file_stat = sandbox.fs_stat("/data/statfile.txt").unwrap();
+    assert_eq!(
+        file_stat.size,
+        content.len() as u64,
+        "file size should match"
+    );
+    assert!(!file_stat.is_dir, "file should not be a directory");
+
+    // Stat the directory
+    let dir_stat = sandbox.fs_stat("/data/statdir").unwrap();
+    assert!(dir_stat.is_dir, "directory should be a directory");
+    assert_eq!(dir_stat.size, 0, "directory size should be 0");
+}
+
+/// Test: fs_read_dir lists directory contents.
+#[test]
+fn test_sandbox_fs_read_dir() {
+    let (_temp_dir, mut sandbox) = create_empty_fat_test_sandbox();
+
+    // Create some files and directories with known content
+    let file1_content = b"content1"; // 8 bytes
+    let file2_content = b"content2"; // 8 bytes
+
+    sandbox
+        .fs_write_file("/data/file1.txt", file1_content)
+        .unwrap();
+    sandbox
+        .fs_write_file("/data/file2.txt", file2_content)
+        .unwrap();
+    sandbox.fs_mkdir("/data/subdir").unwrap();
+
+    // List directory
+    let entries = sandbox.fs_read_dir("/data").unwrap();
+
+    // Should have 3 entries
+    assert_eq!(entries.len(), 3, "should list 3 entries");
+
+    // Check names
+    let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+    assert!(names.contains(&"file1.txt"), "should contain file1.txt");
+    assert!(names.contains(&"file2.txt"), "should contain file2.txt");
+    assert!(names.contains(&"subdir"), "should contain subdir");
+
+    // Check types
+    let subdir_entry = entries.iter().find(|e| e.name == "subdir").unwrap();
+    assert!(subdir_entry.stat.is_dir, "subdir should be a directory");
+
+    let file1_entry = entries.iter().find(|e| e.name == "file1.txt").unwrap();
+    assert!(
+        !file1_entry.stat.is_dir,
+        "file1.txt should not be a directory"
+    );
+    assert_eq!(
+        file1_entry.stat.size,
+        file1_content.len() as u64,
+        "file1.txt size should match content length"
+    );
+}
+
+/// Test: fs_mkdir creates directories.
+#[test]
+fn test_sandbox_fs_mkdir() {
+    let (_temp_dir, mut sandbox) = create_empty_fat_test_sandbox();
+
+    // Create a directory
+    sandbox.fs_mkdir("/data/newdir").unwrap();
+
+    // Verify it exists and is a directory
+    let stat = sandbox.fs_stat("/data/newdir").unwrap();
+    assert!(stat.is_dir, "should be a directory");
+
+    // Create nested directory
+    sandbox.fs_mkdir("/data/newdir/nested").unwrap();
+    let nested_stat = sandbox.fs_stat("/data/newdir/nested").unwrap();
+    assert!(nested_stat.is_dir, "nested should be a directory");
+
+    // Write a file inside to verify it's usable
+    sandbox
+        .fs_write_file("/data/newdir/nested/file.txt", b"nested content")
+        .unwrap();
+    let content = sandbox
+        .fs_read_file("/data/newdir/nested/file.txt")
+        .unwrap();
+    assert_eq!(content, b"nested content");
+}
+
+/// Test: fs_remove_file deletes files.
+#[test]
+fn test_sandbox_fs_remove_file() {
+    let (_temp_dir, mut sandbox) = create_empty_fat_test_sandbox();
+
+    // Create and verify file
+    sandbox
+        .fs_write_file("/data/todelete.txt", b"delete me")
+        .unwrap();
+    assert!(sandbox.fs_exists("/data/todelete.txt").unwrap());
+
+    // Delete file
+    sandbox.fs_remove_file("/data/todelete.txt").unwrap();
+
+    // Verify it's gone
+    assert!(!sandbox.fs_exists("/data/todelete.txt").unwrap());
+}
+
+/// Test: fs_remove_dir deletes empty directories.
+#[test]
+fn test_sandbox_fs_remove_dir() {
+    let (_temp_dir, mut sandbox) = create_empty_fat_test_sandbox();
+
+    // Create and verify directory
+    sandbox.fs_mkdir("/data/emptydir").unwrap();
+    assert!(sandbox.fs_exists("/data/emptydir").unwrap());
+
+    // Delete directory
+    sandbox.fs_remove_dir("/data/emptydir").unwrap();
+
+    // Verify it's gone
+    assert!(!sandbox.fs_exists("/data/emptydir").unwrap());
+}
+
+/// Test: fs_remove_dir fails on non-empty directory.
+#[test]
+fn test_sandbox_fs_remove_dir_not_empty_fails() {
+    let (_temp_dir, mut sandbox) = create_empty_fat_test_sandbox();
+
+    // Create directory with content
+    sandbox.fs_mkdir("/data/nonempty").unwrap();
+    sandbox
+        .fs_write_file("/data/nonempty/file.txt", b"content")
+        .unwrap();
+
+    // Attempt to delete non-empty directory should fail
+    let result = sandbox.fs_remove_dir("/data/nonempty");
+    assert!(result.is_err(), "removing non-empty directory should fail");
+}
+
+/// Test: fs_rename renames files.
+#[test]
+fn test_sandbox_fs_rename_file() {
+    let (_temp_dir, mut sandbox) = create_empty_fat_test_sandbox();
+
+    // Create file
+    let content = b"rename me";
+    sandbox.fs_write_file("/data/oldname.txt", content).unwrap();
+
+    // Rename file (paths must be relative within the FAT mount)
+    sandbox
+        .fs_rename("/data/oldname.txt", "/data/newname.txt")
+        .unwrap();
+
+    // Old name should not exist
+    assert!(!sandbox.fs_exists("/data/oldname.txt").unwrap());
+
+    // New name should exist with same content
+    assert!(sandbox.fs_exists("/data/newname.txt").unwrap());
+    let read_content = sandbox.fs_read_file("/data/newname.txt").unwrap();
+    assert_eq!(read_content, content.to_vec());
+}
+
+/// Test: fs_rename moves files to subdirectories.
+#[test]
+fn test_sandbox_fs_rename_move_to_subdir() {
+    let (_temp_dir, mut sandbox) = create_empty_fat_test_sandbox();
+
+    // Create file and target directory
+    let content = b"move me";
+    sandbox.fs_write_file("/data/moveme.txt", content).unwrap();
+    sandbox.fs_mkdir("/data/subdir").unwrap();
+
+    // Move file
+    sandbox
+        .fs_rename("/data/moveme.txt", "/data/subdir/moveme.txt")
+        .unwrap();
+
+    // Verify move
+    assert!(!sandbox.fs_exists("/data/moveme.txt").unwrap());
+    assert!(sandbox.fs_exists("/data/subdir/moveme.txt").unwrap());
+    let read_content = sandbox.fs_read_file("/data/subdir/moveme.txt").unwrap();
+    assert_eq!(read_content, content.to_vec());
+}
+
+/// Test: fs_rename renames directories.
+#[test]
+fn test_sandbox_fs_rename_directory() {
+    let (_temp_dir, mut sandbox) = create_empty_fat_test_sandbox();
+
+    // Create directory with contents
+    sandbox.fs_mkdir("/data/olddir").unwrap();
+    sandbox
+        .fs_write_file("/data/olddir/file.txt", b"content")
+        .unwrap();
+
+    // Rename directory (paths must be guest paths)
+    sandbox.fs_rename("/data/olddir", "/data/newdir").unwrap();
+
+    // Verify old name gone, new name exists
+    assert!(!sandbox.fs_exists("/data/olddir").unwrap());
+    assert!(sandbox.fs_exists("/data/newdir").unwrap());
+    assert!(sandbox.fs_exists("/data/newdir/file.txt").unwrap());
+}
+
+/// Test: fs_exists returns correct results.
+#[test]
+fn test_sandbox_fs_exists() {
+    let (_temp_dir, mut sandbox) = create_empty_fat_test_sandbox();
+
+    // Non-existent path
+    assert!(!sandbox.fs_exists("/data/noexist.txt").unwrap());
+
+    // Create file
+    sandbox
+        .fs_write_file("/data/exists.txt", b"I exist")
+        .unwrap();
+    assert!(sandbox.fs_exists("/data/exists.txt").unwrap());
+
+    // Create directory
+    sandbox.fs_mkdir("/data/existsdir").unwrap();
+    assert!(sandbox.fs_exists("/data/existsdir").unwrap());
+
+    // Root of mount always exists
+    assert!(sandbox.fs_exists("/data").unwrap());
+}
+
+/// Test: fs_open_file provides streaming read access.
+#[test]
+fn test_sandbox_fs_open_file_streaming() {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let (_temp_dir, mut sandbox) = create_empty_fat_test_sandbox();
+
+    // Create file with known content
+    let content = b"0123456789ABCDEFGHIJ";
+    sandbox.fs_write_file("/data/stream.txt", content).unwrap();
+
+    // Open for streaming read
+    let mut reader = sandbox.fs_open_file("/data/stream.txt").unwrap();
+
+    // Read first 5 bytes
+    let mut buf = [0u8; 5];
+    reader.read_exact(&mut buf).unwrap();
+    assert_eq!(&buf, b"01234");
+
+    // Seek to position 10
+    reader.seek(SeekFrom::Start(10)).unwrap();
+    reader.read_exact(&mut buf).unwrap();
+    assert_eq!(&buf, b"ABCDE");
+
+    // Seek from end
+    reader.seek(SeekFrom::End(-5)).unwrap();
+    reader.read_exact(&mut buf).unwrap();
+    assert_eq!(&buf, b"FGHIJ");
+}
+
+/// Test: fs_create_file provides streaming write access.
+#[test]
+fn test_sandbox_fs_create_file_streaming() {
+    use std::io::Write;
+
+    let (_temp_dir, mut sandbox) = create_empty_fat_test_sandbox();
+
+    // Create file via streaming write
+    {
+        let mut writer = sandbox.fs_create_file("/data/streamed.txt").unwrap();
+        writer.write_all(b"Part 1, ").unwrap();
+        writer.write_all(b"Part 2, ").unwrap();
+        writer.write_all(b"Part 3").unwrap();
+        writer.flush().unwrap();
+    } // writer dropped here, releasing borrow
+
+    // Read back via simple method
+    let content = sandbox.fs_read_file("/data/streamed.txt").unwrap();
+    assert_eq!(content, b"Part 1, Part 2, Part 3");
+
+    // Verify guest can also read it
+    let guest_read: Vec<u8> = sandbox
+        .call("ReadFatFile", "/data/streamed.txt".to_string())
+        .unwrap();
+    assert_eq!(guest_read, b"Part 1, Part 2, Part 3".to_vec());
+}
+
+/// Test: Error when path is not in a FAT mount.
+#[test]
+fn test_sandbox_fs_path_not_in_mount_error() {
+    let (_temp_dir, mut sandbox) = create_empty_fat_test_sandbox();
+
+    // Try to access a path not in any FAT mount
+    let result = sandbox.fs_read_file("/notamount/file.txt");
+    assert!(result.is_err(), "should error for path not in FAT mount");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("not within a FAT mount"),
+        "error should mention FAT mount: {}",
+        err
+    );
+}
+
+/// Test: Error when no HyperlightFS is configured.
+#[test]
+fn test_sandbox_fs_no_hyperlight_fs_error() {
+    // Create sandbox WITHOUT HyperlightFS
+    let guest_path = guest_binary_path();
+    let uninit = UninitializedSandbox::new(GuestBinary::FilePath(guest_path), None).unwrap();
+    let mut sandbox: MultiUseSandbox = uninit.evolve().unwrap();
+
+    // All fs_* methods should fail
+    let result = sandbox.fs_read_file("/any/path");
+    assert!(result.is_err(), "should error when no HyperlightFS");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("No HyperlightFS"),
+        "error should mention no HyperlightFS: {}",
+        err
+    );
+}
+
+/// Test: Full workflow - host injects, guest processes, host extracts.
+#[test]
+fn test_sandbox_fs_full_workflow() {
+    let (_temp_dir, mut sandbox) = create_empty_fat_test_sandbox();
+
+    // Step 1: Host creates directory structure
+    sandbox.fs_mkdir("/data/input").unwrap();
+    sandbox.fs_mkdir("/data/output").unwrap();
+
+    // Step 2: Host injects input data
+    sandbox
+        .fs_write_file("/data/input/data.txt", b"Process this data")
+        .unwrap();
+
+    // Step 3: Verify input is visible to guest (by reading it)
+    let guest_read: Vec<u8> = sandbox
+        .call("ReadFatFile", "/data/input/data.txt".to_string())
+        .unwrap();
+    assert_eq!(
+        guest_read,
+        b"Process this data".to_vec(),
+        "guest should read host-written input"
+    );
+
+    // Step 4: Guest writes output (simulated)
+    let _: bool = sandbox
+        .call(
+            "WriteFatFile",
+            (
+                "/data/output/result.txt".to_string(),
+                b"Processed result".to_vec(),
+            ),
+        )
+        .unwrap();
+
+    // Step 5: Host extracts output
+    let result = sandbox.fs_read_file("/data/output/result.txt").unwrap();
+    assert_eq!(result, b"Processed result");
+
+    // Step 6: Host lists output directory
+    let entries = sandbox.fs_read_dir("/data/output").unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].name, "result.txt");
+
+    // Step 7: Host cleans up
+    sandbox.fs_remove_file("/data/output/result.txt").unwrap();
+    sandbox.fs_remove_file("/data/input/data.txt").unwrap();
+    sandbox.fs_remove_dir("/data/output").unwrap();
+    sandbox.fs_remove_dir("/data/input").unwrap();
+
+    // Verify cleanup
+    assert!(!sandbox.fs_exists("/data/input").unwrap());
+    assert!(!sandbox.fs_exists("/data/output").unwrap());
+}
+
+/// Test: fs_rename fails when renaming to existing file.
+#[test]
+fn test_sandbox_fs_rename_to_existing_fails() {
+    let (_temp_dir, mut sandbox) = create_empty_fat_test_sandbox();
+
+    // Create two files
+    sandbox
+        .fs_write_file("/data/source.txt", b"source content")
+        .unwrap();
+    sandbox
+        .fs_write_file("/data/target.txt", b"target content")
+        .unwrap();
+
+    // Attempt to rename source to existing target should fail
+    let result = sandbox.fs_rename("/data/source.txt", "/data/target.txt");
+    assert!(
+        result.is_err(),
+        "renaming to existing file should fail: {:?}",
+        result
+    );
+}
+
+/// Test: fs_rename fails when paths are in different FAT mounts.
+#[test]
+fn test_sandbox_fs_rename_cross_mount_fails() {
+    // Create sandbox with TWO FAT mounts
+    let temp_dir = TempDir::new().unwrap();
+    let fat1_path = temp_dir.path().join("fat1.fat");
+    let fat2_path = temp_dir.path().join("fat2.fat");
+    let guest_path = guest_binary_path();
+
+    let fs = HyperlightFSBuilder::new()
+        .add_empty_fat_mount_at(&fat1_path, "/data1", 1024 * 1024) // 1MB minimum
+        .expect("first FAT mount")
+        .add_empty_fat_mount_at(&fat2_path, "/data2", 1024 * 1024) // 1MB minimum
+        .expect("second FAT mount")
+        .build()
+        .expect("build fs");
+
+    let mut sandbox: MultiUseSandbox =
+        UninitializedSandbox::new(GuestBinary::FilePath(guest_path), None)
+            .unwrap()
+            .with_hyperlight_fs(fs)
+            .evolve()
+            .unwrap();
+
+    // Create file in first mount
+    sandbox
+        .fs_write_file("/data1/file.txt", b"content")
+        .unwrap();
+
+    // Attempt to rename across mounts should fail
+    let result = sandbox.fs_rename("/data1/file.txt", "/data2/file.txt");
+    assert!(result.is_err(), "cross-mount rename should fail");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("different FAT mounts"),
+        "error should mention different mounts: {}",
+        err
+    );
+
+    drop(sandbox);
+    drop(temp_dir);
+}
+
+/// Test: fs_rename fails when trying to rename root.
+#[test]
+fn test_sandbox_fs_rename_root_fails() {
+    let (_temp_dir, mut sandbox) = create_empty_fat_test_sandbox();
+
+    // Attempt to rename root (mount point) should fail
+    // We use "/data/" renamed to "/data/newroot" - the source is the root of the mount
+    let result = sandbox.fs_rename("/data/", "/data/newroot");
+    assert!(result.is_err(), "renaming root should fail");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("root") || err.contains("Cannot rename"),
+        "error should mention root directory: {}",
+        err
+    );
+}
+
+/// Test: read_dir size reflects actual content size.
+#[test]
+fn test_sandbox_fs_read_dir_file_sizes() {
+    let (_temp_dir, mut sandbox) = create_empty_fat_test_sandbox();
+
+    // Create files with known content sizes
+    let content_a = b"hello"; // 5 bytes
+    let content_b = b"goodbye world"; // 13 bytes
+
+    sandbox.fs_write_file("/data/a.txt", content_a).unwrap();
+    sandbox.fs_write_file("/data/b.txt", content_b).unwrap();
+
+    // List and verify sizes match content lengths
+    let entries = sandbox.fs_read_dir("/data").unwrap();
+
+    let a_entry = entries.iter().find(|e| e.name == "a.txt").unwrap();
+    assert_eq!(
+        a_entry.stat.size,
+        content_a.len() as u64,
+        "a.txt size should match content length"
+    );
+
+    let b_entry = entries.iter().find(|e| e.name == "b.txt").unwrap();
+    assert_eq!(
+        b_entry.stat.size,
+        content_b.len() as u64,
+        "b.txt size should match content length"
     );
 }

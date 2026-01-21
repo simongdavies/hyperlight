@@ -188,15 +188,12 @@ fn run(args: Args) -> Result<(), String> {
     }
     .map_err(|e| format!("Guest not found: {}", e))?;
 
-    let mut uninitialized_sandbox =
+    let mut sandbox: MultiUseSandbox =
         UninitializedSandbox::new(GuestBinary::FilePath(guest_path), None)
-            .map_err(|e| format!("Failed to create sandbox: {}", e))?;
-
-    uninitialized_sandbox.set_hyperlight_fs(fs_image);
-
-    let mut sandbox: MultiUseSandbox = uninitialized_sandbox
-        .evolve()
-        .map_err(|e| format!("Failed to evolve sandbox: {}", e))?;
+            .map_err(|e| format!("Failed to create sandbox: {}", e))?
+            .with_hyperlight_fs(fs_image)
+            .evolve()
+            .map_err(|e| format!("Failed to evolve sandbox: {}", e))?;
 
     println!("  Sandbox created in {}", format_duration(start.elapsed()));
     println!();

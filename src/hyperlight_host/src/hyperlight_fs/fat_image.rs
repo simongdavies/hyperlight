@@ -891,6 +891,67 @@ impl FatImage {
         Ok(())
     }
 
+    /// Rename or move a file or directory.
+    ///
+    /// # Arguments
+    ///
+    /// * `old_path` - Current absolute path of the file or directory
+    /// * `new_path` - New absolute path (can be in a different directory)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Rename a file
+    /// image.rename("/old_name.txt", "/new_name.txt")?;
+    ///
+    /// // Move a file to a subdirectory
+    /// image.rename("/file.txt", "/subdir/file.txt")?;
+    ///
+    /// // Rename a directory
+    /// image.rename("/old_dir", "/new_dir")?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The source path doesn't exist
+    /// - The destination already exists
+    /// - The paths contain invalid components (e.g., "..")
+    /// - The destination's parent directory doesn't exist
+    /// - Attempting to rename the root directory
+    pub fn rename(&mut self, old_path: &str, new_path: &str) -> Result<()> {
+        Self::validate_path(old_path)?;
+        Self::validate_path(new_path)?;
+        trace!(old_path, new_path, "Renaming");
+
+        // fatfs rename expects paths relative to the root directory,
+        // WITHOUT a leading slash. We strip it here because our API uses
+        // absolute paths (with leading /).
+        let old_rel = old_path.trim_start_matches('/');
+        let new_rel = new_path.trim_start_matches('/');
+
+        // Prevent renaming the root directory itself
+        if old_rel.is_empty() || new_rel.is_empty() {
+            return Err(HyperlightError::Error(
+                "Cannot rename the root directory".to_string(),
+            ));
+        }
+
+        let fs = self.open_fs()?;
+        let root = fs.root_dir();
+
+        root.rename(old_rel, &root, new_rel).map_err(|e| {
+            error!(old_path, new_path, error = %e, "Failed to rename");
+            HyperlightError::Error(format!(
+                "Failed to rename '{}' to '{}': {}",
+                old_path, new_path, e
+            ))
+        })?;
+
+        trace!(old_path, new_path, "Renamed successfully");
+        Ok(())
+    }
+
     /// Get metadata for a file or directory.
     ///
     /// # Arguments
@@ -1539,6 +1600,13 @@ impl FatImage {
 
     #[doc(hidden)]
     pub fn delete_dir(&mut self, _path: &str) -> Result<()> {
+        Err(HyperlightError::Error(
+            "FatImage is not supported on Windows".to_string(),
+        ))
+    }
+
+    #[doc(hidden)]
+    pub fn rename(&mut self, _old_path: &str, _new_path: &str) -> Result<()> {
         Err(HyperlightError::Error(
             "FatImage is not supported on Windows".to_string(),
         ))
