@@ -15,12 +15,12 @@
 |-------|--------|----------|
 | Phase 1: Host-Side Foundation | ✅ Complete | 6/6 |
 | Phase 2: Guest-Side Foundation | ✅ Complete | 5/5 |
-| Phase 3: Host-Guest Integration | 🔄 In Progress | 2/4 |
+| Phase 3: Host-Guest Integration | 🔄 In Progress | 3/4 |
 | Phase 4: C API Implementation | ⬜ Not Started | 0/4 |
 | Phase 5: Host Extraction APIs | ⬜ Not Started | 0/3 |
 | Phase 6: Testing & Documentation | ⬜ Not Started | 0/4 |
 
-**Overall: 13/26 steps complete**
+**Overall: 14/26 steps complete**
 
 ---
 
@@ -738,17 +738,23 @@ Wire FAT images into sandbox memory.
 
 ### Step 3.3: Guest FAT Mount Initialization
 
-**Status:** ⬜ Not Started
+**Status:** ✅ Complete
 
 **Goal:** Initialize FAT filesystems in guest during startup.
 
-**Files to modify:**
+**Files modified:**
 - `src/hyperlight_guest/src/fs/manifest.rs`
 
+**Implementation notes:**
+- Implemented in Phase 2 as part of Step 2.4 (manifest parsing)
+- `init()` iterates FAT mount inodes, creates `GuestFat` for each
+- VFS populated with `MountBackend::Fat` entries
+- Root ReadOnly mount added as fallback (lowest priority)
+
 **Acceptance criteria:**
-- [ ] FAT mounts initialized during `fs::init()`
-- [ ] VFS populated with FAT backends
-- [ ] Files in FAT mounts accessible
+- [x] FAT mounts initialized during `fs::init()`
+- [x] VFS populated with FAT backends
+- [x] Files in FAT mounts accessible
 
 ---
 
