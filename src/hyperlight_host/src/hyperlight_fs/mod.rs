@@ -87,7 +87,7 @@ limitations under the License.
 //!     .done()?;
 //!
 //! // Preview what would be mapped (dry run)
-//! let manifest = builder.list()?;
+//! let manifest = builder.file_summary()?;
 //! println!("Would map {} files", manifest.files.len());
 //!
 //! // Build the image (creates mmaps)

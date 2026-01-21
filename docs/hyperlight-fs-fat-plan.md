@@ -15,12 +15,12 @@
 |-------|--------|----------|
 | Phase 1: Host-Side Foundation | ✅ Complete | 6/6 |
 | Phase 2: Guest-Side Foundation | ✅ Complete | 5/5 |
-| Phase 3: Host-Guest Integration | ⬜ Not Started | 0/4 |
+| Phase 3: Host-Guest Integration | 🔄 In Progress | 1/4 |
 | Phase 4: C API Implementation | ⬜ Not Started | 0/4 |
 | Phase 5: Host Extraction APIs | ⬜ Not Started | 0/3 |
 | Phase 6: Testing & Documentation | ⬜ Not Started | 0/4 |
 
-**Overall: 11/26 steps complete**
+**Overall: 12/26 steps complete**
 
 ---
 
@@ -664,7 +664,7 @@ Wire FAT images into sandbox memory.
 
 ### Step 3.1: Update HyperlightFSImage for FAT
 
-**Status:** 🔄 In Progress
+**Status:** ✅ Complete
 
 **Goal:** Include FAT image data in the built filesystem image.
 
@@ -673,10 +673,18 @@ Wire FAT images into sandbox memory.
 - `src/hyperlight_host/src/hyperlight_fs/builder.rs` (pass fat_mounts to build_image)
 
 **Acceptance criteria:**
-- [ ] FAT images stored in HyperlightFSImage
-- [ ] `manifest_size()` includes FAT mount inodes
-- [ ] `mapped_files_region_size()` includes FAT images
-- [ ] `generate_manifest()` produces correct FAT mount entries
+- [x] FAT images stored in HyperlightFSImage
+- [x] `manifest_size()` includes FAT mount inodes
+- [x] `mapped_files_region_size()` includes FAT images
+- [x] `generate_manifest()` produces correct FAT mount entries
+
+**Implementation notes:**
+- Added `InodeEntryType` enum (File, Directory, FatMount)
+- Added `FatMountStorage` struct for FAT mount metadata
+- Memory layout: [RO files region][FAT mounts region]
+- Extracted `round_up_to()` as `pub(crate)` utility in `layout.rs`
+- Added `get_parent_path()` helper for parent directory lookup
+- 13 unit tests for FAT mount functionality
 
 ---
 
@@ -689,35 +697,38 @@ Wire FAT images into sandbox memory.
 **Files to modify:**
 
 *Host side:*
-- `src/hyperlight_host/src/sandbox/uninitialized_evolve.rs`
-- `src/hyperlight_host/src/sandbox/initialized_multi_use.rs`
-- `src/hyperlight_host/src/hypervisor/hyperlight_vm.rs`
-- `src/hyperlight_host/src/sandbox/mod.rs`
+- `src/hyperlight_host/src/sandbox/uninitialized_evolve.rs` - map FAT images with MAP_SHARED
+- `src/hyperlight_host/src/sandbox/initialized_multi_use.rs` - msync on HLT
+- `src/hyperlight_host/src/hypervisor/hyperlight_vm.rs` - enable RW EPT/NPT mappings
 
 *Guest side:*
 - `src/hyperlight_guest_bin/src/paging.rs` - add `map_page_readwrite()` function
 - `src/hyperlight_guest_bin/src/exceptions/handler.rs` - update page fault handler
-- `src/hyperlight_common/src/mem.rs` or new shared location - FAT region tracking
+- `src/hyperlight_guest/src/fs/mod.rs` or `fs/vfs.rs` - FAT region tracking static
 
 **Key changes:**
 
 *Host side:*
-- Enable writable mappings in hypervisor `map_region`
 - Map FAT images using `mmap(MAP_SHARED)` (per spec §2.1)
+- Enable writable mappings in hypervisor for FAT regions
 - Call `msync(MS_SYNC)` on HLT (per spec §3.5)
 - Return `FsError::PlatformNotSupported` on Windows
 
 *Guest side (page fault handler):*
 - Currently `map_page_readonly()` is used for ALL FS region page faults
 - Need to distinguish FAT regions (RW) from RO file regions (RO)
-- Add `map_page_readwrite()` function in `paging.rs`
-- Update page fault handler to check if address is in a FAT region:
-  - If in FAT region → `map_page_readwrite()`
-  - If in RO region → `map_page_readonly()` (existing behavior)
-- FAT region info must be accessible from `hyperlight_guest_bin` (before FS init):
-  - Option A: Store FAT ranges in PEB alongside `guest_fs_region`
-  - Option B: Parse manifest in page fault handler (expensive)
-  - Option C: Separate memory regions for FAT vs RO (cleaner but more host changes)
+- **Solution:** Store FAT address ranges in a static during `fs::init()`:
+  1. `fs::init()` parses manifest and finds FAT mounts with their guest addresses
+  2. `fs::init()` populates a static `Vec` or array with FAT address ranges
+  3. Page fault handler imports and calls `is_fat_region(addr)` to check
+  4. If FAT → `map_page_readwrite()`, else → `map_page_readonly()`
+- This works because page faults for FAT data only occur AFTER `fs::init()` runs
+
+*Why this approach:*
+- No PEB schema changes needed
+- No additional host-side changes to populate region info
+- All logic stays in guest code
+- Clean separation of concerns
 
 **Acceptance criteria:**
 - [ ] Host: FAT regions mapped with RW permissions in EPT/NPT
@@ -728,7 +739,7 @@ Wire FAT images into sandbox memory.
 - [ ] Guest: `map_page_readwrite()` function added to paging.rs
 - [ ] Guest: Page fault handler creates RW PTEs for FAT region addresses
 - [ ] Guest: Page fault handler creates RO PTEs for RO file addresses (unchanged)
-- [ ] Guest: FAT region bounds accessible before FS init (via PEB or similar)
+- [ ] Guest: FAT ranges stored during `fs::init()` and queryable by page fault handler
 - [ ] E2E: Guest can read/write FAT data and changes persist
 
 ---

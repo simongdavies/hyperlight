@@ -139,8 +139,9 @@ pub unsafe fn map_region(phys_base: u64, virt_base: *mut u8, len: u64) {
 
 /// Map a single page as read-only with no execute permission.
 ///
-/// Used for HyperlightFS file data pages mapped on demand during page fault handling.
-/// The page is identity-mapped (phys_addr == virt_addr in the current memory model).
+/// Used for HyperlightFS read-only file data pages mapped on demand during
+/// page fault handling. The page is identity-mapped (phys_addr == virt_addr
+/// in the current memory model).
 ///
 /// # Safety
 ///
@@ -161,6 +162,38 @@ pub unsafe fn map_page_readonly(phys_addr: u64, virt_addr: u64) {
                 kind: vmem::MappingKind::BasicMapping(vmem::BasicMapping {
                     readable: true,
                     writable: false,
+                    executable: false,
+                }),
+            },
+        );
+    }
+}
+
+/// Map a single page as read-write with no execute permission.
+///
+/// Used for HyperlightFS FAT mount pages mapped on demand during page fault handling.
+/// FAT mounts require write access for the guest to modify filesystem contents.
+/// The page is identity-mapped (phys_addr == virt_addr in the current memory model).
+///
+/// # Safety
+///
+/// Same safety requirements as `map_region`:
+/// - No locking is performed before touching page table data structures
+/// - Caller must ensure addresses are page-aligned
+/// - Should not be called concurrently with other page table operations
+/// - TLB invalidation is NOT performed; caller should use `invlpg` afterwards
+pub unsafe fn map_page_readwrite(phys_addr: u64, virt_addr: u64) {
+    use hyperlight_common::vmem;
+    unsafe {
+        vmem::map(
+            &GuestMappingOperations::new(),
+            vmem::Mapping {
+                phys_base: phys_addr,
+                virt_base: virt_addr,
+                len: hyperlight_common::mem::PAGE_SIZE,
+                kind: vmem::MappingKind::BasicMapping(vmem::BasicMapping {
+                    readable: true,
+                    writable: true,
                     executable: false,
                 }),
             },

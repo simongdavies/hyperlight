@@ -112,12 +112,10 @@ fn run(args: Args) -> Result<(), String> {
     }
 
     // Step 2: Build the manifest (dry-run)
-    let builder = HyperlightFSBuilder::from_config(&config)
+    let image = HyperlightFSBuilder::from_config(&config)
         .map_err(|e| format!("Failed to process config: {}", e))?;
 
-    let manifest = builder
-        .list()
-        .map_err(|e| format!("Failed to list files: {}", e))?;
+    let manifest = image.file_summary();
 
     // Step 3: Display results
     let files: Vec<_> = manifest.files.iter().filter(|f| !f.is_dir).collect();

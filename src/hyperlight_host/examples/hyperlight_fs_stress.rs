@@ -30,7 +30,6 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::Arc;
 use std::time::Instant;
 
 use clap::Parser;
@@ -193,7 +192,7 @@ fn run(args: Args) -> Result<(), String> {
         UninitializedSandbox::new(GuestBinary::FilePath(guest_path), None)
             .map_err(|e| format!("Failed to create sandbox: {}", e))?;
 
-    uninitialized_sandbox.set_hyperlight_fs(Arc::new(fs_image));
+    uninitialized_sandbox.set_hyperlight_fs(fs_image);
 
     let mut sandbox: MultiUseSandbox = uninitialized_sandbox
         .evolve()

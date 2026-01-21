@@ -251,7 +251,36 @@ fn wire_hyperlight_fs(
         current_addr += mapped_size;
     }
 
-    // Calculate the total files region size
+    // Map FAT mounts into guest memory with READ|WRITE permissions.
+    // Unlike read-only file mappings above, FAT mounts are writable filesystems -
+    // the guest can create, modify, and delete files within them, and changes
+    // persist to the backing storage (file or anonymous memory).
+    for fat_mount in fs_image.fat_mounts() {
+        let fat_ptr = fat_mount.image().as_ptr();
+        let fat_size = fat_mount.image().size();
+        let page_size = page_size::get();
+        let fat_size_aligned = (fat_size + page_size - 1) & !(page_size - 1);
+
+        unsafe {
+            vm.map_region(&MemoryRegion {
+                host_region: fat_ptr as usize..fat_ptr as usize + fat_size_aligned,
+                guest_region: current_addr as usize..current_addr as usize + fat_size_aligned,
+                flags: MemoryRegionFlags::READ | MemoryRegionFlags::WRITE,
+                region_type: MemoryRegionType::HyperlightFS,
+            })?;
+        }
+
+        info!(
+            mount_point = %fat_mount.mount_point(),
+            guest_addr = format_args!("{:#x}", current_addr),
+            size = fat_size,
+            "Mapped FAT mount into guest (READ|WRITE)"
+        );
+
+        current_addr += fat_size_aligned as u64;
+    }
+
+    // Calculate the total files region size (RO + FAT)
     let fs_files_region_size = current_addr - fs_files_addr;
 
     // Write manifest location to PEB
@@ -441,7 +470,6 @@ mod tests {
     #[test]
     fn test_evolve_with_hyperlight_fs() {
         use std::io::Write;
-        use std::sync::Arc;
 
         use tempfile::TempDir;
 
@@ -469,7 +497,7 @@ mod tests {
         let guest_bin_path = simple_guest_as_string().unwrap();
         let mut u_sbox =
             UninitializedSandbox::new(GuestBinary::FilePath(guest_bin_path), None).unwrap();
-        u_sbox.set_hyperlight_fs(Arc::new(fs_image));
+        u_sbox.set_hyperlight_fs(fs_image);
 
         // Evolve the sandbox
         let sandbox = evolve_impl_multi_use(u_sbox).unwrap();
@@ -545,7 +573,6 @@ mod tests {
     #[test]
     fn test_guest_reads_file_from_hyperlight_fs() {
         use std::io::Write;
-        use std::sync::Arc;
 
         use tempfile::TempDir;
 
@@ -581,7 +608,7 @@ mod tests {
         let guest_bin_path = get_c_or_rust_simpleguest_path();
         let mut u_sbox =
             UninitializedSandbox::new(GuestBinary::FilePath(guest_bin_path), None).unwrap();
-        u_sbox.set_hyperlight_fs(Arc::new(fs_image));
+        u_sbox.set_hyperlight_fs(fs_image);
         let mut sandbox = evolve_impl_multi_use(u_sbox).unwrap();
 
         // Check that FS is initialized in guest

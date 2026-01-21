@@ -20,6 +20,7 @@ limitations under the License.
 //! into the guest filesystem.
 
 use std::collections::HashSet;
+use std::marker::PhantomData;
 use std::path::{Component, Path, PathBuf};
 
 use glob::Pattern;
@@ -29,6 +30,26 @@ use super::fat_image::FatImage;
 use super::image::HyperlightFSImage;
 use crate::Result;
 use crate::error::HyperlightError;
+
+/// Error message for FAT operations on Windows.
+#[cfg(windows)]
+const FAT_NOT_SUPPORTED_ON_WINDOWS: &str = "FAT mounts are not supported on Windows";
+
+/// Marker type indicating a builder has no FAT mounts.
+///
+/// Builders with this marker can be cloned (since they contain no
+/// non-shareable FAT state). Adding a FAT mount transforms the builder
+/// to use [`WithFat`] marker instead.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoFat;
+
+/// Marker type indicating a builder has FAT mounts.
+///
+/// Builders with this marker cannot be cloned because FAT mounts
+/// contain non-shareable state (mmap'd files with exclusive locks).
+/// Use [`build`](HyperlightFSBuilder::build) to consume the builder.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WithFat;
 
 /// Validate a host path.
 ///
@@ -53,17 +74,28 @@ fn validate_host_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Validate and normalize a guest file path.
+/// Validate and normalize a guest path.
 ///
-/// Rules:
+/// # Arguments
+///
+/// * `path` - The guest path to validate
+/// * `path_type` - Description of the path type for error messages (e.g., "path", "prefix", "mount point")
+/// * `allow_root` - Whether "/" (root) is allowed as a valid path
+///
+/// # Rules
+///
 /// - Must be absolute (start with `/`)
 /// - Must not contain `..` components
 /// - Must not contain null bytes
-/// - Must not be just `/` (root)
-fn validate_guest_file_path(path: &str) -> Result<String> {
+/// - Must not be just `/` unless `allow_root` is true
+fn validate_and_normalize_guest_path(
+    path: &str,
+    path_type: &str,
+    allow_root: bool,
+) -> Result<String> {
     if path.contains('\0') {
         return Err(HyperlightError::Error(format!(
-            "Invalid guest path {:?}: contains null byte",
+            "Invalid guest {path_type} {:?}: contains null byte",
             path
         )));
     }
@@ -71,7 +103,7 @@ fn validate_guest_file_path(path: &str) -> Result<String> {
     let p = Path::new(path);
     if !p.is_absolute() {
         return Err(HyperlightError::Error(format!(
-            "Invalid guest path {:?}: must be absolute (start with '/')",
+            "Invalid guest {path_type} {:?}: must be absolute (start with '/')",
             path
         )));
     }
@@ -81,7 +113,7 @@ fn validate_guest_file_path(path: &str) -> Result<String> {
         match comp {
             Component::ParentDir => {
                 return Err(HyperlightError::Error(format!(
-                    "Invalid guest path {:?}: '..' components are not allowed",
+                    "Invalid guest {path_type} {:?}: '..' components are not allowed",
                     path
                 )));
             }
@@ -91,53 +123,27 @@ fn validate_guest_file_path(path: &str) -> Result<String> {
     }
 
     if parts.is_empty() {
-        return Err(HyperlightError::Error(format!(
-            "Invalid guest path {:?}: cannot be root directory",
-            path
-        )));
-    }
-
-    Ok(format!("/{}", parts.join("/")))
-}
-
-/// Validate and normalize a guest directory prefix.
-///
-/// Same rules as file path, but `/` (root) is allowed.
-fn validate_guest_dir_prefix(path: &str) -> Result<String> {
-    if path.contains('\0') {
-        return Err(HyperlightError::Error(format!(
-            "Invalid guest prefix {:?}: contains null byte",
-            path
-        )));
-    }
-
-    let p = Path::new(path);
-    if !p.is_absolute() {
-        return Err(HyperlightError::Error(format!(
-            "Invalid guest prefix {:?}: must be absolute (start with '/')",
-            path
-        )));
-    }
-
-    let mut parts = Vec::new();
-    for comp in p.components() {
-        match comp {
-            Component::ParentDir => {
-                return Err(HyperlightError::Error(format!(
-                    "Invalid guest prefix {:?}: '..' components are not allowed",
-                    path
-                )));
-            }
-            Component::Normal(s) => parts.push(s.to_string_lossy().to_string()),
-            Component::RootDir | Component::CurDir | Component::Prefix(_) => {}
+        if allow_root {
+            Ok("/".to_string())
+        } else {
+            Err(HyperlightError::Error(format!(
+                "Invalid guest {path_type} {:?}: cannot be root directory",
+                path
+            )))
         }
-    }
-
-    if parts.is_empty() {
-        Ok("/".to_string())
     } else {
         Ok(format!("/{}", parts.join("/")))
     }
+}
+
+/// Validate and normalize a guest file path (root "/" not allowed).
+fn validate_guest_file_path(path: &str) -> Result<String> {
+    validate_and_normalize_guest_path(path, "path", false)
+}
+
+/// Validate and normalize a guest directory prefix (root "/" allowed).
+fn validate_guest_dir_prefix(path: &str) -> Result<String> {
+    validate_and_normalize_guest_path(path, "prefix", true)
 }
 
 /// Normalize a guest path by removing duplicate slashes and `.` components.
@@ -159,6 +165,165 @@ fn normalize_guest_path(path: &str) -> String {
     } else {
         format!("/{}", parts.join("/"))
     }
+}
+
+/// Validate and normalize a FAT mount point, checking for conflicts.
+/// Used by `from_config` to avoid builder typestate issues.
+#[cfg(unix)]
+fn validate_fat_mount_point(
+    mount_point: &str,
+    guest_paths_seen: &HashSet<String>,
+    fat_mounts: &[FatMountEntry],
+) -> Result<String> {
+    let mount_point = validate_and_normalize_guest_path(mount_point, "mount point", true)?;
+
+    let mount_with_slash = if mount_point == "/" {
+        "/".to_string()
+    } else {
+        format!("{}/", mount_point)
+    };
+
+    // Check conflicts with existing files
+    for guest_path in guest_paths_seen {
+        if guest_path == &mount_point || guest_path.starts_with(&mount_with_slash) {
+            return Err(HyperlightError::Error(format!(
+                "Mount point '{}' conflicts with existing file '{}'",
+                mount_point, guest_path
+            )));
+        }
+    }
+
+    // Check conflicts with existing mounts
+    for existing in fat_mounts {
+        if mount_point == existing.mount_point {
+            return Err(HyperlightError::Error(format!(
+                "Mount point '{}' already in use",
+                mount_point
+            )));
+        }
+        let existing_with_slash = format!("{}/", existing.mount_point);
+        if mount_point.starts_with(&existing_with_slash)
+            || existing.mount_point.starts_with(&mount_with_slash)
+        {
+            return Err(HyperlightError::Error(format!(
+                "Mount point '{}' conflicts with existing mount '{}'",
+                mount_point, existing.mount_point
+            )));
+        }
+    }
+
+    Ok(mount_point)
+}
+
+/// Collect files from a directory with include/exclude patterns.
+/// Used by `from_config` to avoid builder typestate issues.
+fn collect_directory_files(
+    host_path: &Path,
+    guest_prefix: &str,
+    include_patterns: &[Pattern],
+    exclude_patterns: &[Pattern],
+) -> Result<Vec<MappedFile>> {
+    use std::collections::HashSet as StdHashSet;
+
+    let mut results = Vec::new();
+    let mut dirs_seen: StdHashSet<PathBuf> = StdHashSet::new();
+
+    fn walk_dir(
+        base_path: &Path,
+        current_path: &Path,
+        guest_prefix: &str,
+        include_patterns: &[Pattern],
+        exclude_patterns: &[Pattern],
+        results: &mut Vec<MappedFile>,
+        dirs_seen: &mut StdHashSet<PathBuf>,
+    ) -> Result<()> {
+        let entries = std::fs::read_dir(current_path).map_err(|e| {
+            HyperlightError::Error(format!("Cannot read directory {:?}: {}", current_path, e))
+        })?;
+
+        for entry in entries {
+            let entry = entry.map_err(|e| {
+                HyperlightError::Error(format!("Cannot read directory entry: {}", e))
+            })?;
+
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path)
+                .map_err(|e| HyperlightError::Error(format!("Cannot stat {:?}: {}", path, e)))?;
+
+            // Skip symlinks
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+
+            let rel_path = path.strip_prefix(base_path).unwrap_or(&path);
+            let rel_path_str = rel_path.to_string_lossy();
+
+            if metadata.is_dir() {
+                walk_dir(
+                    base_path,
+                    &path,
+                    guest_prefix,
+                    include_patterns,
+                    exclude_patterns,
+                    results,
+                    dirs_seen,
+                )?;
+            } else if metadata.is_file() {
+                // Check patterns
+                let matches_include = include_patterns.iter().any(|p| p.matches(&rel_path_str));
+                let matches_exclude = exclude_patterns.iter().any(|p| p.matches(&rel_path_str));
+
+                if matches_include && !matches_exclude {
+                    let guest_path = if guest_prefix == "/" {
+                        format!("/{}", rel_path_str)
+                    } else {
+                        format!("{}/{}", guest_prefix, rel_path_str)
+                    };
+                    let guest_path = normalize_guest_path(&guest_path);
+
+                    // Add parent directories
+                    let mut current = guest_path.as_str();
+                    while let Some((parent, _)) = current.rsplit_once('/') {
+                        if parent.is_empty() {
+                            break;
+                        }
+                        let parent_path = PathBuf::from(parent);
+                        if !dirs_seen.contains(&parent_path) {
+                            dirs_seen.insert(parent_path.clone());
+                            results.push(MappedFile {
+                                host_path: PathBuf::new(),
+                                guest_path: parent.to_string(),
+                                size: 0,
+                                is_dir: true,
+                            });
+                        }
+                        current = parent;
+                    }
+
+                    results.push(MappedFile {
+                        host_path: path,
+                        guest_path,
+                        size: metadata.len(),
+                        is_dir: false,
+                    });
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    walk_dir(
+        host_path,
+        host_path,
+        guest_prefix,
+        include_patterns,
+        exclude_patterns,
+        &mut results,
+        &mut dirs_seen,
+    )?;
+
+    Ok(results)
 }
 
 /// Internal representation of a file to be mapped.
@@ -197,14 +362,12 @@ pub struct BuildManifest {
 }
 
 /// Internal representation of a FAT mount.
-// TODO(Phase 3): Remove this allow when FAT mounts are integrated with HyperlightFSImage
-#[allow(dead_code)]
 #[derive(Debug)]
-struct FatMountEntry {
+pub(super) struct FatMountEntry {
     /// The FAT image
-    image: FatImage,
+    pub(super) image: FatImage,
     /// Mount point in the guest filesystem (e.g., "/data")
-    mount_point: String,
+    pub(super) mount_point: String,
 }
 
 /// Builder for HyperlightFS images.
@@ -216,17 +379,43 @@ struct FatMountEntry {
 ///   or [`add_empty_fat_mount`](Self::add_empty_fat_mount)
 ///
 /// Empty by default - content must be explicitly added (no implicit mappings).
+///
+/// # Typestate Pattern
+///
+/// The builder uses a typestate pattern to enforce compile-time safety:
+/// - `HyperlightFSBuilder<NoFat>`: No FAT mounts, implements [`Clone`], `build(&self)` borrows
+/// - `HyperlightFSBuilder<WithFat>`: Has FAT mounts, NOT [`Clone`], `build(self)` consumes
+///
+/// Adding a FAT mount transforms `NoFat` → `WithFat`. This ensures FAT mounts
+/// (which contain exclusive file locks) cannot be accidentally shared.
 #[derive(Debug)]
-pub struct HyperlightFSBuilder {
+pub struct HyperlightFSBuilder<F = NoFat> {
     /// Files collected so far (read-only mappings from host to guest)
     files: Vec<MappedFile>,
     /// Guest paths seen so far (for duplicate detection)
     guest_paths_seen: HashSet<String>,
     /// FAT mounts collected so far (read-write filesystems)
     fat_mounts: Vec<FatMountEntry>,
+    /// Marker for typestate (NoFat or WithFat)
+    _marker: PhantomData<F>,
 }
 
-impl HyperlightFSBuilder {
+/// Clone implementation for builders without FAT mounts.
+///
+/// Only `HyperlightFSBuilder<NoFat>` can be cloned because FAT mounts
+/// contain exclusive file locks that cannot be shared.
+impl Clone for HyperlightFSBuilder<NoFat> {
+    fn clone(&self) -> Self {
+        Self {
+            files: self.files.clone(),
+            guest_paths_seen: self.guest_paths_seen.clone(),
+            fat_mounts: Vec::new(), // Always empty for NoFat
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl HyperlightFSBuilder<NoFat> {
     /// Create a new empty builder.
     ///
     /// No content is mapped by default. Use:
@@ -238,9 +427,13 @@ impl HyperlightFSBuilder {
             files: Vec::new(),
             guest_paths_seen: HashSet::new(),
             fat_mounts: Vec::new(),
+            _marker: PhantomData,
         }
     }
+}
 
+// Common methods available for both NoFat and WithFat builders
+impl<F> HyperlightFSBuilder<F> {
     /// Add a single file to the filesystem.
     ///
     /// # Arguments
@@ -333,7 +526,7 @@ impl HyperlightFSBuilder {
         self,
         host_path: P,
         guest_prefix: impl Into<String>,
-    ) -> Result<DirectoryBuilder> {
+    ) -> Result<DirectoryBuilder<F>> {
         let host_path = host_path.as_ref().to_path_buf();
         validate_host_path(&host_path)?;
         let guest_prefix = validate_guest_dir_prefix(&guest_prefix.into())?;
@@ -359,11 +552,11 @@ impl HyperlightFSBuilder {
         })
     }
 
-    /// Preview what files would be mapped (dry run).
+    /// Get a summary of files that would be mapped.
     ///
-    /// This logs all files at INFO level and returns a manifest
-    /// without creating any memory mappings.
-    pub fn list(&self) -> Result<BuildManifest> {
+    /// Returns information about all files and directories without creating
+    /// any memory mappings. Useful for validation tools and debugging.
+    pub fn file_summary(&self) -> Result<BuildManifest> {
         let mut entries = Vec::new();
         let mut total_size = 0u64;
 
@@ -397,378 +590,9 @@ impl HyperlightFSBuilder {
         })
     }
 
-    /// Create a builder from a TOML configuration.
-    ///
-    /// This applies all file, directory, and FAT mount mappings from the config
-    /// to a new builder.
-    ///
-    /// # Arguments
-    ///
-    /// * `config` - The parsed TOML configuration
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if any mapping in the config is invalid (e.g.,
-    /// host file doesn't exist, invalid paths, duplicate guest paths,
-    /// FAT mount conflicts).
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use hyperlight_host::hyperlight_fs::{HyperlightFSBuilder, HyperlightFsConfig};
-    ///
-    /// let config = HyperlightFsConfig::from_toml_file("hyperlight-fs.toml")?;
-    /// let fs = HyperlightFSBuilder::from_config(&config)?.build()?;
-    /// ```
-    pub fn from_config(config: &super::config::HyperlightFsConfig) -> Result<Self> {
-        let mut builder = Self::new();
-
-        // Add individual file mappings
-        for file in &config.file {
-            builder = builder.add_file(&file.host_path, &file.guest)?;
-        }
-
-        // Add directory mappings
-        for dir in &config.directory {
-            let mut dir_builder = builder.add_dir(&dir.host_path, &dir.guest)?;
-
-            // Add include patterns (default to "**/*" if none specified)
-            if dir.include.is_empty() {
-                dir_builder = dir_builder.include("**/*");
-            } else {
-                for pattern in &dir.include {
-                    dir_builder = dir_builder.include(pattern);
-                }
-            }
-
-            // Add exclude patterns
-            for pattern in &dir.exclude {
-                dir_builder = dir_builder.exclude(pattern);
-            }
-
-            builder = dir_builder.done()?;
-        }
-
-        // Add FAT image mounts (existing FAT files)
-        for fat_img in &config.fat_image {
-            builder = builder.add_fat_image(&fat_img.host_path, &fat_img.mount_point)?;
-        }
-
-        // Add empty FAT mounts
-        for fat_mount in &config.fat_mount {
-            let size = fat_mount.size.to_bytes().map_err(|e| {
-                HyperlightError::Error(format!(
-                    "invalid size for FAT mount '{}': {}",
-                    fat_mount.mount_point, e
-                ))
-            })?;
-
-            if let Some(ref host_path) = fat_mount.host_path {
-                builder =
-                    builder.add_empty_fat_mount_at(host_path, &fat_mount.mount_point, size)?;
-            } else {
-                builder = builder.add_empty_fat_mount(&fat_mount.mount_point, size)?;
-            }
-        }
-
-        Ok(builder)
-    }
-
-    /// Create a builder from a TOML string.
-    ///
-    /// Convenience method that parses the TOML and creates a builder.
-    ///
-    /// # Arguments
-    ///
-    /// * `toml_content` - TOML configuration as a string
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The TOML is malformed
-    /// - Any mapping in the config is invalid
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
-    ///
-    /// let toml = r#"
-    /// [[file]]
-    /// host_path = "/etc/config.json"
-    /// guest = "/config.json"
-    /// "#;
-    ///
-    /// let fs = HyperlightFSBuilder::from_toml(toml)?.build()?;
-    /// ```
-    pub fn from_toml(toml_content: &str) -> Result<Self> {
-        let config = super::config::HyperlightFsConfig::from_toml(toml_content)
-            .map_err(|e| HyperlightError::Error(format!("Failed to parse TOML config: {}", e)))?;
-        Self::from_config(&config)
-    }
-
-    /// Create a builder from a TOML file.
-    ///
-    /// Convenience method that reads and parses a TOML file.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Path to the TOML configuration file
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The file cannot be read
-    /// - The TOML is malformed
-    /// - Any mapping in the config is invalid
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
-    ///
-    /// let fs = HyperlightFSBuilder::from_toml_file("/path/to/hyperlight-fs.toml")?.build()?;
-    /// ```
-    pub fn from_toml_file(path: &str) -> Result<Self> {
-        let config = super::config::HyperlightFsConfig::from_toml_file(path).map_err(|e| {
-            HyperlightError::Error(format!("Failed to load config file '{}': {}", path, e))
-        })?;
-        Self::from_config(&config)
-    }
-
-    /// Mount an existing FAT image from a host file.
-    ///
-    /// The FAT image file will be opened with an exclusive lock to prevent
-    /// concurrent modifications.
-    ///
-    /// # Arguments
-    ///
-    /// * `host_path` - Path to the FAT image file on the host
-    /// * `mount_point` - Where the FAT filesystem will be mounted in the guest (e.g., "/data")
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The host path doesn't exist or isn't a valid FAT image
-    /// - The mount point is invalid (not absolute, contains `..`, etc.)
-    /// - The mount point conflicts with existing files or mounts
-    /// - The FAT image is already locked by another process
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
-    ///
-    /// let fs = HyperlightFSBuilder::new()
-    ///     .add_fat_image("/host/path/to/data.fat", "/data")?
-    ///     .build()?;
-    /// ```
-    #[cfg(unix)]
-    pub fn add_fat_image<P: AsRef<Path>>(
-        mut self,
-        host_path: P,
-        mount_point: &str,
-    ) -> Result<Self> {
-        let host_path = host_path.as_ref();
-        let mount_point = self.validate_mount_point(mount_point)?;
-
-        // Check for conflicts with existing files and mounts
-        self.check_mount_conflicts(&mount_point)?;
-
-        // Open the FAT image (acquires exclusive lock)
-        let image = FatImage::open(host_path)?;
-
-        info!(
-            host = %host_path.display(),
-            mount_point = %mount_point,
-            size = image.size(),
-            "Adding FAT image to HyperlightFS"
-        );
-
-        self.fat_mounts.push(FatMountEntry { image, mount_point });
-
-        Ok(self)
-    }
-
-    /// Windows stub - FAT mounts are not supported on Windows.
-    #[cfg(windows)]
-    pub fn add_fat_image<P: AsRef<Path>>(self, _host_path: P, _mount_point: &str) -> Result<Self> {
-        Err(HyperlightError::Error(
-            "FAT mounts are not supported on Windows".to_string(),
-        ))
-    }
-
-    /// Create an empty FAT filesystem at a mount point.
-    ///
-    /// Creates a temporary FAT image file on the host with the specified size.
-    /// The temp file is deleted when the `HyperlightFSImage` is dropped.
-    ///
-    /// # Arguments
-    ///
-    /// * `mount_point` - Where the FAT filesystem will be mounted in the guest
-    /// * `size_bytes` - Size of the FAT image (min: 1MB, max: 16GB)
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The mount point is invalid or conflicts with existing files/mounts
-    /// - The size is out of range
-    /// - Failed to create or format the FAT image
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
-    ///
-    /// // Create a 10MB scratch space for the guest
-    /// let fs = HyperlightFSBuilder::new()
-    ///     .add_empty_fat_mount("/scratch", 10 * 1024 * 1024)?
-    ///     .build()?;
-    /// ```
-    #[cfg(unix)]
-    pub fn add_empty_fat_mount(mut self, mount_point: &str, size_bytes: usize) -> Result<Self> {
-        let mount_point = self.validate_mount_point(mount_point)?;
-
-        // Check for conflicts with existing files and mounts
-        self.check_mount_conflicts(&mount_point)?;
-
-        // Create a temp FAT image
-        let image = FatImage::create_temp(size_bytes)?;
-
-        info!(
-            mount_point = %mount_point,
-            size = size_bytes,
-            temp_path = %image.path().display(),
-            "Creating empty FAT mount in HyperlightFS"
-        );
-
-        self.fat_mounts.push(FatMountEntry { image, mount_point });
-
-        Ok(self)
-    }
-
-    /// Windows stub - FAT mounts are not supported on Windows.
-    #[cfg(windows)]
-    pub fn add_empty_fat_mount(self, _mount_point: &str, _size_bytes: usize) -> Result<Self> {
-        Err(HyperlightError::Error(
-            "FAT mounts are not supported on Windows".to_string(),
-        ))
-    }
-
-    /// Create an empty FAT filesystem backed by a specified host file.
-    ///
-    /// Like [`add_empty_fat_mount`](Self::add_empty_fat_mount), but the backing
-    /// file is created at the specified path and persists after drop. Useful for
-    /// debugging, inspection, or reusing the filesystem across runs.
-    ///
-    /// # Arguments
-    ///
-    /// * `host_path` - Where to create the FAT image file on the host
-    /// * `mount_point` - Where the FAT filesystem will be mounted in the guest
-    /// * `size_bytes` - Size of the FAT image (min: 1MB, max: 16GB)
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The host path already exists
-    /// - The mount point is invalid or conflicts with existing files/mounts
-    /// - The size is out of range
-    /// - Failed to create or format the FAT image
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
-    ///
-    /// // Create a persistent 50MB data volume
-    /// let fs = HyperlightFSBuilder::new()
-    ///     .add_empty_fat_mount_at("/host/data.fat", "/data", 50 * 1024 * 1024)?
-    ///     .build()?;
-    /// // After drop, /host/data.fat still exists and can be inspected or reused
-    /// ```
-    #[cfg(unix)]
-    pub fn add_empty_fat_mount_at<P: AsRef<Path>>(
-        mut self,
-        host_path: P,
-        mount_point: &str,
-        size_bytes: usize,
-    ) -> Result<Self> {
-        let host_path = host_path.as_ref();
-        let mount_point = self.validate_mount_point(mount_point)?;
-
-        // Check for conflicts with existing files and mounts
-        self.check_mount_conflicts(&mount_point)?;
-
-        // Create a FAT image at the specified path
-        let image = FatImage::create_at(host_path, size_bytes)?;
-
-        info!(
-            host = %host_path.display(),
-            mount_point = %mount_point,
-            size = size_bytes,
-            "Creating FAT mount at path in HyperlightFS"
-        );
-
-        self.fat_mounts.push(FatMountEntry { image, mount_point });
-
-        Ok(self)
-    }
-
-    /// Windows stub - FAT mounts are not supported on Windows.
-    #[cfg(windows)]
-    pub fn add_empty_fat_mount_at<P: AsRef<Path>>(
-        self,
-        _host_path: P,
-        _mount_point: &str,
-        _size_bytes: usize,
-    ) -> Result<Self> {
-        Err(HyperlightError::Error(
-            "FAT mounts are not supported on Windows".to_string(),
-        ))
-    }
-
-    /// Validate and normalize a mount point.
-    ///
-    /// Mount points must be:
-    /// - Absolute (start with `/`)
-    /// - Not contain `..` components
-    /// - Not contain null bytes
+    /// Validate and normalize a mount point (root "/" is allowed).
     fn validate_mount_point(&self, mount_point: &str) -> Result<String> {
-        if mount_point.contains('\0') {
-            return Err(HyperlightError::Error(format!(
-                "Invalid mount point {:?}: contains null byte",
-                mount_point
-            )));
-        }
-
-        let p = Path::new(mount_point);
-        if !p.is_absolute() {
-            return Err(HyperlightError::Error(format!(
-                "Invalid mount point {:?}: must be absolute (start with '/')",
-                mount_point
-            )));
-        }
-
-        let mut parts = Vec::new();
-        for comp in p.components() {
-            match comp {
-                Component::ParentDir => {
-                    return Err(HyperlightError::Error(format!(
-                        "Invalid mount point {:?}: '..' components are not allowed",
-                        mount_point
-                    )));
-                }
-                Component::Normal(s) => parts.push(s.to_string_lossy().to_string()),
-                Component::RootDir | Component::CurDir | Component::Prefix(_) => {}
-            }
-        }
-
-        // Root mount "/" is allowed
-        if parts.is_empty() {
-            Ok("/".to_string())
-        } else {
-            Ok(format!("/{}", parts.join("/")))
-        }
+        validate_and_normalize_guest_path(mount_point, "mount point", true)
     }
 
     /// Check for conflicts between a new mount point and existing files/mounts.
@@ -913,12 +737,582 @@ impl HyperlightFSBuilder {
 
         Ok(())
     }
+}
+
+// NoFat-specific methods: construction, config loading, FAT transformation, and build
+impl HyperlightFSBuilder<NoFat> {
+    /// Build a HyperlightFS image from a TOML configuration.
+    ///
+    /// This applies all file, directory, and FAT mount mappings from the config
+    /// and builds the final image. This is a convenience method that combines
+    /// builder construction and building in one step.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - The parsed TOML configuration
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any mapping in the config is invalid (e.g.,
+    /// host file doesn't exist, invalid paths, duplicate guest paths,
+    /// FAT mount conflicts).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use hyperlight_host::hyperlight_fs::{HyperlightFSBuilder, HyperlightFsConfig};
+    ///
+    /// let config = HyperlightFsConfig::from_toml_file("hyperlight-fs.toml")?;
+    /// let fs = HyperlightFSBuilder::from_config(&config)?;
+    /// ```
+    pub fn from_config(config: &super::config::HyperlightFsConfig) -> Result<HyperlightFSImage> {
+        let mut files: Vec<MappedFile> = Vec::new();
+        let mut guest_paths_seen: HashSet<String> = HashSet::new();
+        let mut fat_mounts: Vec<FatMountEntry> = Vec::new();
+
+        // Add individual file mappings
+        for file_cfg in &config.file {
+            let host_path = Path::new(&file_cfg.host_path);
+            validate_host_path(host_path)?;
+            let guest_path = validate_guest_file_path(&file_cfg.guest)?;
+
+            if guest_paths_seen.contains(&guest_path) {
+                return Err(HyperlightError::Error(format!(
+                    "Duplicate guest path {:?}: already mapped",
+                    guest_path
+                )));
+            }
+
+            let metadata = std::fs::symlink_metadata(host_path).map_err(|e| {
+                HyperlightError::Error(format!("Cannot add file {:?}: {}", host_path, e))
+            })?;
+
+            if metadata.file_type().is_symlink() {
+                return Err(HyperlightError::Error(format!(
+                    "Cannot add {:?}: symlinks are not supported",
+                    host_path
+                )));
+            }
+
+            if !metadata.is_file() {
+                return Err(HyperlightError::Error(format!(
+                    "Cannot add {:?}: not a regular file",
+                    host_path
+                )));
+            }
+
+            guest_paths_seen.insert(guest_path.clone());
+            files.push(MappedFile {
+                host_path: host_path.to_path_buf(),
+                guest_path,
+                size: metadata.len(),
+                is_dir: false,
+            });
+        }
+
+        // Add directory mappings
+        for dir in &config.directory {
+            let host_path = Path::new(&dir.host_path);
+            validate_host_path(host_path)?;
+            let guest_prefix = validate_guest_dir_prefix(&dir.guest)?;
+
+            let metadata = std::fs::metadata(host_path).map_err(|e| {
+                HyperlightError::Error(format!("Cannot add directory {:?}: {}", host_path, e))
+            })?;
+
+            if !metadata.is_dir() {
+                return Err(HyperlightError::Error(format!(
+                    "Cannot add {:?}: not a directory",
+                    host_path
+                )));
+            }
+
+            // Build patterns
+            let include_patterns: Vec<Pattern> = if dir.include.is_empty() {
+                // SAFETY: "**/*" is a valid glob pattern - if this somehow fails,
+                // something is catastrophically wrong with the glob library
+                vec![Pattern::new("**/*").unwrap_or_else(|_| {
+                    // This should never happen, but handle it gracefully
+                    Pattern::new("*").unwrap_or_else(|_| Pattern::default())
+                })]
+            } else {
+                dir.include
+                    .iter()
+                    .filter_map(|p| Pattern::new(p).ok())
+                    .collect()
+            };
+
+            let exclude_patterns: Vec<Pattern> = dir
+                .exclude
+                .iter()
+                .filter_map(|p| Pattern::new(p).ok())
+                .collect();
+
+            // Walk directory and collect files
+            let dir_files = collect_directory_files(
+                host_path,
+                &guest_prefix,
+                &include_patterns,
+                &exclude_patterns,
+            )?;
+
+            for file in dir_files {
+                if guest_paths_seen.contains(&file.guest_path) {
+                    return Err(HyperlightError::Error(format!(
+                        "Duplicate guest path {:?}: already mapped",
+                        file.guest_path
+                    )));
+                }
+                guest_paths_seen.insert(file.guest_path.clone());
+                files.push(file);
+            }
+        }
+
+        // Add FAT image mounts (existing FAT files)
+        #[cfg(unix)]
+        for fat_img in &config.fat_image {
+            let mount_point =
+                validate_fat_mount_point(&fat_img.mount_point, &guest_paths_seen, &fat_mounts)?;
+            let image = FatImage::open(&fat_img.host_path)?;
+            fat_mounts.push(FatMountEntry { image, mount_point });
+        }
+
+        // Add empty FAT mounts
+        #[cfg(unix)]
+        for fat_mount in &config.fat_mount {
+            let mount_point =
+                validate_fat_mount_point(&fat_mount.mount_point, &guest_paths_seen, &fat_mounts)?;
+            let size = fat_mount.size.to_bytes().map_err(|e| {
+                HyperlightError::Error(format!(
+                    "invalid size for FAT mount '{}': {}",
+                    fat_mount.mount_point, e
+                ))
+            })?;
+
+            let image = if let Some(ref host_path) = fat_mount.host_path {
+                FatImage::create_at(host_path, size)?
+            } else {
+                FatImage::create_temp(size)?
+            };
+
+            fat_mounts.push(FatMountEntry { image, mount_point });
+        }
+
+        #[cfg(windows)]
+        if !config.fat_image.is_empty() || !config.fat_mount.is_empty() {
+            return Err(HyperlightError::Error(
+                FAT_NOT_SUPPORTED_ON_WINDOWS.to_string(),
+            ));
+        }
+
+        super::image::build_image(files, fat_mounts)
+    }
+
+    /// Build a HyperlightFS image from a TOML string.
+    ///
+    /// Convenience method that parses the TOML and builds the image.
+    ///
+    /// # Arguments
+    ///
+    /// * `toml_content` - TOML configuration as a string
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The TOML is malformed
+    /// - Any mapping in the config is invalid
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    ///
+    /// let toml = r#"
+    /// [[file]]
+    /// host_path = "/etc/config.json"
+    /// guest = "/config.json"
+    /// "#;
+    ///
+    /// let fs = HyperlightFSBuilder::from_toml(toml)?;
+    /// ```
+    pub fn from_toml(toml_content: &str) -> Result<HyperlightFSImage> {
+        let config = super::config::HyperlightFsConfig::from_toml(toml_content)
+            .map_err(|e| HyperlightError::Error(format!("Failed to parse TOML config: {}", e)))?;
+        Self::from_config(&config)
+    }
+
+    /// Build a HyperlightFS image from a TOML file.
+    ///
+    /// Convenience method that reads, parses, and builds the image.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the TOML configuration file
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The file cannot be read
+    /// - The TOML is malformed
+    /// - Any mapping in the config is invalid
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    ///
+    /// let fs = HyperlightFSBuilder::from_toml_file("/path/to/hyperlight-fs.toml")?;
+    /// ```
+    pub fn from_toml_file(path: &str) -> Result<HyperlightFSImage> {
+        let config = super::config::HyperlightFsConfig::from_toml_file(path).map_err(|e| {
+            HyperlightError::Error(format!("Failed to load config file '{}': {}", path, e))
+        })?;
+        Self::from_config(&config)
+    }
 
     /// Build the HyperlightFS image.
     ///
-    /// This creates memory mappings for all configured content:
-    /// - **Read-only files**: mmap'd with `MAP_PRIVATE | PROT_READ`
-    /// - **FAT mounts**: mmap'd with `MAP_SHARED` for write persistence
+    /// Since this builder has no FAT mounts, it can be called multiple times
+    /// by cloning the builder first.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Any file cannot be opened
+    /// - mmap fails
+    /// - Platform is not supported (Windows)
+    pub fn build(&self) -> Result<HyperlightFSImage> {
+        super::image::build_image(self.files.clone(), Vec::new())
+    }
+
+    /// Mount an existing FAT image from a host file.
+    ///
+    /// The FAT image file will be opened with an exclusive lock to prevent
+    /// concurrent modifications.
+    ///
+    /// **Note:** This transforms the builder from `NoFat` to `WithFat`,
+    /// meaning the builder can no longer be cloned.
+    ///
+    /// # Arguments
+    ///
+    /// * `host_path` - Path to the FAT image file on the host
+    /// * `mount_point` - Where the FAT filesystem will be mounted in the guest (e.g., "/data")
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The host path doesn't exist or isn't a valid FAT image
+    /// - The mount point is invalid (not absolute, contains `..`, etc.)
+    /// - The mount point conflicts with existing files or mounts
+    /// - The FAT image is already locked by another process
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    ///
+    /// let fs = HyperlightFSBuilder::new()
+    ///     .add_fat_image("/host/path/to/data.fat", "/data")?
+    ///     .build()?;
+    /// ```
+    #[cfg(unix)]
+    pub fn add_fat_image<P: AsRef<Path>>(
+        self,
+        host_path: P,
+        mount_point: &str,
+    ) -> Result<HyperlightFSBuilder<WithFat>> {
+        let host_path = host_path.as_ref();
+        let mount_point = self.validate_mount_point(mount_point)?;
+
+        // Check for conflicts with existing files and mounts
+        self.check_mount_conflicts(&mount_point)?;
+
+        // Open the FAT image (acquires exclusive lock)
+        let image = FatImage::open(host_path)?;
+
+        info!(
+            host = %host_path.display(),
+            mount_point = %mount_point,
+            size = image.size(),
+            "Adding FAT image to HyperlightFS"
+        );
+
+        Ok(HyperlightFSBuilder {
+            files: self.files,
+            guest_paths_seen: self.guest_paths_seen,
+            fat_mounts: vec![FatMountEntry { image, mount_point }],
+            _marker: PhantomData,
+        })
+    }
+
+    /// Windows stub.
+    #[cfg(windows)]
+    pub fn add_fat_image<P: AsRef<Path>>(
+        self,
+        _host_path: P,
+        _mount_point: &str,
+    ) -> Result<HyperlightFSBuilder<WithFat>> {
+        Err(HyperlightError::Error(
+            FAT_NOT_SUPPORTED_ON_WINDOWS.to_string(),
+        ))
+    }
+
+    /// Create an empty FAT filesystem at a mount point.
+    ///
+    /// Creates a temporary FAT image file on the host with the specified size.
+    /// The temp file is deleted when the `HyperlightFSImage` is dropped.
+    ///
+    /// **Note:** This transforms the builder from `NoFat` to `WithFat`,
+    /// meaning the builder can no longer be cloned.
+    ///
+    /// # Arguments
+    ///
+    /// * `mount_point` - Where the FAT filesystem will be mounted in the guest
+    /// * `size_bytes` - Size of the FAT image (min: 1MB, max: 16GB)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The mount point is invalid or conflicts with existing files/mounts
+    /// - The size is out of range
+    /// - Failed to create or format the FAT image
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    ///
+    /// // Create a 10MB scratch space for the guest
+    /// let fs = HyperlightFSBuilder::new()
+    ///     .add_empty_fat_mount("/scratch", 10 * 1024 * 1024)?
+    ///     .build()?;
+    /// ```
+    #[cfg(unix)]
+    pub fn add_empty_fat_mount(
+        self,
+        mount_point: &str,
+        size_bytes: usize,
+    ) -> Result<HyperlightFSBuilder<WithFat>> {
+        let mount_point = self.validate_mount_point(mount_point)?;
+
+        // Check for conflicts with existing files and mounts
+        self.check_mount_conflicts(&mount_point)?;
+
+        // Create a temp FAT image
+        let image = FatImage::create_temp(size_bytes)?;
+
+        info!(
+            mount_point = %mount_point,
+            size = size_bytes,
+            temp_path = %image.path().display(),
+            "Creating empty FAT mount in HyperlightFS"
+        );
+
+        Ok(HyperlightFSBuilder {
+            files: self.files,
+            guest_paths_seen: self.guest_paths_seen,
+            fat_mounts: vec![FatMountEntry { image, mount_point }],
+            _marker: PhantomData,
+        })
+    }
+
+    /// Windows stub.
+    #[cfg(windows)]
+    pub fn add_empty_fat_mount(
+        self,
+        _mount_point: &str,
+        _size_bytes: usize,
+    ) -> Result<HyperlightFSBuilder<WithFat>> {
+        Err(HyperlightError::Error(
+            FAT_NOT_SUPPORTED_ON_WINDOWS.to_string(),
+        ))
+    }
+
+    /// Create an empty FAT filesystem backed by a specified host file.
+    ///
+    /// Like [`add_empty_fat_mount`](Self::add_empty_fat_mount), but the backing
+    /// file is created at the specified path and persists after drop. Useful for
+    /// debugging, inspection, or reusing the filesystem across runs.
+    ///
+    /// **Note:** This transforms the builder from `NoFat` to `WithFat`,
+    /// meaning the builder can no longer be cloned.
+    ///
+    /// # Arguments
+    ///
+    /// * `host_path` - Where to create the FAT image file on the host
+    /// * `mount_point` - Where the FAT filesystem will be mounted in the guest
+    /// * `size_bytes` - Size of the FAT image (min: 1MB, max: 16GB)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The host path already exists
+    /// - The mount point is invalid or conflicts with existing files/mounts
+    /// - The size is out of range
+    /// - Failed to create or format the FAT image
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    ///
+    /// // Create a persistent 50MB data volume
+    /// let fs = HyperlightFSBuilder::new()
+    ///     .add_empty_fat_mount_at("/host/data.fat", "/data", 50 * 1024 * 1024)?
+    ///     .build()?;
+    /// // After drop, /host/data.fat still exists and can be inspected or reused
+    /// ```
+    #[cfg(unix)]
+    pub fn add_empty_fat_mount_at<P: AsRef<Path>>(
+        self,
+        host_path: P,
+        mount_point: &str,
+        size_bytes: usize,
+    ) -> Result<HyperlightFSBuilder<WithFat>> {
+        let host_path = host_path.as_ref();
+        let mount_point = self.validate_mount_point(mount_point)?;
+
+        // Check for conflicts with existing files and mounts
+        self.check_mount_conflicts(&mount_point)?;
+
+        // Create a FAT image at the specified path
+        let image = FatImage::create_at(host_path, size_bytes)?;
+
+        info!(
+            host = %host_path.display(),
+            mount_point = %mount_point,
+            size = size_bytes,
+            "Creating FAT mount at path in HyperlightFS"
+        );
+
+        Ok(HyperlightFSBuilder {
+            files: self.files,
+            guest_paths_seen: self.guest_paths_seen,
+            fat_mounts: vec![FatMountEntry { image, mount_point }],
+            _marker: PhantomData,
+        })
+    }
+
+    /// Windows stub.
+    #[cfg(windows)]
+    pub fn add_empty_fat_mount_at<P: AsRef<Path>>(
+        self,
+        _host_path: P,
+        _mount_point: &str,
+        _size_bytes: usize,
+    ) -> Result<HyperlightFSBuilder<WithFat>> {
+        Err(HyperlightError::Error(
+            FAT_NOT_SUPPORTED_ON_WINDOWS.to_string(),
+        ))
+    }
+}
+
+// WithFat-specific methods: adding more FAT mounts and consuming build
+impl HyperlightFSBuilder<WithFat> {
+    /// Mount an existing FAT image from a host file.
+    ///
+    /// The FAT image file will be opened with an exclusive lock to prevent
+    /// concurrent modifications.
+    #[cfg(unix)]
+    pub fn add_fat_image<P: AsRef<Path>>(
+        mut self,
+        host_path: P,
+        mount_point: &str,
+    ) -> Result<Self> {
+        let host_path = host_path.as_ref();
+        let mount_point = self.validate_mount_point(mount_point)?;
+        self.check_mount_conflicts(&mount_point)?;
+
+        let image = FatImage::open(host_path)?;
+
+        info!(
+            host = %host_path.display(),
+            mount_point = %mount_point,
+            size = image.size(),
+            "Adding FAT image to HyperlightFS"
+        );
+
+        self.fat_mounts.push(FatMountEntry { image, mount_point });
+        Ok(self)
+    }
+
+    /// Windows stub.
+    #[cfg(windows)]
+    pub fn add_fat_image<P: AsRef<Path>>(self, _host_path: P, _mount_point: &str) -> Result<Self> {
+        Err(HyperlightError::Error(
+            FAT_NOT_SUPPORTED_ON_WINDOWS.to_string(),
+        ))
+    }
+
+    /// Create an empty FAT filesystem at a mount point.
+    #[cfg(unix)]
+    pub fn add_empty_fat_mount(mut self, mount_point: &str, size_bytes: usize) -> Result<Self> {
+        let mount_point = self.validate_mount_point(mount_point)?;
+        self.check_mount_conflicts(&mount_point)?;
+
+        let image = FatImage::create_temp(size_bytes)?;
+
+        info!(
+            mount_point = %mount_point,
+            size = size_bytes,
+            temp_path = %image.path().display(),
+            "Creating empty FAT mount in HyperlightFS"
+        );
+
+        self.fat_mounts.push(FatMountEntry { image, mount_point });
+        Ok(self)
+    }
+
+    /// Windows stub.
+    #[cfg(windows)]
+    pub fn add_empty_fat_mount(self, _mount_point: &str, _size_bytes: usize) -> Result<Self> {
+        Err(HyperlightError::Error(
+            FAT_NOT_SUPPORTED_ON_WINDOWS.to_string(),
+        ))
+    }
+
+    /// Create an empty FAT filesystem backed by a specified host file.
+    #[cfg(unix)]
+    pub fn add_empty_fat_mount_at<P: AsRef<Path>>(
+        mut self,
+        host_path: P,
+        mount_point: &str,
+        size_bytes: usize,
+    ) -> Result<Self> {
+        let host_path = host_path.as_ref();
+        let mount_point = self.validate_mount_point(mount_point)?;
+        self.check_mount_conflicts(&mount_point)?;
+
+        let image = FatImage::create_at(host_path, size_bytes)?;
+
+        info!(
+            host = %host_path.display(),
+            mount_point = %mount_point,
+            size = size_bytes,
+            "Creating FAT mount at path in HyperlightFS"
+        );
+
+        self.fat_mounts.push(FatMountEntry { image, mount_point });
+        Ok(self)
+    }
+
+    /// Windows stub.
+    #[cfg(windows)]
+    pub fn add_empty_fat_mount_at<P: AsRef<Path>>(
+        self,
+        _host_path: P,
+        _mount_point: &str,
+        _size_bytes: usize,
+    ) -> Result<Self> {
+        Err(HyperlightError::Error(
+            FAT_NOT_SUPPORTED_ON_WINDOWS.to_string(),
+        ))
+    }
+
+    /// Build the HyperlightFS image, consuming the builder.
+    ///
+    /// Since this builder has FAT mounts, it cannot be cloned and this
+    /// method consumes the builder.
     ///
     /// # Errors
     ///
@@ -927,18 +1321,11 @@ impl HyperlightFSBuilder {
     /// - mmap fails
     /// - Platform is not supported (Windows)
     pub fn build(self) -> Result<HyperlightFSImage> {
-        // Extract mount point and size from FAT mounts
-        let fat_mount_sizes: Vec<(String, usize)> = self
-            .fat_mounts
-            .iter()
-            .map(|m| (m.mount_point.clone(), m.image.size()))
-            .collect();
-
-        super::image::build_image(self.files, fat_mount_sizes)
+        super::image::build_image(self.files, self.fat_mounts)
     }
 }
 
-impl Default for HyperlightFSBuilder {
+impl Default for HyperlightFSBuilder<NoFat> {
     fn default() -> Self {
         Self::new()
     }
@@ -948,15 +1335,15 @@ impl Default for HyperlightFSBuilder {
 ///
 /// At least one `include` pattern must be specified before calling `done()`.
 #[derive(Debug)]
-pub struct DirectoryBuilder {
-    parent: HyperlightFSBuilder,
+pub struct DirectoryBuilder<F = NoFat> {
+    parent: HyperlightFSBuilder<F>,
     host_path: PathBuf,
     guest_prefix: String,
     include_patterns: Vec<Pattern>,
     exclude_patterns: Vec<Pattern>,
 }
 
-impl DirectoryBuilder {
+impl<F> DirectoryBuilder<F> {
     /// Add a glob pattern for files to include.
     ///
     /// Patterns use gitignore-style syntax:
@@ -1014,7 +1401,7 @@ impl DirectoryBuilder {
     /// - No include patterns were specified
     /// - Any generated guest path would conflict with an existing path
     /// - Any generated guest path would conflict with an existing FAT mount
-    pub fn done(mut self) -> Result<HyperlightFSBuilder> {
+    pub fn done(mut self) -> Result<HyperlightFSBuilder<F>> {
         if self.include_patterns.is_empty() {
             return Err(HyperlightError::Error(format!(
                 "Directory {:?} has no include patterns. Use .include() to specify what to map.",
@@ -1329,7 +1716,7 @@ mod tests {
     #[test]
     fn test_builder_new_is_empty() {
         let builder = HyperlightFSBuilder::new();
-        let manifest = builder.list().unwrap();
+        let manifest = builder.file_summary().unwrap();
         assert!(manifest.files.is_empty());
         assert_eq!(manifest.total_size, 0);
     }
@@ -1351,7 +1738,7 @@ mod tests {
             .add_file(&file_path, "/guest/test.txt")
             .unwrap();
 
-        let manifest = builder.list().unwrap();
+        let manifest = builder.file_summary().unwrap();
         assert_eq!(manifest.files.len(), 1);
         assert_eq!(manifest.files[0].guest_path, "/guest/test.txt");
         assert_eq!(manifest.files[0].size, 5);
@@ -1528,7 +1915,7 @@ mod tests {
             .done()
             .unwrap();
 
-        let manifest = builder.list().unwrap();
+        let manifest = builder.file_summary().unwrap();
 
         let file_names: Vec<_> = manifest
             .files
@@ -1565,8 +1952,8 @@ guest = "/config.json"
             file_path.display()
         );
 
-        let builder = HyperlightFSBuilder::from_toml(&toml).unwrap();
-        let manifest = builder.list().unwrap();
+        let image = HyperlightFSBuilder::from_toml(&toml).unwrap();
+        let manifest = image.file_summary();
 
         assert_eq!(manifest.files.iter().filter(|f| !f.is_dir).count(), 1);
         assert_eq!(manifest.files[0].guest_path, "/config.json");
@@ -1594,8 +1981,8 @@ guest = "/b/file2.txt"
             file2.display()
         );
 
-        let builder = HyperlightFSBuilder::from_toml(&toml).unwrap();
-        let manifest = builder.list().unwrap();
+        let image = HyperlightFSBuilder::from_toml(&toml).unwrap();
+        let manifest = image.file_summary();
 
         let file_count = manifest.files.iter().filter(|f| !f.is_dir).count();
         assert_eq!(file_count, 2);
@@ -1617,8 +2004,8 @@ guest = "/data"
             tmp.path().display()
         );
 
-        let builder = HyperlightFSBuilder::from_toml(&toml).unwrap();
-        let manifest = builder.list().unwrap();
+        let image = HyperlightFSBuilder::from_toml(&toml).unwrap();
+        let manifest = image.file_summary();
 
         let file_names: Vec<_> = manifest
             .files
@@ -1650,8 +2037,8 @@ exclude = ["**/exclude*"]
             tmp.path().display()
         );
 
-        let builder = HyperlightFSBuilder::from_toml(&toml).unwrap();
-        let manifest = builder.list().unwrap();
+        let image = HyperlightFSBuilder::from_toml(&toml).unwrap();
+        let manifest = image.file_summary();
 
         let file_names: Vec<_> = manifest
             .files
@@ -1690,8 +2077,8 @@ guest = "/data"
             dir.display()
         );
 
-        let builder = HyperlightFSBuilder::from_toml(&toml).unwrap();
-        let manifest = builder.list().unwrap();
+        let image = HyperlightFSBuilder::from_toml(&toml).unwrap();
+        let manifest = image.file_summary();
 
         let file_names: Vec<_> = manifest
             .files
@@ -2092,9 +2479,9 @@ mount_point = "/data"
                 fat_path.display()
             );
 
-            let builder = HyperlightFSBuilder::from_toml(&toml).unwrap();
-            assert_eq!(builder.fat_mounts.len(), 1);
-            assert_eq!(builder.fat_mounts[0].mount_point, "/data");
+            let image = HyperlightFSBuilder::from_toml(&toml).unwrap();
+            assert_eq!(image.fat_mounts().len(), 1);
+            assert_eq!(image.fat_mounts()[0].mount_point(), "/data");
         }
 
         #[test]
@@ -2105,10 +2492,10 @@ mount_point = "/tmp"
 size = "2MB"
 "#;
 
-            let builder = HyperlightFSBuilder::from_toml(toml).unwrap();
-            assert_eq!(builder.fat_mounts.len(), 1);
-            assert_eq!(builder.fat_mounts[0].mount_point, "/tmp");
-            assert!(builder.fat_mounts[0].image.is_temp());
+            let image = HyperlightFSBuilder::from_toml(toml).unwrap();
+            assert_eq!(image.fat_mounts().len(), 1);
+            assert_eq!(image.fat_mounts()[0].mount_point(), "/tmp");
+            assert!(image.fat_mounts()[0].image().is_temp());
         }
 
         #[test]
@@ -2126,10 +2513,10 @@ size = "2MB"
                 fat_path.display()
             );
 
-            let builder = HyperlightFSBuilder::from_toml(&toml).unwrap();
-            assert_eq!(builder.fat_mounts.len(), 1);
-            assert_eq!(builder.fat_mounts[0].mount_point, "/logs");
-            assert!(!builder.fat_mounts[0].image.is_temp());
+            let image = HyperlightFSBuilder::from_toml(&toml).unwrap();
+            assert_eq!(image.fat_mounts().len(), 1);
+            assert_eq!(image.fat_mounts()[0].mount_point(), "/logs");
+            assert!(!image.fat_mounts()[0].image().is_temp());
 
             // File should exist
             assert!(fat_path.exists());
@@ -2143,9 +2530,9 @@ mount_point = "/tmp"
 size = 2097152
 "#;
 
-            let builder = HyperlightFSBuilder::from_toml(toml).unwrap();
-            assert_eq!(builder.fat_mounts.len(), 1);
-            assert_eq!(builder.fat_mounts[0].image.size(), 2097152);
+            let image = HyperlightFSBuilder::from_toml(toml).unwrap();
+            assert_eq!(image.fat_mounts().len(), 1);
+            assert_eq!(image.fat_mounts()[0].image().size(), 2097152);
         }
 
         #[test]
@@ -2156,9 +2543,9 @@ mount_point = "/tmp"
 size = "2MiB"
 "#;
 
-            let builder = HyperlightFSBuilder::from_toml(toml).unwrap();
-            assert_eq!(builder.fat_mounts.len(), 1);
-            assert_eq!(builder.fat_mounts[0].image.size(), 2 * 1024 * 1024);
+            let image = HyperlightFSBuilder::from_toml(toml).unwrap();
+            assert_eq!(image.fat_mounts().len(), 1);
+            assert_eq!(image.fat_mounts()[0].image().size(), 2 * 1024 * 1024);
         }
 
         #[test]
@@ -2211,9 +2598,16 @@ size = "2MB"
                 file_path.display()
             );
 
-            let builder = HyperlightFSBuilder::from_toml(&toml).unwrap();
-            assert_eq!(builder.files.len(), 1);
-            assert_eq!(builder.fat_mounts.len(), 1);
+            let image = HyperlightFSBuilder::from_toml(&toml).unwrap();
+            // 1 file + directories
+            let file_count = image
+                .file_summary()
+                .files
+                .iter()
+                .filter(|f| !f.is_dir)
+                .count();
+            assert_eq!(file_count, 1);
+            assert_eq!(image.fat_mounts().len(), 1);
         }
 
         #[test]
@@ -2250,8 +2644,8 @@ mount_point = "/logs"
 size = "2MB"
 "#;
 
-            let builder = HyperlightFSBuilder::from_toml(toml).unwrap();
-            assert_eq!(builder.fat_mounts.len(), 3);
+            let image = HyperlightFSBuilder::from_toml(toml).unwrap();
+            assert_eq!(image.fat_mounts().len(), 3);
         }
     }
 }

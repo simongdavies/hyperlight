@@ -70,7 +70,7 @@ pub struct UninitializedSandbox {
     pub(crate) load_info: crate::mem::exe::LoadInfo,
     /// Optional HyperlightFS image for zero-copy file access in the guest.
     /// When set, files will be mapped into guest memory during sandbox evolution.
-    pub(crate) hyperlight_fs: Option<Arc<HyperlightFSImage>>,
+    pub(crate) hyperlight_fs: Option<HyperlightFSImage>,
 }
 
 impl Debug for UninitializedSandbox {
@@ -290,23 +290,22 @@ impl UninitializedSandbox {
     ///
     /// ```ignore
     /// use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
-    /// use std::sync::Arc;
     ///
-    /// // Build the FS image once and wrap in Arc for sharing
-    /// let fs_image = Arc::new(
-    ///     HyperlightFSBuilder::new()
-    ///         .add_file("/app/config.json", "/guest/config.json")?
-    ///         .build()?
-    /// );
+    /// // Build the FS image for this sandbox
+    /// let fs_image = HyperlightFSBuilder::new()
+    ///     .add_file("/app/config.json", "/guest/config.json")?
+    ///     .build()?;
     ///
-    /// // Share the same FS image across multiple sandboxes
-    /// let mut sandbox1 = UninitializedSandbox::new(guest_binary1, None)?;
-    /// sandbox1.set_hyperlight_fs(fs_image.clone());
+    /// // Each sandbox owns its HyperlightFSImage
+    /// let mut sandbox = UninitializedSandbox::new(guest_binary, None)?;
+    /// sandbox.set_hyperlight_fs(fs_image);
     ///
-    /// let mut sandbox2 = UninitializedSandbox::new(guest_binary2, None)?;
-    /// sandbox2.set_hyperlight_fs(fs_image.clone());
+    /// // For read-only FS (no FAT mounts), the builder can be cloned:
+    /// // let builder = HyperlightFSBuilder::new().add_file(...)?;
+    /// // sandbox1.set_hyperlight_fs(builder.build()?);
+    /// // sandbox2.set_hyperlight_fs(builder.build()?);
     /// ```
-    pub fn set_hyperlight_fs(&mut self, fs_image: Arc<HyperlightFSImage>) {
+    pub fn set_hyperlight_fs(&mut self, fs_image: HyperlightFSImage) {
         self.hyperlight_fs = Some(fs_image);
     }
 
@@ -1329,7 +1328,7 @@ mod tests {
 
         assert!(sandbox.hyperlight_fs.is_none());
 
-        sandbox.set_hyperlight_fs(Arc::new(fs_image));
+        sandbox.set_hyperlight_fs(fs_image);
 
         assert!(sandbox.hyperlight_fs.is_some());
 

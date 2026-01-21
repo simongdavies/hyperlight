@@ -19,8 +19,9 @@ use core::fmt::Write;
 use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
 use hyperlight_common::outb::Exception;
 use hyperlight_guest::exit::write_abort;
+use hyperlight_guest::fs::is_fat_region;
 
-use crate::paging::{invlpg, map_page_readonly};
+use crate::paging::{invlpg, map_page_readonly, map_page_readwrite};
 use crate::{GUEST_HANDLE, HyperlightAbortWriter};
 
 /// Exception information pushed onto the stack by the CPU during an excpection.
@@ -145,10 +146,14 @@ pub(crate) extern "C" fn hl_exception_handler(
                     let fs_end = fs_base + fs_region.size;
                     // Check if the faulting address is within the FS files region
                     if page_fault_address >= fs_base && page_fault_address < fs_end {
-                        // Map the faulting page (page-aligned, identity mapped, read-only, no execute)
                         let page_addr = page_fault_address & !0xFFF;
                         unsafe {
-                            map_page_readonly(page_addr, page_addr);
+                            // FAT regions need read-write access, RO files need read-only
+                            if is_fat_region(page_fault_address) {
+                                map_page_readwrite(page_addr, page_addr);
+                            } else {
+                                map_page_readonly(page_addr, page_addr);
+                            }
                             invlpg(page_addr);
                         }
                         return; // Handled successfully, resume guest execution

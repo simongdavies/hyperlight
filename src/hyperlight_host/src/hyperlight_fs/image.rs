@@ -96,8 +96,6 @@ enum InodeEntryType {
 
 /// Internal representation of an inode before guest addresses are assigned.
 #[derive(Debug, Clone)]
-// TODO(Phase 3): Remove this allow when HyperlightFSImage is integrated with Sandbox
-#[allow(dead_code)]
 struct InodeEntry {
     /// Type of inode
     entry_type: InodeEntryType,
@@ -113,19 +111,32 @@ struct InodeEntry {
 
 /// Storage for a FAT mount in the image.
 ///
-/// This stores the mount point path, raw size, and mount ID. The actual FatImage
-/// is kept in the builder until sandbox initialization.
-// TODO(Phase 3): Remove this allow when FAT mounts are wired into sandbox
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
+/// This stores the FAT image itself along with mount point.
+/// The FatImage must stay alive for the sandbox lifetime.
 #[cfg(unix)]
-struct FatMountStorage {
+pub(crate) struct FatMountStorage {
+    /// The FAT image (owns the mmap'd region)
+    image: super::fat_image::FatImage,
     /// Mount point path in the guest filesystem
     mount_point: String,
-    /// Size of the FAT image in bytes (raw, not page-aligned)
-    size: usize,
-    /// Mount ID (1-based, used to identify this mount in the manifest)
-    mount_id: u32,
+}
+
+#[cfg(unix)]
+impl FatMountStorage {
+    /// Create a new FAT mount storage.
+    pub(super) fn new(image: super::fat_image::FatImage, mount_point: String) -> Self {
+        Self { image, mount_point }
+    }
+
+    /// Get a reference to the FAT image.
+    pub(crate) fn image(&self) -> &super::fat_image::FatImage {
+        &self.image
+    }
+
+    /// Get the mount point path.
+    pub(crate) fn mount_point(&self) -> &str {
+        &self.mount_point
+    }
 }
 
 /// A built HyperlightFS image with zero-copy file mappings.
@@ -138,8 +149,6 @@ struct FatMountStorage {
 ///
 /// This struct is `Send + Sync` and can be shared across multiple sandboxes.
 /// The underlying mmaps share physical pages via the OS page cache.
-// TODO(Phase 3): Remove this allow when HyperlightFSImage is integrated with Sandbox
-#[allow(dead_code)]
 pub struct HyperlightFSImage {
     /// Inode entries (files, directories, and FAT mounts)
     inode_entries: Vec<InodeEntry>,
@@ -155,8 +164,6 @@ pub struct HyperlightFSImage {
     fat_region_size: usize,
 }
 
-// TODO(Phase 3): Remove this allow when HyperlightFSImage is integrated with Sandbox
-#[allow(dead_code)]
 impl HyperlightFSImage {
     /// Generate a manifest with final guest addresses.
     ///
@@ -227,18 +234,6 @@ impl HyperlightFSImage {
         self.ro_files_region_size + self.fat_region_size
     }
 
-    /// Get the size of the read-only files region.
-    #[cfg(unix)]
-    pub(crate) fn ro_files_region_size(&self) -> usize {
-        self.ro_files_region_size
-    }
-
-    /// Get the size of the FAT mounts region.
-    #[cfg(unix)]
-    pub(crate) fn fat_region_size(&self) -> usize {
-        self.fat_region_size
-    }
-
     /// Estimate the size of the manifest in bytes (page-aligned).
     ///
     /// This is used to compute where file data should be placed in guest memory.
@@ -267,6 +262,83 @@ impl HyperlightFSImage {
     pub(crate) fn file_mappings(&self) -> &[FileMapping] {
         &self.file_mappings
     }
+
+    /// Get the FAT mounts for wiring into guest memory.
+    #[cfg(unix)]
+    pub(crate) fn fat_mounts(&self) -> &[FatMountStorage] {
+        &self.fat_mounts
+    }
+
+    /// Get a summary of all entries in this image.
+    ///
+    /// Returns information about all files, directories, and FAT mounts
+    /// stored in this image. Useful for validation tools and debugging.
+    pub fn file_summary(&self) -> super::builder::BuildManifest {
+        use std::path::PathBuf;
+
+        use super::builder::ManifestEntry;
+
+        let mut entries = Vec::new();
+        let mut total_size = 0u64;
+
+        // Map inodes to manifest entries, using host_path from file_mappings
+        // where available (for files)
+        #[cfg(unix)]
+        let mut file_mapping_idx = 0;
+
+        for entry in &self.inode_entries {
+            let is_dir = entry.entry_type == InodeEntryType::Directory;
+            let is_fat = entry.entry_type == InodeEntryType::FatMount;
+
+            // Get host path from file_mappings for regular files (unix only)
+            #[cfg(unix)]
+            let host_path = if entry.entry_type == InodeEntryType::File
+                && file_mapping_idx < self.file_mappings.len()
+            {
+                let path = self.file_mappings[file_mapping_idx].host_path().clone();
+                file_mapping_idx += 1;
+                path
+            } else {
+                // Directories and FAT mounts don't have a direct host path
+                PathBuf::from("")
+            };
+
+            #[cfg(not(unix))]
+            let host_path = PathBuf::from("");
+
+            // FAT mounts show as directories in the listing
+            let is_dir_or_fat = is_dir || is_fat;
+
+            if !is_dir && !is_fat {
+                total_size += entry.size;
+            }
+
+            entries.push(ManifestEntry {
+                host_path,
+                guest_path: entry.path.clone(),
+                size: entry.size,
+                is_dir: is_dir_or_fat,
+            });
+        }
+
+        super::builder::BuildManifest {
+            files: entries,
+            total_size,
+        }
+    }
+}
+
+impl std::fmt::Debug for HyperlightFSImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut s = f.debug_struct("HyperlightFSImage");
+        s.field("inode_count", &self.inode_entries.len())
+            .field("ro_files_region_size", &self.ro_files_region_size)
+            .field("fat_region_size", &self.fat_region_size);
+        #[cfg(unix)]
+        s.field("file_mappings_count", &self.file_mappings.len())
+            .field("fat_mounts_count", &self.fat_mounts.len());
+        s.finish()
+    }
 }
 
 /// Build a HyperlightFS image with file metadata.
@@ -274,11 +346,11 @@ impl HyperlightFSImage {
 /// # Arguments
 ///
 /// * `files` - Read-only file mappings from the builder
-/// * `fat_mount_sizes` - FAT mount info: (mount_point, size_in_bytes)
+/// * `fat_mounts` - FAT mount entries with images and mount points
 #[cfg(unix)]
 pub(super) fn build_image(
     mut files: Vec<MappedFile>,
-    fat_mount_sizes: Vec<(String, usize)>,
+    fat_mounts: Vec<super::builder::FatMountEntry>,
 ) -> Result<HyperlightFSImage> {
     use std::collections::HashMap;
 
@@ -293,9 +365,9 @@ pub(super) fn build_image(
         .sum();
 
     // Calculate FAT region size (sum of page-aligned FAT image sizes)
-    let fat_region_size: usize = fat_mount_sizes
+    let fat_region_size: usize = fat_mounts
         .iter()
-        .map(|(_, size)| round_up_to(*size, PAGE_SIZE_USIZE))
+        .map(|m| round_up_to(m.image.size(), PAGE_SIZE_USIZE))
         .sum();
 
     // Build parent index map for directories only
@@ -327,29 +399,25 @@ pub(super) fn build_image(
         })
         .collect();
 
-    // Add FAT mount inode entries
     let mut fat_mounts_storage: Vec<FatMountStorage> = Vec::new();
-    for (mount_idx, (mount_point, size)) in fat_mount_sizes.iter().enumerate() {
+    for (mount_idx, fat_mount) in fat_mounts.into_iter().enumerate() {
         // Find parent directory for the mount point
-        let parent_path = get_parent_path(mount_point);
+        let parent_path = get_parent_path(&fat_mount.mount_point);
         let parent_idx = parent_map.get(&parent_path).copied().unwrap_or(0);
 
         // Mount IDs are 1-based
         let mount_id = (mount_idx + 1) as u32;
+        let size = fat_mount.image.size();
 
         inode_entries.push(InodeEntry {
             entry_type: InodeEntryType::FatMount,
-            path: mount_point.clone(),
+            path: fat_mount.mount_point.clone(),
             parent: parent_idx,
-            size: *size as u64,
+            size: size as u64,
             mount_id,
         });
 
-        fat_mounts_storage.push(FatMountStorage {
-            mount_point: mount_point.clone(),
-            size: *size, // Store raw size, align when needed
-            mount_id,
-        });
+        fat_mounts_storage.push(FatMountStorage::new(fat_mount.image, fat_mount.mount_point));
     }
 
     // Collect file mappings (actual mmap happens at sandbox init via map_file_cow)
@@ -409,7 +477,7 @@ pub(super) fn build_image(
 #[cfg(windows)]
 pub(super) fn build_image(
     _files: Vec<MappedFile>,
-    _fat_mount_sizes: Vec<(String, usize)>,
+    _fat_mounts: Vec<super::builder::FatMountEntry>,
 ) -> Result<HyperlightFSImage> {
     Err(HyperlightError::Error(
         "HyperlightFS is not yet supported on Windows".to_string(),
@@ -420,7 +488,17 @@ pub(super) fn build_image(
 mod tests {
     use tempfile::TempDir;
 
+    use super::super::builder::FatMountEntry;
+    use super::super::fat_image::{FatImage, MIN_FAT_IMAGE_SIZE};
     use super::*;
+
+    /// Helper to create a test FAT mount entry
+    fn make_fat_mount(mount_point: &str) -> FatMountEntry {
+        FatMountEntry {
+            image: FatImage::create_temp(MIN_FAT_IMAGE_SIZE).expect("Failed to create temp FAT"),
+            mount_point: mount_point.to_string(),
+        }
+    }
 
     // Tests for helper functions
 
@@ -486,8 +564,8 @@ mod tests {
             is_dir: true,
         }];
 
-        let fat_mount_sizes = vec![("/data".to_string(), 4096)];
-        let image = build_image(files, fat_mount_sizes).expect("Failed to build image");
+        let fat_mounts = vec![make_fat_mount("/data")];
+        let image = build_image(files, fat_mounts).expect("Failed to build image");
 
         let fat_entry = image
             .inode_entries
@@ -641,9 +719,10 @@ mod tests {
             is_dir: true,
         }];
 
-        let fat_mount_sizes = vec![("/data".to_string(), 4096)]; // 4KB FAT mount
+        let fat_mounts = vec![make_fat_mount("/data")];
+        let fat_size = MIN_FAT_IMAGE_SIZE;
 
-        let image = build_image(files, fat_mount_sizes).expect("Failed to build image");
+        let image = build_image(files, fat_mounts).expect("Failed to build image");
 
         // Should have 2 inodes: root dir + FAT mount
         assert_eq!(image.inode_entries.len(), 2);
@@ -655,18 +734,15 @@ mod tests {
             .find(|e| e.entry_type == InodeEntryType::FatMount)
             .expect("FAT mount entry not found");
         assert_eq!(fat_entry.path, "/data");
-        assert_eq!(fat_entry.size, 4096);
+        assert_eq!(fat_entry.size, fat_size as u64);
         assert_eq!(fat_entry.mount_id, 1); // First mount = ID 1
 
         // Check FAT mount storage
         assert_eq!(image.fat_mounts.len(), 1);
         assert_eq!(image.fat_mounts[0].mount_point, "/data");
-        assert_eq!(image.fat_mounts[0].mount_id, 1);
 
-        // Check region sizes
-        assert_eq!(image.ro_files_region_size, 0); // No RO files
-        assert_eq!(image.fat_region_size, 4096); // Page-aligned FAT size
-        assert_eq!(image.mapped_files_region_size(), 4096);
+        // Check total region size (no RO files, just FAT)
+        assert_eq!(image.mapped_files_region_size(), fat_size);
     }
 
     #[test]
@@ -686,10 +762,10 @@ mod tests {
             },
         ];
 
-        // 8KB FAT mount
-        let fat_mount_sizes = vec![("/mnt/fat".to_string(), 8192)];
+        let fat_mounts = vec![make_fat_mount("/mnt/fat")];
+        let fat_size = MIN_FAT_IMAGE_SIZE;
 
-        let image = build_image(files, fat_mount_sizes).expect("Failed to build image");
+        let image = build_image(files, fat_mounts).expect("Failed to build image");
 
         // Generate manifest
         let base_addr: u64 = 0x1000_0000;
@@ -708,7 +784,7 @@ mod tests {
         // RO file is 100 bytes, page-aligned = 4096 bytes
         let expected_fat_addr = base_addr + 4096; // After page-aligned RO file
         assert_eq!(fat_inode.guest_address, expected_fat_addr);
-        assert_eq!(fat_inode.size, 8192);
+        assert_eq!(fat_inode.size, fat_size as u64);
         assert_eq!(fat_inode.mount_id, 1);
         assert_eq!(fat_inode.path, "/mnt/fat");
     }
@@ -722,10 +798,11 @@ mod tests {
             is_dir: true,
         }];
 
-        // Two FAT mounts
-        let fat_mount_sizes = vec![("/data".to_string(), 4096), ("/scratch".to_string(), 8192)];
+        // Two FAT mounts (both MIN_FAT_IMAGE_SIZE)
+        let fat_mounts = vec![make_fat_mount("/data"), make_fat_mount("/scratch")];
+        let fat_size = MIN_FAT_IMAGE_SIZE;
 
-        let image = build_image(files, fat_mount_sizes).expect("Failed to build image");
+        let image = build_image(files, fat_mounts).expect("Failed to build image");
 
         // Should have 3 inodes: root + 2 FAT mounts
         assert_eq!(image.inode_entries.len(), 3);
@@ -740,8 +817,8 @@ mod tests {
         assert_eq!(fat_entries[0].mount_id, 1);
         assert_eq!(fat_entries[1].mount_id, 2);
 
-        // Check region size includes both FAT mounts
-        assert_eq!(image.fat_region_size, 4096 + 8192);
+        // Check total region size includes both FAT mounts
+        assert_eq!(image.mapped_files_region_size(), fat_size * 2);
 
         // Generate manifest and verify addresses
         let base_addr: u64 = 0x2000_0000;
@@ -756,7 +833,7 @@ mod tests {
         assert_eq!(fat_inodes[0].mount_id, 1);
 
         // Second FAT mount after first (page-aligned)
-        assert_eq!(fat_inodes[1].guest_address, base_addr + 4096);
+        assert_eq!(fat_inodes[1].guest_address, base_addr + fat_size as u64);
         assert_eq!(fat_inodes[1].mount_id, 2);
     }
 
@@ -774,8 +851,8 @@ mod tests {
         let size_no_fat = image_no_fat.estimate_manifest_size();
 
         // Build with FAT mount
-        let fat_mount_sizes = vec![("/data".to_string(), 4096)];
-        let image_with_fat = build_image(files, fat_mount_sizes).unwrap();
+        let fat_mounts = vec![make_fat_mount("/data")];
+        let image_with_fat = build_image(files, fat_mounts).unwrap();
         let size_with_fat = image_with_fat.estimate_manifest_size();
 
         // Size with FAT should be larger (more inodes)
@@ -811,14 +888,14 @@ mod tests {
             },
         ];
 
-        let fat_mount_sizes = vec![("/data".to_string(), 8192)];
+        let fat_mounts = vec![make_fat_mount("/data")];
+        let fat_size = MIN_FAT_IMAGE_SIZE;
 
-        let image = build_image(files, fat_mount_sizes).unwrap();
+        let image = build_image(files, fat_mounts).unwrap();
 
+        // Total region: RO (8192 bytes page-aligned) + FAT (fat_size)
         // RO region: 1000 bytes -> 4096 (page-aligned) + 2000 -> 4096 = 8192 total
-        assert_eq!(image.ro_files_region_size, 8192);
-        assert_eq!(image.fat_region_size, 8192);
-        assert_eq!(image.mapped_files_region_size(), 16384);
+        assert_eq!(image.mapped_files_region_size(), 8192 + fat_size);
 
         // Generate manifest
         let base_addr: u64 = 0x1000_0000;

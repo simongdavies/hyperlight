@@ -42,6 +42,41 @@ use super::error::FsError;
 use super::fat::GuestFat;
 use super::vfs::{Mount, MountBackend, Vfs};
 
+/// A FAT memory region (base address and size).
+#[derive(Clone, Copy)]
+struct FatRegion {
+    base: u64,
+    size: u64,
+}
+
+/// Global FAT region table for page fault handler queries.
+///
+/// This is separate from FS_STATE because it needs to be accessible
+/// from the page fault handler without going through the full FS lookup.
+static FAT_REGIONS: FatRegionCell = FatRegionCell(UnsafeCell::new(Vec::new()));
+
+struct FatRegionCell(UnsafeCell<Vec<FatRegion>>);
+
+// SAFETY: Guest is single-threaded.
+unsafe impl Sync for FatRegionCell {}
+
+impl FatRegionCell {
+    fn add(&self, base: u64, size: u64) {
+        // SAFETY: Guest is single-threaded
+        unsafe {
+            (*self.0.get()).push(FatRegion { base, size });
+        }
+    }
+
+    fn contains(&self, addr: u64) -> bool {
+        // SAFETY: Guest is single-threaded
+        let regions = unsafe { &*self.0.get() };
+        regions
+            .iter()
+            .any(|r| addr >= r.base && addr < r.base + r.size)
+    }
+}
+
 /// Parsed filesystem state.
 struct FsState {
     /// Inode table from the manifest.
@@ -139,6 +174,11 @@ pub unsafe fn init(manifest_ptr: *const u8, manifest_len: usize) -> Result<(), F
                 return Err(FsError::InvalidManifest);
             }
 
+            // Register this FAT region for page fault handler queries.
+            // Must be done BEFORE creating GuestFat since accessing the FAT
+            // may trigger page faults that need to know this is a FAT region.
+            FAT_REGIONS.add(inode.guest_address, inode.size);
+
             // Create GuestFat from the memory region
             // SAFETY: Host has mapped the FAT image at guest_address with size bytes.
             // We validated guest_address != 0 and size != 0 above.
@@ -173,6 +213,29 @@ pub unsafe fn init(manifest_ptr: *const u8, manifest_len: usize) -> Result<(), F
 /// Check if the filesystem is initialized.
 pub fn is_initialized() -> bool {
     FS_STATE.get().is_some()
+}
+
+/// Check if an address falls within a FAT memory region.
+///
+/// This is used by the page fault handler to determine whether to create
+/// a read-write PTE (for FAT regions) or a read-only PTE (for RO files).
+///
+/// # Arguments
+///
+/// * `addr` - The faulting address to check
+///
+/// # Returns
+///
+/// `true` if the address is within a registered FAT region, `false` otherwise.
+///
+/// # Note
+///
+/// FAT regions are registered during `init()` before the corresponding
+/// GuestFat is created. This ensures the page fault handler can correctly
+/// identify FAT pages even during initial FAT filesystem setup.
+#[inline]
+pub fn is_fat_region(addr: u64) -> bool {
+    FAT_REGIONS.contains(addr)
 }
 
 /// Reset the filesystem state (for testing only).

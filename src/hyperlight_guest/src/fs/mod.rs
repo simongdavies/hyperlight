@@ -90,7 +90,7 @@ pub mod vfs;
 
 pub use error::FsError;
 pub use file::{DirEntry, File, OpenOptions, Stat, open, read_dir, stat};
-pub use manifest::{init, is_initialized, vfs, vfs_mut};
+pub use manifest::{init, is_fat_region, is_initialized, vfs, vfs_mut};
 
 #[cfg(test)]
 mod tests;
