@@ -104,6 +104,8 @@ pub(super) fn evolve_impl_multi_use(u_sbox: UninitializedSandbox) -> Result<Mult
         dispatch_ptr,
         #[cfg(gdb)]
         dbg_mem_wrapper,
+        #[cfg(unix)]
+        u_sbox.hyperlight_fs,
     );
 
     Ok(sandbox)

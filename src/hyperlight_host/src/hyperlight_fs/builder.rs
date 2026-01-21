@@ -146,6 +146,51 @@ fn validate_guest_dir_prefix(path: &str) -> Result<String> {
     validate_and_normalize_guest_path(path, "prefix", true)
 }
 
+/// Validate a host file and create a MappedFile entry.
+///
+/// This is the shared validation logic used by both `add_file()` and `from_config()`.
+///
+/// # Validation rules
+///
+/// - Host path must exist
+/// - Host path must not be a symlink (security)
+/// - Host path must be a regular file (not directory)
+///
+/// # Arguments
+///
+/// * `host_path` - The host path (already validated for format)
+/// * `guest_path` - The guest path (already validated and normalized)
+///
+/// # Returns
+///
+/// A `MappedFile` entry with the validated file information.
+fn validate_and_create_file_entry(host_path: &Path, guest_path: String) -> Result<MappedFile> {
+    // Use symlink_metadata to avoid following symlinks (security)
+    let metadata = std::fs::symlink_metadata(host_path)
+        .map_err(|e| HyperlightError::Error(format!("Cannot add file {:?}: {}", host_path, e)))?;
+
+    if metadata.file_type().is_symlink() {
+        return Err(HyperlightError::Error(format!(
+            "Cannot add {:?}: symlinks are not supported",
+            host_path
+        )));
+    }
+
+    if !metadata.is_file() {
+        return Err(HyperlightError::Error(format!(
+            "Cannot add {:?}: not a regular file (use add_dir for directories)",
+            host_path
+        )));
+    }
+
+    Ok(MappedFile {
+        host_path: host_path.to_path_buf(),
+        guest_path,
+        size: metadata.len(),
+        is_dir: false,
+    })
+}
+
 /// Normalize a guest path by removing duplicate slashes and `.` components.
 ///
 /// This is used for paths built via Path::join which may not be clean.
@@ -468,40 +513,18 @@ impl<F> HyperlightFSBuilder<F> {
         // Check for conflicts with existing FAT mounts
         self.check_file_path_conflicts(&guest_path)?;
 
-        // Fail immediately if file doesn't exist
-        // Use symlink_metadata to avoid following symlinks
-        let metadata = std::fs::symlink_metadata(&host_path).map_err(|e| {
-            HyperlightError::Error(format!("Cannot add file {:?}: {}", host_path, e))
-        })?;
-
-        if metadata.file_type().is_symlink() {
-            return Err(HyperlightError::Error(format!(
-                "Cannot add {:?}: symlinks are not supported",
-                host_path
-            )));
-        }
-
-        if !metadata.is_file() {
-            return Err(HyperlightError::Error(format!(
-                "Cannot add {:?}: not a regular file (use add_dir for directories)",
-                host_path
-            )));
-        }
+        // Validate the file and create entry
+        let file_entry = validate_and_create_file_entry(&host_path, guest_path)?;
 
         info!(
-            host = %host_path.display(),
-            guest = %guest_path,
-            size = metadata.len(),
+            host = %file_entry.host_path.display(),
+            guest = %file_entry.guest_path,
+            size = file_entry.size,
             "Adding file to HyperlightFS"
         );
 
-        self.guest_paths_seen.insert(guest_path.clone());
-        self.files.push(MappedFile {
-            host_path,
-            guest_path,
-            size: metadata.len(),
-            is_dir: false,
-        });
+        self.guest_paths_seen.insert(file_entry.guest_path.clone());
+        self.files.push(file_entry);
 
         Ok(self)
     }
@@ -783,31 +806,9 @@ impl HyperlightFSBuilder<NoFat> {
                 )));
             }
 
-            let metadata = std::fs::symlink_metadata(host_path).map_err(|e| {
-                HyperlightError::Error(format!("Cannot add file {:?}: {}", host_path, e))
-            })?;
-
-            if metadata.file_type().is_symlink() {
-                return Err(HyperlightError::Error(format!(
-                    "Cannot add {:?}: symlinks are not supported",
-                    host_path
-                )));
-            }
-
-            if !metadata.is_file() {
-                return Err(HyperlightError::Error(format!(
-                    "Cannot add {:?}: not a regular file",
-                    host_path
-                )));
-            }
-
-            guest_paths_seen.insert(guest_path.clone());
-            files.push(MappedFile {
-                host_path: host_path.to_path_buf(),
-                guest_path,
-                size: metadata.len(),
-                is_dir: false,
-            });
+            let file_entry = validate_and_create_file_entry(host_path, guest_path)?;
+            guest_paths_seen.insert(file_entry.guest_path.clone());
+            files.push(file_entry);
         }
 
         // Add directory mappings

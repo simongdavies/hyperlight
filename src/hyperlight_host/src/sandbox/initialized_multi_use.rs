@@ -102,6 +102,12 @@ pub struct MultiUseSandbox {
     /// If the current state of the sandbox has been captured in a snapshot,
     /// that snapshot is stored here.
     snapshot: Option<Arc<Snapshot>>,
+    /// HyperlightFS image containing FAT mounts.
+    /// This must be kept alive for the lifetime of the sandbox because:
+    /// 1. FAT images are mmap'd and registered with KVM as memory regions
+    /// 2. Dropping this would munmap the memory while KVM still references it
+    #[cfg(unix)]
+    _hyperlight_fs: Option<crate::hyperlight_fs::HyperlightFSImage>,
 }
 
 impl MultiUseSandbox {
@@ -117,6 +123,7 @@ impl MultiUseSandbox {
         vm: HyperlightVm,
         dispatch_ptr: RawPtr,
         #[cfg(gdb)] dbg_mem_access_fn: Arc<Mutex<SandboxMemoryManager<HostSharedMemory>>>,
+        #[cfg(unix)] hyperlight_fs: Option<crate::hyperlight_fs::HyperlightFSImage>,
     ) -> MultiUseSandbox {
         Self {
             id: super::snapshot::SANDBOX_CONFIGURATION_COUNTER.fetch_add(1, Ordering::Relaxed),
@@ -128,6 +135,8 @@ impl MultiUseSandbox {
             #[cfg(gdb)]
             dbg_mem_access_fn,
             snapshot: None,
+            #[cfg(unix)]
+            _hyperlight_fs: hyperlight_fs,
         }
     }
 

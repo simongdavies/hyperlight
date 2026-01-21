@@ -45,7 +45,7 @@ hyperlight-guest-tracing = { workspace = true, default-features = true, optional
 vmm-sys-util = "0.15.0"
 crossbeam-channel = "0.5.15"
 thiserror = "2.0.17"
-fatfs = { git = "https://github.com/rafalh/rust-fatfs", rev = "4eccb50d011146fbed20e133d33b22f3c27292e7" }
+fatfs = { git = "https://github.com/rafalh/rust-fatfs", rev = "4eccb50d011146fbed20e133d33b22f3c27292e7", features = ["lfn"] }
 fs2 = "0.4"
 chrono = "0.4"
 anyhow = "1.0"

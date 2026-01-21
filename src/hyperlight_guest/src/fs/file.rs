@@ -558,7 +558,7 @@ fn resolve_path(path: &str) -> Result<ResolvedPath, FsError> {
 ///
 /// Routes through the VFS to the appropriate backend (read-only or FAT).
 /// For read-only files, opens for reading only. For FAT files, opens for
-/// reading only (use [`open_with_options`] for write access).
+/// reading only (use [`OpenOptions`] for write access).
 ///
 /// # Errors
 ///
@@ -682,6 +682,97 @@ pub struct DirEntry {
     pub size: u64,
 }
 
+/// Create a directory.
+///
+/// Only works on FAT mounts. Returns [`FsError::ReadOnly`] for read-only mounts.
+///
+/// # Errors
+///
+/// - [`FsError::NotInitialized`] if the filesystem hasn't been initialized
+/// - [`FsError::ReadOnly`] if the path is on a read-only mount
+/// - [`FsError::AlreadyExists`] if directory already exists
+/// - [`FsError::NotFound`] if parent directory doesn't exist
+pub fn mkdir(path: &str) -> Result<(), FsError> {
+    match resolve_path(path)? {
+        ResolvedPath::ReadOnly { .. } => Err(FsError::ReadOnly),
+        ResolvedPath::Fat {
+            mount_idx,
+            relative_path,
+        } => {
+            // SAFETY: Single-threaded guest, no other VFS refs held.
+            let vfs = unsafe { manifest::vfs_mut()? };
+            let mount = vfs.get_mount_mut(mount_idx).ok_or(FsError::NotFound)?;
+
+            if let MountBackend::Fat(fat) = mount.backend_mut() {
+                fat.mkdir(&relative_path)
+            } else {
+                Err(FsError::IoError)
+            }
+        }
+    }
+}
+
+/// Remove an empty directory.
+///
+/// Only works on FAT mounts. Returns [`FsError::ReadOnly`] for read-only mounts.
+///
+/// # Errors
+///
+/// - [`FsError::NotInitialized`] if the filesystem hasn't been initialized
+/// - [`FsError::ReadOnly`] if the path is on a read-only mount
+/// - [`FsError::NotFound`] if directory doesn't exist
+/// - [`FsError::NotEmpty`] if directory is not empty
+/// - [`FsError::NotADirectory`] if path is a file
+pub fn rmdir(path: &str) -> Result<(), FsError> {
+    match resolve_path(path)? {
+        ResolvedPath::ReadOnly { .. } => Err(FsError::ReadOnly),
+        ResolvedPath::Fat {
+            mount_idx,
+            relative_path,
+        } => {
+            // SAFETY: Single-threaded guest, no other VFS refs held.
+            let vfs = unsafe { manifest::vfs_mut()? };
+            let mount = vfs.get_mount_mut(mount_idx).ok_or(FsError::NotFound)?;
+
+            if let MountBackend::Fat(fat) = mount.backend_mut() {
+                fat.rmdir(&relative_path)
+            } else {
+                Err(FsError::IoError)
+            }
+        }
+    }
+}
+
+/// Delete a file.
+///
+/// Only works on FAT mounts. Returns [`FsError::ReadOnly`] for read-only mounts.
+///
+/// # Errors
+///
+/// - [`FsError::NotInitialized`] if the filesystem hasn't been initialized
+/// - [`FsError::ReadOnly`] if the path is on a read-only mount
+/// - [`FsError::NotFound`] if file doesn't exist
+/// - [`FsError::NotAFile`] if path is a directory
+pub fn unlink(path: &str) -> Result<(), FsError> {
+    match resolve_path(path)? {
+        ResolvedPath::ReadOnly { .. } => Err(FsError::ReadOnly),
+        ResolvedPath::Fat {
+            mount_idx,
+            relative_path,
+        } => {
+            // SAFETY: Single-threaded guest, no other VFS refs held.
+            let vfs = unsafe { manifest::vfs_mut()? };
+            let mount = vfs.get_mount_mut(mount_idx).ok_or(FsError::NotFound)?;
+
+            if let MountBackend::Fat(fat) = mount.backend_mut() {
+                fat.unlink(&relative_path)
+            } else {
+                Err(FsError::IoError)
+            }
+        }
+    }
+}
+
 /// List the contents of a directory.
 ///
 /// Routes through VFS to the appropriate backend.
@@ -751,4 +842,79 @@ pub fn read_dir(path: &str) -> Result<Vec<DirEntry>, FsError> {
             }
         }
     }
+}
+
+/// Rename a file or directory.
+///
+/// Moves or renames a file or directory from `old_path` to `new_path`.
+/// Both paths must be on the same FAT mount.
+///
+/// # Errors
+///
+/// - [`FsError::NotInitialized`] if the filesystem hasn't been initialized
+/// - [`FsError::NotFound`] if `old_path` doesn't exist
+/// - [`FsError::AlreadyExists`] if `new_path` already exists
+/// - [`FsError::ReadOnly`] if the path is on a read-only mount
+pub fn rename(old_path: &str, new_path: &str) -> Result<(), FsError> {
+    let old_resolved = resolve_path(old_path)?;
+    let new_resolved = resolve_path(new_path)?;
+
+    match (old_resolved, new_resolved) {
+        (
+            ResolvedPath::Fat {
+                mount_idx: old_idx,
+                relative_path: old_rel,
+            },
+            ResolvedPath::Fat {
+                mount_idx: new_idx,
+                relative_path: new_rel,
+            },
+        ) => {
+            // Both must be on same mount
+            if old_idx != new_idx {
+                return Err(FsError::InvalidPath);
+            }
+
+            let vfs = manifest::vfs()?;
+            let mount = vfs.get_mount(old_idx).ok_or(FsError::NotFound)?;
+
+            if let MountBackend::Fat(fat) = mount.backend() {
+                fat.rename(&old_rel, &new_rel)
+            } else {
+                Err(FsError::IoError)
+            }
+        }
+        // Read-only mounts don't support rename
+        (ResolvedPath::ReadOnly { .. }, _) | (_, ResolvedPath::ReadOnly { .. }) => {
+            Err(FsError::ReadOnly)
+        }
+    }
+}
+
+/// Get the current working directory.
+///
+/// Returns the absolute path of the current working directory.
+///
+/// # Errors
+///
+/// - [`FsError::NotInitialized`] if the filesystem hasn't been initialized
+pub fn cwd() -> Result<alloc::string::String, FsError> {
+    let vfs = manifest::vfs()?;
+    Ok(alloc::string::String::from(vfs.cwd()))
+}
+
+/// Change the current working directory.
+///
+/// Changes the current working directory to the specified path.
+/// The path can be absolute or relative.
+///
+/// # Errors
+///
+/// - [`FsError::NotInitialized`] if the filesystem hasn't been initialized
+/// - [`FsError::InvalidPath`] if the path is malformed
+/// - [`FsError::NotFound`] if no mount handles this path
+pub fn chdir(path: &str) -> Result<(), FsError> {
+    // Safety: Called from single-threaded guest context
+    let vfs = unsafe { manifest::vfs_mut()? };
+    vfs.set_cwd(path)
 }

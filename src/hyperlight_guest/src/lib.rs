@@ -26,7 +26,7 @@ pub mod exit;
 pub mod fs;
 
 // Re-export embedded_io traits for convenience
-pub use embedded_io::{Read, Seek, SeekFrom};
+pub use embedded_io::{Read, Seek, SeekFrom, Write};
 
 pub mod guest_handle {
     pub mod handle;

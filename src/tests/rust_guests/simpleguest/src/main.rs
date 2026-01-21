@@ -45,7 +45,7 @@ use hyperlight_common::flatbuffer_wrappers::util::get_flatbuffer_result;
 use hyperlight_common::mem::PAGE_SIZE;
 use hyperlight_guest::error::{HyperlightGuestError, Result};
 use hyperlight_guest::exit::{abort_with_code, abort_with_code_and_message};
-use hyperlight_guest::{Read, Seek, SeekFrom, fs};
+use hyperlight_guest::{Read, Seek, SeekFrom, Write, fs};
 use hyperlight_guest_bin::exceptions::handler::{Context, ExceptionInfo};
 use hyperlight_guest_bin::guest_function::definition::GuestFunctionDefinition;
 use hyperlight_guest_bin::guest_function::register::register_function;
@@ -191,6 +191,196 @@ fn random_read_chunks(path: String) -> Vec<u8> {
     }
 
     result
+}
+
+// ============================================================================
+// FAT Filesystem Test Functions
+// ============================================================================
+
+/// Writes content to a file on a FAT mount.
+/// Returns true on success, false on error.
+#[guest_function("WriteFatFile")]
+fn write_fat_file(path: String, content: Vec<u8>) -> bool {
+    if !fs::is_initialized() {
+        return false;
+    }
+
+    let file_result = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path);
+
+    match file_result {
+        Ok(mut file) => {
+            if file.write_all(&content).is_err() {
+                return false;
+            }
+            file.flush().is_ok()
+        }
+        Err(_) => false,
+    }
+}
+
+/// Reads a file from a FAT mount and returns its contents.
+/// Returns empty vec on error.
+#[guest_function("ReadFatFile")]
+fn read_fat_file(path: String) -> Vec<u8> {
+    if !fs::is_initialized() {
+        return Vec::new();
+    }
+    match fs::open(&path) {
+        Ok(mut file) => file.read_to_vec().unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Deletes a file from a FAT mount.
+/// Returns true on success, false on error.
+#[guest_function("DeleteFatFile")]
+fn delete_fat_file(path: String) -> bool {
+    if !fs::is_initialized() {
+        return false;
+    }
+    fs::unlink(&path).is_ok()
+}
+
+/// Creates a directory on a FAT mount.
+/// Returns true on success, false on error.
+#[guest_function("MkdirFat")]
+fn mkdir_fat(path: String) -> bool {
+    if !fs::is_initialized() {
+        return false;
+    }
+    fs::mkdir(&path).is_ok()
+}
+
+/// Removes an empty directory from a FAT mount.
+/// Returns true on success, false on error.
+#[guest_function("RmdirFat")]
+fn rmdir_fat(path: String) -> bool {
+    if !fs::is_initialized() {
+        return false;
+    }
+    fs::rmdir(&path).is_ok()
+}
+
+/// Lists directory contents on a FAT mount.
+/// Returns entry names as a newline-separated string.
+/// Returns empty string on error.
+#[guest_function("ListDirFat")]
+fn list_dir_fat(path: String) -> String {
+    if !fs::is_initialized() {
+        return String::new();
+    }
+    match fs::read_dir(&path) {
+        Ok(entries) => entries
+            .into_iter()
+            .map(|e| e.name)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Err(_) => String::new(),
+    }
+}
+
+/// Renames a file or directory on a FAT mount.
+/// Returns true on success, false on error.
+#[guest_function("RenameFat")]
+fn rename_fat(old_path: String, new_path: String) -> bool {
+    if !fs::is_initialized() {
+        return false;
+    }
+    fs::rename(&old_path, &new_path).is_ok()
+}
+
+/// Gets file size on FAT mount.
+/// Returns -1 on error, otherwise the file size.
+#[guest_function("StatFatSize")]
+fn stat_fat_size(path: String) -> i64 {
+    if !fs::is_initialized() {
+        return -1;
+    }
+    match fs::stat(&path) {
+        Ok(stat) => stat.size as i64,
+        Err(_) => -1,
+    }
+}
+
+/// Checks if a path exists on FAT mount.
+/// Returns 1 for file, 2 for directory, 0 for not found, -1 for error.
+#[guest_function("ExistsFat")]
+fn exists_fat(path: String) -> i32 {
+    if !fs::is_initialized() {
+        return -1;
+    }
+    match fs::stat(&path) {
+        Ok(stat) => {
+            if stat.is_dir {
+                2
+            } else {
+                1
+            }
+        }
+        Err(_) => 0,
+    }
+}
+
+/// Gets the current working directory.
+/// Returns empty string on error.
+#[guest_function("GetCwd")]
+fn get_cwd() -> String {
+    if !fs::is_initialized() {
+        return String::new();
+    }
+    fs::cwd().unwrap_or_default()
+}
+
+/// Changes the current working directory.
+/// Returns true on success, false on error.
+#[guest_function("Chdir")]
+fn chdir(path: String) -> bool {
+    if !fs::is_initialized() {
+        return false;
+    }
+    fs::chdir(&path).is_ok()
+}
+
+/// Writes to a file using the current working directory for relative paths.
+/// Returns true on success, false on error.
+#[guest_function("WriteFatFileRelative")]
+fn write_fat_file_relative(path: String, content: Vec<u8>) -> bool {
+    if !fs::is_initialized() {
+        return false;
+    }
+
+    let file_result = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path);
+
+    match file_result {
+        Ok(mut file) => {
+            if file.write_all(&content).is_err() {
+                return false;
+            }
+            file.flush().is_ok()
+        }
+        Err(_) => false,
+    }
+}
+
+/// Reads from a file using the current working directory for relative paths.
+/// Returns empty vec on error.
+#[guest_function("ReadFatFileRelative")]
+fn read_fat_file_relative(path: String) -> Vec<u8> {
+    if !fs::is_initialized() {
+        return Vec::new();
+    }
+    match fs::open(&path) {
+        Ok(mut file) => file.read_to_vec().unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
 }
 
 #[guest_function("EchoDouble")]
