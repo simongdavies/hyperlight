@@ -645,6 +645,146 @@ int exists_fat(const char *path) {
 }
 
 // ============================================================================
+// Guest-Created FAT Mount Tests (dynamic filesystem creation)
+// ============================================================================
+
+// Creates a guest-side FAT mount at the specified path.
+// Returns 1 (true) on success, 0 (false) on error.
+int create_fat_mount(const char *path, int64_t size_bytes) {
+    return hl_fs_create_fat_mount(path, size_bytes) == 0 ? 1 : 0;
+}
+
+// Unmounts a guest-created FAT mount.
+// Returns 1 (true) on success, 0 (false) on error.
+int unmount_fat(const char *path) {
+    return hl_fs_unmount_fat(path) == 0 ? 1 : 0;
+}
+
+// Checks if a mount was created by the guest.
+// Returns 1 (true) if guest-created, 0 (false) otherwise.
+int is_guest_created_mount(const char *path) {
+    return hl_fs_is_guest_created_mount(path);
+}
+
+// Full test: create mount, write, read, delete, unmount.
+// Returns 1 on success, negative error code on failure.
+int test_guest_fat_full_cycle(const char *mount_path, int64_t size_bytes) {
+    // Create mount
+    if (hl_fs_create_fat_mount(mount_path, size_bytes) != 0) {
+        return -1;  // Failed to create mount
+    }
+
+    // Verify it's guest-created
+    if (!hl_fs_is_guest_created_mount(mount_path)) {
+        hl_fs_unmount_fat(mount_path);
+        return -2;  // Should be guest-created
+    }
+
+    // Build file path
+    char file_path[256];
+    snprintf(file_path, sizeof(file_path), "%s/test.txt", mount_path);
+
+    // Write a file
+    int fd = open(file_path, O_CREAT | O_WRONLY);
+    if (fd < 0) {
+        hl_fs_unmount_fat(mount_path);
+        return -3;  // Failed to open file
+    }
+    const char *content = "Hello from C guest!";
+    int64_t written = write(fd, content, strlen(content));
+    close(fd);
+    if (written != (int64_t)strlen(content)) {
+        hl_fs_unmount_fat(mount_path);
+        return -4;  // Write failed
+    }
+
+    // Read it back
+    fd = open(file_path, O_RDONLY);
+    if (fd < 0) {
+        hl_fs_unmount_fat(mount_path);
+        return -5;  // Failed to open for read
+    }
+    char read_buf[64] = {0};
+    int64_t bytes_read = read(fd, read_buf, sizeof(read_buf) - 1);
+    close(fd);
+    if (bytes_read != (int64_t)strlen(content)) {
+        hl_fs_unmount_fat(mount_path);
+        return -6;  // Read wrong amount
+    }
+    if (strcmp(read_buf, content) != 0) {
+        hl_fs_unmount_fat(mount_path);
+        return -7;  // Content mismatch
+    }
+
+    // Delete the file
+    if (unlink(file_path) != 0) {
+        hl_fs_unmount_fat(mount_path);
+        return -8;  // Delete failed
+    }
+
+    // Verify it's gone
+    hl_Stat st;
+    if (stat(file_path, &st) == 0) {
+        hl_fs_unmount_fat(mount_path);
+        return -9;  // File should not exist
+    }
+
+    // Unmount
+    if (hl_fs_unmount_fat(mount_path) != 0) {
+        return -10;  // Unmount failed
+    }
+
+    // Verify no longer guest-created
+    if (hl_fs_is_guest_created_mount(mount_path)) {
+        return -11;  // Should no longer be guest-created after unmount
+    }
+
+    return 1;  // Success
+}
+
+// Test unmounting with open files - should fail when files are still open.
+// Returns 1 on success (correct behavior), negative error code on failure.
+int test_unmount_with_open_file(const char *mount_path, int64_t size_bytes) {
+    // Create mount
+    if (hl_fs_create_fat_mount(mount_path, size_bytes) != 0) {
+        return -1;  // Failed to create mount
+    }
+
+    // Build file path
+    char file_path[256];
+    snprintf(file_path, sizeof(file_path), "%s/test.txt", mount_path);
+
+    // Open a file and keep it open
+    int fd = open(file_path, O_CREAT | O_WRONLY);
+    if (fd < 0) {
+        hl_fs_unmount_fat(mount_path);
+        return -2;  // Failed to open file
+    }
+
+    // Write something
+    const char *content = "test";
+    write(fd, content, strlen(content));
+
+    // Try to unmount while file is open - this SHOULD FAIL
+    int unmount_result = hl_fs_unmount_fat(mount_path);
+    if (unmount_result == 0) {
+        // BUG: Unmount should have failed!
+        close(fd);
+        return -3;  // Unmount succeeded but should have failed
+    }
+
+    // Good - unmount correctly rejected. Now close the file.
+    close(fd);
+
+    // Now unmount should succeed
+    if (hl_fs_unmount_fat(mount_path) != 0) {
+        return -4;  // Unmount should succeed after close
+    }
+
+    return 1;  // Success - correct behavior
+}
+
+// ============================================================================
 // New C API test functions (opendir/readdir/closedir, access, openat, fcntl)
 // ============================================================================
 
@@ -1416,6 +1556,13 @@ HYPERLIGHT_WRAP_FUNCTION(do_chdir, Bool, 1, String)
 HYPERLIGHT_WRAP_FUNCTION(stat_fat_size, Long, 1, String)
 HYPERLIGHT_WRAP_FUNCTION(exists_fat, Int, 1, String)
 
+// Guest-created FAT mount functions
+HYPERLIGHT_WRAP_FUNCTION(create_fat_mount, Bool, 2, String, Long)
+HYPERLIGHT_WRAP_FUNCTION(unmount_fat, Bool, 1, String)
+HYPERLIGHT_WRAP_FUNCTION(is_guest_created_mount, Bool, 1, String)
+HYPERLIGHT_WRAP_FUNCTION(test_guest_fat_full_cycle, Int, 2, String, Long)
+HYPERLIGHT_WRAP_FUNCTION(test_unmount_with_open_file, Int, 2, String, Long)
+
 HYPERLIGHT_WRAP_FUNCTION(is_fs_initialized, Int, 0)
 HYPERLIGHT_WRAP_FUNCTION(guest_fn_checks_if_host_returns_float_value, Float, 2, Float, Float)
 HYPERLIGHT_WRAP_FUNCTION(guest_fn_checks_if_host_returns_double_value, Double, 2, Double, Double)
@@ -1508,6 +1655,12 @@ void hyperlight_main(void)
     HYPERLIGHT_REGISTER_FUNCTION("RenameFat", rename_fat);
     HYPERLIGHT_REGISTER_FUNCTION("StatFatSize", stat_fat_size);
     HYPERLIGHT_REGISTER_FUNCTION("ExistsFat", exists_fat);
+    // Guest-created FAT mount functions
+    HYPERLIGHT_REGISTER_FUNCTION("CreateFatMount", create_fat_mount);
+    HYPERLIGHT_REGISTER_FUNCTION("UnmountFat", unmount_fat);
+    HYPERLIGHT_REGISTER_FUNCTION("IsGuestCreatedMount", is_guest_created_mount);
+    HYPERLIGHT_REGISTER_FUNCTION("TestGuestFatFullCycle", test_guest_fat_full_cycle);
+    HYPERLIGHT_REGISTER_FUNCTION("TestUnmountWithOpenFile", test_unmount_with_open_file);
     // CWD functions
     HYPERLIGHT_REGISTER_FUNCTION("GetCwd", get_cwd);
     HYPERLIGHT_REGISTER_FUNCTION("Chdir", do_chdir);

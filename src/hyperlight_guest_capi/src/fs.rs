@@ -36,7 +36,8 @@ limitations under the License.
 use core::ffi::c_char;
 
 use hyperlight_guest::fs::{
-    self, FdEntry, FsError, OpenOptions, alloc_fat_fd, dup_fd, dup_fd_to, free_fd, get_fd_entry,
+    self, FdEntry, FsError, OpenOptions, alloc_fat_fd, create_fat_mount, dup_fd, dup_fd_to,
+    free_fd, get_fd_entry, is_guest_created_mount, unmount, vfs,
 };
 
 // ============================================================================
@@ -119,6 +120,7 @@ fn fs_error_to_code(e: FsError) -> i32 {
         FsError::OutOfMemory => HL_ENOENT,
         FsError::FileLocked => HL_ENOENT,
         FsError::PlatformNotSupported => HL_ENOTSUP,
+        FsError::PermissionDenied => HL_EACCES,
     }
 }
 
@@ -259,9 +261,13 @@ pub extern "C" fn hl_fs_open(path: *const c_char, flags: i32) -> i32 {
                         // Use seek_raw(SEEK_END, 0) to seek to end
                         let _ = fat_file.seek_raw(2, 0);
                     }
+                    // Get the mount path for this file (for unmount tracking)
+                    let mount_path = vfs()
+                        .map(|v| v.get_mount_path(path_str).unwrap_or_default())
+                        .unwrap_or_default();
                     // Allocate a new FD for the FAT file, storing the original flags
                     // so fcntl F_GETFL can return them and write() can honor O_APPEND
-                    alloc_fat_fd(fat_file, flags)
+                    alloc_fat_fd(fat_file, flags, mount_path)
                 }
             }
         }
@@ -1282,5 +1288,114 @@ pub extern "C" fn hl_fs_access(path: *const c_char, mode: i32) -> i32 {
             0 // R_OK is always granted for existing files
         }
         Err(e) => fs_error_to_code(e),
+    }
+}
+
+// ============================================================================
+// Guest-Created FAT Mounts - Dynamic filesystem creation
+// ============================================================================
+
+/// Create a guest-side FAT filesystem mount.
+///
+/// Allocates memory from the guest heap and creates a FAT filesystem
+/// that can be used for temporary storage. The mount is private to the
+/// guest and not accessible to the host.
+///
+/// # Arguments
+/// * `path` - Mount point path (must be absolute, e.g., "/scratch")
+/// * `size_bytes` - Size of the FAT filesystem in bytes (min 64KB, max 16MB)
+///
+/// # Returns
+/// * 0 on success
+/// * Negative error code on failure:
+///   - HL_EINVAL: Invalid path or size
+///   - HL_EEXIST: Mount point already exists
+///   - HL_ENOSPC: Not enough memory for allocation
+///
+/// # Example (C)
+/// ```c
+/// if (hl_fs_create_fat_mount("/scratch", 128 * 1024) == 0) {
+///     // Mount created successfully
+///     int fd = open("/scratch/temp.txt", O_CREAT | O_RDWR);
+///     // ... use the filesystem ...
+///     hl_fs_unmount_fat("/scratch");
+/// }
+/// ```
+#[unsafe(no_mangle)]
+pub extern "C" fn hl_fs_create_fat_mount(path: *const c_char, size_bytes: i64) -> i32 {
+    let path_str = match parse_path(path) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+
+    match create_fat_mount(path_str, size_bytes as usize) {
+        Ok(()) => 0,
+        Err(e) => fs_error_to_code(e),
+    }
+}
+
+/// Unmount a guest-created FAT filesystem.
+///
+/// Frees the memory associated with a guest-created FAT mount.
+/// Only mounts created by `hl_fs_create_fat_mount` can be unmounted;
+/// attempting to unmount a host-provided mount will fail.
+///
+/// # Arguments
+/// * `path` - Mount point path to unmount
+///
+/// # Returns
+/// * 0 on success
+/// * Negative error code on failure:
+///   - HL_ENOENT: Mount point not found, or files still open on this mount
+///   - HL_EACCES: Cannot unmount host-provided mount
+///
+/// # Example (C)
+/// ```c
+/// hl_fs_unmount_fat("/scratch");  // Free the mount
+/// ```
+#[unsafe(no_mangle)]
+pub extern "C" fn hl_fs_unmount_fat(path: *const c_char) -> i32 {
+    let path_str = match parse_path(path) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+
+    match unmount(path_str) {
+        Ok(()) => 0,
+        Err(e) => fs_error_to_code(e),
+    }
+}
+
+/// Check if a mount point was created by the guest.
+///
+/// Returns whether the specified mount point was created dynamically
+/// by the guest using `hl_fs_create_fat_mount`, as opposed to being
+/// provided by the host.
+///
+/// # Arguments
+/// * `path` - Mount point path to check
+///
+/// # Returns
+/// * 1 if the mount was guest-created
+/// * 0 if the mount is host-provided or doesn't exist
+///
+/// # Example (C)
+/// ```c
+/// if (hl_fs_is_guest_created_mount("/scratch")) {
+///     // Safe to unmount
+///     hl_fs_unmount_fat("/scratch");
+/// }
+/// ```
+#[unsafe(no_mangle)]
+pub extern "C" fn hl_fs_is_guest_created_mount(path: *const c_char) -> i32 {
+    let path_str = match parse_path(path) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+
+    if is_guest_created_mount(path_str) {
+        1
+    } else {
+        0
     }
 }

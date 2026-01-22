@@ -341,6 +341,30 @@ impl Vfs {
         Err(FsError::NotFound)
     }
 
+    /// Get the mount path for a given file path.
+    ///
+    /// Uses longest-prefix matching to find the mount point.
+    ///
+    /// # Returns
+    ///
+    /// The mount path (e.g., "/data" for path "/data/file.txt").
+    ///
+    /// # Errors
+    ///
+    /// Returns `FsError::NotFound` if no mount matches the path.
+    pub fn get_mount_path(&self, path: &str) -> Result<String, FsError> {
+        let normalized = self.normalize_path(path)?;
+
+        // Search mounts (already sorted by path length descending)
+        for mount in self.mounts.iter() {
+            if mount.matches(&normalized).is_some() {
+                return Ok(mount.path.clone());
+            }
+        }
+
+        Err(FsError::NotFound)
+    }
+
     /// Get a reference to a mount by index.
     #[inline]
     pub fn get_mount(&self, index: usize) -> Option<&Mount> {

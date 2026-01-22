@@ -29,6 +29,7 @@ limitations under the License.
 //! This matches POSIX semantics where duplicated fds share the file offset.
 
 use alloc::rc::Rc;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::{RefCell, UnsafeCell};
 
@@ -151,13 +152,20 @@ pub struct SharedFatFile {
     /// Original open() flags (O_RDONLY, O_WRONLY, O_RDWR, O_APPEND, etc.).
     /// Updated by fcntl F_SETFL for modifiable flags (O_APPEND).
     pub flags: i32,
+    /// Mount path this file belongs to (e.g., "/data").
+    /// Used to prevent unmounting while files are still open.
+    pub mount_path: String,
 }
 
 impl FatFdEntry {
-    /// Create a new FAT fd entry with the given file and flags.
-    pub fn new(file: GuestFatFile<'static>, flags: i32) -> Self {
+    /// Create a new FAT fd entry with the given file, flags, and mount path.
+    pub fn new(file: GuestFatFile<'static>, flags: i32, mount_path: String) -> Self {
         Self {
-            inner: Rc::new(RefCell::new(SharedFatFile { file, flags })),
+            inner: Rc::new(RefCell::new(SharedFatFile {
+                file,
+                flags,
+                mount_path,
+            })),
         }
     }
 
@@ -169,6 +177,12 @@ impl FatFdEntry {
         Self {
             inner: Rc::clone(&self.inner),
         }
+    }
+
+    /// Get the mount path this file belongs to.
+    #[inline]
+    pub fn mount_path(&self) -> String {
+        self.inner.borrow().mount_path.clone()
     }
 
     /// Borrow the shared file state immutably.
@@ -281,11 +295,12 @@ pub fn alloc_ro_fd(open_file: OpenFile) -> i32 {
 /// # Arguments
 /// * `fat_file` - The FAT file handle
 /// * `flags` - Original open() flags (for fcntl F_GETFL and O_APPEND handling)
+/// * `mount_path` - The mount path this file belongs to (for unmount tracking)
 ///
 /// Returns the file descriptor number. Reuses freed slots when available,
 /// otherwise appends to the table.
-pub fn alloc_fat_fd(fat_file: GuestFatFile<'static>, flags: i32) -> i32 {
-    alloc_fd_entry(FdEntry::Fat(FatFdEntry::new(fat_file, flags)))
+pub fn alloc_fat_fd(fat_file: GuestFatFile<'static>, flags: i32, mount_path: String) -> i32 {
+    alloc_fd_entry(FdEntry::Fat(FatFdEntry::new(fat_file, flags, mount_path)))
 }
 
 /// Allocate a file descriptor for any entry type.
@@ -453,6 +468,30 @@ pub fn dup_fd_to(oldfd: i32, newfd: Option<i32>, min_fd: Option<i32>) -> Result<
             Ok(fd)
         }
     }
+}
+
+/// Check if any FAT files are currently open on the given mount path.
+///
+/// This is used to prevent unmounting while files are still open,
+/// which would cause use-after-free when the underlying FAT memory is freed.
+///
+/// # Arguments
+/// * `mount_path` - The mount path to check (e.g., "/scratch")
+///
+/// # Returns
+/// `true` if any open FAT files belong to this mount, `false` otherwise.
+pub fn has_open_files_on_mount(mount_path: &str) -> bool {
+    let table = FD_TABLE.get();
+
+    for slot in &table.slots {
+        if let Some(FdEntry::Fat(fat_entry)) = slot {
+            if fat_entry.mount_path() == mount_path {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 /// Check if a file descriptor is valid (open).

@@ -17,12 +17,13 @@ limitations under the License.
 //! Integration tests for HyperlightFS - FAT filesystem support.
 //!
 //! These tests verify the full FAT filesystem lifecycle including:
-//! - Creating empty FAT mounts
+//! - Creating empty FAT mounts (host-provided)
 //! - Loading existing FAT images
 //! - CRUD operations (create, read, update, delete)
 //! - Directory operations (mkdir, rmdir, list)
 //! - Mixed ReadOnly + FAT configurations
 //! - Host-guest cross-validation (MAP_SHARED verification)
+//! - Guest-created FAT mounts (dynamic allocation at runtime)
 
 #![cfg(unix)]
 #![allow(clippy::disallowed_macros)]
@@ -31,7 +32,7 @@ use std::path::PathBuf;
 
 use hyperlight_host::GuestBinary;
 use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
-use hyperlight_host::sandbox::{MultiUseSandbox, UninitializedSandbox};
+use hyperlight_host::sandbox::{MultiUseSandbox, SandboxConfiguration, UninitializedSandbox};
 use hyperlight_testing::{c_simple_guest_as_string, simple_guest_by_env};
 use tempfile::TempDir;
 
@@ -56,8 +57,16 @@ fn skip_c_only_tests() -> bool {
 fn create_fat_sandbox(
     fs_image: hyperlight_host::hyperlight_fs::HyperlightFSImage,
 ) -> MultiUseSandbox {
+    create_fat_sandbox_with_config(fs_image, None)
+}
+
+/// Helper to create a sandbox with FAT support and custom configuration.
+fn create_fat_sandbox_with_config(
+    fs_image: hyperlight_host::hyperlight_fs::HyperlightFSImage,
+    config: Option<SandboxConfiguration>,
+) -> MultiUseSandbox {
     let guest_path = simple_guest_by_env();
-    UninitializedSandbox::new(GuestBinary::FilePath(guest_path), None)
+    UninitializedSandbox::new(GuestBinary::FilePath(guest_path), config)
         .unwrap()
         .with_hyperlight_fs(fs_image)
         .evolve()
@@ -2202,4 +2211,812 @@ fn test_c_api_openat_real_dirfd() {
         "openat with real dirfd should return ENOTSUP (got error code {})",
         result
     );
+}
+
+/// Test: C API guest-created FAT mount full cycle.
+///
+/// This tests the C API functions:
+/// - hl_fs_create_fat_mount()
+/// - hl_fs_is_guest_created_mount()
+/// - hl_fs_unmount_fat()
+///
+/// The C guest performs: create mount -> write file -> read file -> delete -> unmount
+#[test]
+fn test_c_api_guest_created_fat_full_cycle() {
+    if skip_c_only_tests() {
+        return;
+    }
+    // Create sandbox with larger heap for guest FAT allocations
+    let guest_path = c_simple_guest_as_string().expect("C guest binary not found");
+
+    let mut config = SandboxConfiguration::default();
+    config.set_heap_size(1024 * 1024); // 1MB heap
+
+    // Build an empty HyperlightFS (no FAT mounts from host)
+    let fs_image = HyperlightFSBuilder::new().build().unwrap();
+
+    let mut sandbox: MultiUseSandbox =
+        UninitializedSandbox::new(GuestBinary::FilePath(guest_path), Some(config))
+            .unwrap()
+            .with_hyperlight_fs(fs_image)
+            .evolve()
+            .unwrap();
+
+    // Run the full cycle test in C guest
+    // The C function creates mount, writes, reads, deletes, unmounts
+    let size: i64 = 128 * 1024;
+    let result: i32 = sandbox
+        .call("TestGuestFatFullCycle", ("/scratch".to_string(), size))
+        .unwrap();
+
+    assert_eq!(
+        result, 1,
+        "C guest full FAT cycle should succeed (got error code {})",
+        result
+    );
+}
+
+/// Test: C API guest-created FAT mount with host mount coexisting.
+#[test]
+fn test_c_api_guest_created_fat_with_host_mount() {
+    if skip_c_only_tests() {
+        return;
+    }
+    let temp_dir = TempDir::new().unwrap();
+    let fat_path = temp_dir.path().join("test.fat");
+
+    let fs_image = HyperlightFSBuilder::new()
+        .add_empty_fat_mount_at(&fat_path, "/data", DEFAULT_TEST_FAT_SIZE)
+        .unwrap()
+        .build()
+        .unwrap();
+
+    // Use larger heap for guest FAT allocations
+    let mut config = SandboxConfiguration::default();
+    config.set_heap_size(1024 * 1024);
+
+    let guest_path = c_simple_guest_as_string().expect("C guest binary not found");
+    let mut sandbox: MultiUseSandbox =
+        UninitializedSandbox::new(GuestBinary::FilePath(guest_path), Some(config))
+            .unwrap()
+            .with_hyperlight_fs(fs_image)
+            .evolve()
+            .unwrap();
+
+    // Host mount should NOT be guest-created
+    let host_is_guest: bool = sandbox
+        .call("IsGuestCreatedMount", "/data".to_string())
+        .unwrap();
+    assert!(
+        !host_is_guest,
+        "host-provided mount should not be guest-created"
+    );
+
+    // Create a guest mount
+    let size: i64 = 128 * 1024;
+    let created: bool = sandbox
+        .call("CreateFatMount", ("/guest".to_string(), size))
+        .unwrap();
+    assert!(created, "guest mount creation should succeed");
+
+    // Guest mount should be guest-created
+    let guest_is_guest: bool = sandbox
+        .call("IsGuestCreatedMount", "/guest".to_string())
+        .unwrap();
+    assert!(guest_is_guest, "guest mount should be guest-created");
+
+    // Trying to unmount host mount should fail
+    let unmount_host: bool = sandbox.call("UnmountFat", "/data".to_string()).unwrap();
+    assert!(!unmount_host, "unmounting host mount should fail");
+
+    // Unmounting guest mount should succeed
+    let unmount_guest: bool = sandbox.call("UnmountFat", "/guest".to_string()).unwrap();
+    assert!(unmount_guest, "unmounting guest mount should succeed");
+}
+
+// =============================================================================
+// Cross-Validation Tests for ALL 4 FAT Types
+// =============================================================================
+//
+// These tests verify that host-guest read/write/delete cycles work correctly
+// for ALL four types of FAT mounts:
+//
+// 1. Pre-existing image (`add_fat_image`) - FAT from existing file on host
+// 2. Persistent empty (`add_empty_fat_mount_at`) - New FAT at specified path
+// 3. Ephemeral empty (`add_empty_fat_mount`) - New FAT in temp location
+// 4. Guest-created (`create_fat_mount`) - Dynamic FAT allocated by guest
+//
+// For types 1-3, host and guest share the same memory (MAP_SHARED), so both
+// can see each other's writes. For type 4, the FAT is guest-private and not
+// accessible to the host.
+
+/// Runs a full host/guest read-write-delete cycle on a FAT mount.
+///
+/// This helper performs the same operations regardless of FAT type, verifying:
+/// - Host writes -> Guest reads
+/// - Guest writes -> Host reads
+/// - Guest deletes -> Host verifies gone
+/// - Host deletes -> Guest verifies gone
+fn run_host_guest_rw_delete_cycle(sandbox: &mut MultiUseSandbox, mount_path: &str) {
+    // -------------------------------------------------------------------------
+    // Phase 1: Host writes, Guest reads
+    // -------------------------------------------------------------------------
+    let host_msg = b"Hello from host!";
+    let file1 = format!("{}/from_host.txt", mount_path);
+    sandbox.fs_write_file(&file1, host_msg).unwrap();
+
+    let guest_read: Vec<u8> = sandbox.call("ReadFatFile", file1.clone()).unwrap();
+    assert_eq!(
+        guest_read, host_msg,
+        "Guest should read what host wrote at {}",
+        file1
+    );
+
+    // -------------------------------------------------------------------------
+    // Phase 2: Guest writes, Host reads
+    // -------------------------------------------------------------------------
+    let guest_msg = b"Hello from guest!".to_vec();
+    let file2 = format!("{}/from_guest.txt", mount_path);
+    let write_ok: bool = sandbox
+        .call("WriteFatFile", (file2.clone(), guest_msg.clone()))
+        .unwrap();
+    assert!(write_ok, "Guest write to {} should succeed", file2);
+
+    let host_read = sandbox.fs_read_file(&file2).unwrap();
+    assert_eq!(
+        host_read, guest_msg,
+        "Host should read what guest wrote at {}",
+        file2
+    );
+
+    // -------------------------------------------------------------------------
+    // Phase 3: Guest deletes, Host verifies
+    // -------------------------------------------------------------------------
+    let del_ok: bool = sandbox.call("DeleteFatFile", file1.clone()).unwrap();
+    assert!(del_ok, "Guest delete of {} should succeed", file1);
+    assert!(
+        !sandbox.fs_exists(&file1).unwrap(),
+        "Host should see {} is gone after guest delete",
+        file1
+    );
+
+    // -------------------------------------------------------------------------
+    // Phase 4: Host deletes, Guest verifies
+    // -------------------------------------------------------------------------
+    sandbox.fs_remove_file(&file2).unwrap();
+    let exists_after: i32 = sandbox.call("ExistsFat", file2.clone()).unwrap();
+    assert_eq!(
+        exists_after, 0,
+        "Guest should see {} is gone after host delete",
+        file2
+    );
+}
+
+/// Runs a guest-only R/W/D cycle on a guest-created FAT mount.
+///
+/// This helper creates a guest FAT mount, performs operations, and unmounts.
+/// Used for guest-created FAT testing (Type 4) where host cannot access the data.
+fn run_guest_only_rw_delete_cycle(
+    sandbox: &mut MultiUseSandbox,
+    mount_path: &str,
+    size_bytes: i64,
+) {
+    // Create guest mount
+    let created: bool = sandbox
+        .call("CreateFatMount", (mount_path.to_string(), size_bytes))
+        .unwrap();
+    assert!(created, "Guest should create FAT mount at {}", mount_path);
+
+    // Write
+    let content = b"Guest-created FAT data!".to_vec();
+    let file_path = format!("{}/test.txt", mount_path);
+    let wrote: bool = sandbox
+        .call("WriteFatFile", (file_path.clone(), content.clone()))
+        .unwrap();
+    assert!(wrote, "Guest write to {} should succeed", file_path);
+
+    // Read
+    let read: Vec<u8> = sandbox.call("ReadFatFile", file_path.clone()).unwrap();
+    assert_eq!(read, content, "Guest should read back what it wrote");
+
+    // Delete
+    let deleted: bool = sandbox.call("DeleteFatFile", file_path.clone()).unwrap();
+    assert!(deleted, "Guest delete should succeed");
+
+    // Verify gone
+    let exists: i32 = sandbox.call("ExistsFat", file_path.clone()).unwrap();
+    assert_eq!(exists, 0, "File should be gone after delete");
+
+    // Unmount
+    let unmounted: bool = sandbox.call("UnmountFat", mount_path.to_string()).unwrap();
+    assert!(unmounted, "Guest should unmount {}", mount_path);
+}
+
+/// Test: Type 1 - Pre-existing FAT image (`add_fat_image`)
+///
+/// Verifies full host/guest R/W/D cycle on a pre-seeded FAT image.
+#[test]
+fn test_cross_validation_all_fat_types_preexisting_image() {
+    // Path to the pre-seeded test FAT image
+    let original_fat_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/assets/test_fat.img");
+
+    // Fail explicitly if the test asset is missing - don't silently skip!
+    assert!(
+        original_fat_path.exists(),
+        "Test asset missing: {:?}. This file should be checked into the repo.",
+        original_fat_path
+    );
+
+    // Copy to temp location so test doesn't modify the original asset
+    let temp_dir = TempDir::new().unwrap();
+    let test_fat_path = temp_dir.path().join("test_fat.img");
+    std::fs::copy(&original_fat_path, &test_fat_path).unwrap();
+
+    let fs_image = HyperlightFSBuilder::new()
+        .add_fat_image(&test_fat_path, "/mnt")
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let mut sandbox = create_fat_sandbox(fs_image);
+
+    // Verify pre-existing content is readable first
+    let hello: Vec<u8> = sandbox
+        .call("ReadFatFile", "/mnt/hello.txt".to_string())
+        .unwrap();
+    assert_eq!(
+        hello, b"Hello from the host!\n",
+        "pre-seeded content intact"
+    );
+
+    // Run full R/W/D cycle
+    run_host_guest_rw_delete_cycle(&mut sandbox, "/mnt");
+}
+
+/// Test: Type 2 - Persistent empty FAT (`add_empty_fat_mount_at`)
+///
+/// Verifies full host/guest R/W/D cycle on a FAT at a specified path.
+/// This is the most commonly tested type, but included here for completeness.
+#[test]
+fn test_cross_validation_all_fat_types_persistent_empty() {
+    let temp_dir = TempDir::new().unwrap();
+    let fat_path = temp_dir.path().join("persistent.fat");
+
+    let fs_image = HyperlightFSBuilder::new()
+        .add_empty_fat_mount_at(&fat_path, "/data", DEFAULT_TEST_FAT_SIZE)
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let mut sandbox = create_fat_sandbox(fs_image);
+
+    // Run full R/W/D cycle
+    run_host_guest_rw_delete_cycle(&mut sandbox, "/data");
+
+    // Verify the FAT file exists on disk (persistence)
+    assert!(
+        fat_path.exists(),
+        "Persistent FAT file should exist at {:?}",
+        fat_path
+    );
+}
+
+/// Test: Type 3 - Ephemeral empty FAT (`add_empty_fat_mount`)
+///
+/// Verifies full host/guest R/W/D cycle on a FAT in a temp location.
+/// The backing file is automatically cleaned up on drop.
+#[test]
+fn test_cross_validation_all_fat_types_ephemeral_empty() {
+    let fs_image = HyperlightFSBuilder::new()
+        .add_empty_fat_mount("/data", DEFAULT_TEST_FAT_SIZE)
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let mut sandbox = create_fat_sandbox(fs_image);
+
+    // Run full R/W/D cycle
+    run_host_guest_rw_delete_cycle(&mut sandbox, "/data");
+}
+
+/// Test: Type 4 - Guest-created FAT (`create_fat_mount`)
+///
+/// Verifies guest-created FAT basic R/W/D cycle works.
+/// NOTE: Guest-created FATs are NOT accessible to the host, so this test
+/// only verifies guest-side operations (no cross-validation possible).
+///
+/// Full CRUD testing for guest-created FATs is in the dedicated tests below
+/// (test_guest_created_fat_mount_*). This test is here for completeness in
+/// the "all 4 FAT types" comparison.
+#[test]
+fn test_cross_validation_all_fat_types_guest_created() {
+    let mut sandbox = create_sandbox_without_fat();
+
+    // Run the same guest-side R/W/D pattern using the shared helper
+    run_guest_only_rw_delete_cycle(&mut sandbox, "/scratch", 128 * 1024);
+}
+
+// =============================================================================
+// Guest-Created FAT Mount Tests
+// =============================================================================
+//
+// These tests verify that guests can dynamically create FAT filesystems in
+// memory at runtime without host pre-configuration.
+//
+// Note: Guest-created mounts use heap memory and are NOT visible to the host
+// via MAP_SHARED. These tests verify the guest-side functionality.
+
+/// Helper: Create a sandbox with HyperlightFS but no FAT mounts.
+///
+/// This allows testing guest-created FAT mounts in isolation.
+/// Uses a larger heap (1MB) to accommodate guest FAT allocations.
+fn create_sandbox_without_fat() -> MultiUseSandbox {
+    let guest_path = simple_guest_by_env();
+
+    // Configure sandbox with larger heap for guest FAT allocations
+    let mut config = SandboxConfiguration::default();
+    config.set_heap_size(1024 * 1024); // 1MB heap for guest FAT mounts
+
+    // Build an empty HyperlightFS (no files, no FAT mounts)
+    // This initializes the VFS so guest can add its own mounts
+    let fs_image = HyperlightFSBuilder::new().build().unwrap();
+
+    UninitializedSandbox::new(GuestBinary::FilePath(guest_path), Some(config))
+        .unwrap()
+        .with_hyperlight_fs(fs_image)
+        .evolve()
+        .unwrap()
+}
+
+/// Test: Guest creates FAT mount, writes file, reads it back.
+///
+/// This is the basic end-to-end test for guest-created FAT mounts.
+#[test]
+fn test_guest_created_fat_mount_basic() {
+    let mut sandbox = create_sandbox_without_fat();
+
+    // Create a 128KB guest FAT mount at /scratch
+    let size: i64 = 128 * 1024;
+    let result: bool = sandbox
+        .call("CreateFatMount", ("/scratch".to_string(), size))
+        .unwrap();
+    assert!(result, "CreateFatMount should succeed");
+
+    // Write a file to the guest-created mount
+    let content = b"Hello from guest-created FAT!".to_vec();
+    let write_result: bool = sandbox
+        .call(
+            "WriteFatFile",
+            ("/scratch/hello.txt".to_string(), content.clone()),
+        )
+        .unwrap();
+    assert!(write_result, "write to guest-created FAT should succeed");
+
+    // Read it back
+    let read_result: Vec<u8> = sandbox
+        .call("ReadFatFile", "/scratch/hello.txt".to_string())
+        .unwrap();
+    assert_eq!(read_result, content, "read should return written content");
+
+    // Unmount
+    let unmount_result: bool = sandbox.call("UnmountFat", "/scratch".to_string()).unwrap();
+    assert!(unmount_result, "unmount should succeed");
+}
+
+/// Test: Guest creates mount, performs directory operations.
+#[test]
+fn test_guest_created_fat_mount_directories() {
+    let mut sandbox = create_sandbox_without_fat();
+
+    // Create mount
+    let size: i64 = 128 * 1024;
+    let _: bool = sandbox
+        .call("CreateFatMount", ("/work".to_string(), size))
+        .unwrap();
+
+    // Create nested directories
+    let mkdir1: bool = sandbox
+        .call("MkdirFat", "/work/level1".to_string())
+        .unwrap();
+    assert!(mkdir1, "mkdir level1 should succeed");
+
+    let mkdir2: bool = sandbox
+        .call("MkdirFat", "/work/level1/level2".to_string())
+        .unwrap();
+    assert!(mkdir2, "mkdir level2 should succeed");
+
+    // Write file in nested dir
+    let content = b"nested content".to_vec();
+    let _: bool = sandbox
+        .call(
+            "WriteFatFile",
+            ("/work/level1/level2/file.txt".to_string(), content.clone()),
+        )
+        .unwrap();
+
+    // Read back
+    let read: Vec<u8> = sandbox
+        .call("ReadFatFile", "/work/level1/level2/file.txt".to_string())
+        .unwrap();
+    assert_eq!(read, content);
+
+    // List directories
+    let listing: String = sandbox
+        .call("ListDirFat", "/work/level1".to_string())
+        .unwrap();
+    assert!(
+        listing.contains("level2"),
+        "listing should contain level2: {}",
+        listing
+    );
+
+    // Cleanup
+    let _: bool = sandbox.call("UnmountFat", "/work".to_string()).unwrap();
+}
+
+/// Test: Multiple guest-created mounts can coexist.
+#[test]
+fn test_guest_created_fat_mount_multiple() {
+    let mut sandbox = create_sandbox_without_fat();
+
+    // Create two mounts
+    let size: i64 = 128 * 1024;
+    let mount1: bool = sandbox
+        .call("CreateFatMount", ("/mount1".to_string(), size))
+        .unwrap();
+    assert!(mount1, "first mount should succeed");
+
+    let mount2: bool = sandbox
+        .call("CreateFatMount", ("/mount2".to_string(), size))
+        .unwrap();
+    assert!(mount2, "second mount should succeed");
+
+    // Write to each
+    let content1 = b"mount1 content".to_vec();
+    let content2 = b"mount2 content".to_vec();
+
+    let _: bool = sandbox
+        .call(
+            "WriteFatFile",
+            ("/mount1/file.txt".to_string(), content1.clone()),
+        )
+        .unwrap();
+    let _: bool = sandbox
+        .call(
+            "WriteFatFile",
+            ("/mount2/file.txt".to_string(), content2.clone()),
+        )
+        .unwrap();
+
+    // Read back - verify they're independent
+    let read1: Vec<u8> = sandbox
+        .call("ReadFatFile", "/mount1/file.txt".to_string())
+        .unwrap();
+    let read2: Vec<u8> = sandbox
+        .call("ReadFatFile", "/mount2/file.txt".to_string())
+        .unwrap();
+
+    assert_eq!(read1, content1, "mount1 content should match");
+    assert_eq!(read2, content2, "mount2 content should match");
+
+    // Unmount in reverse order
+    let _: bool = sandbox.call("UnmountFat", "/mount2".to_string()).unwrap();
+    let _: bool = sandbox.call("UnmountFat", "/mount1".to_string()).unwrap();
+}
+
+/// Test: Unmounting non-existent mount fails.
+#[test]
+fn test_guest_created_fat_unmount_nonexistent() {
+    let mut sandbox = create_sandbox_without_fat();
+
+    // Try to unmount something that doesn't exist
+    let result: bool = sandbox
+        .call("UnmountFat", "/nonexistent".to_string())
+        .unwrap();
+    assert!(!result, "unmounting non-existent mount should fail");
+}
+
+/// Test: Unmounting with open files fails (prevents use-after-free).
+///
+/// This test verifies that attempting to unmount a guest-created FAT
+/// while files are still open is correctly rejected. This is a safety
+/// feature to prevent use-after-free when the underlying memory is freed.
+#[test]
+fn test_guest_created_fat_unmount_with_open_file_fails() {
+    if skip_c_only_tests() {
+        return;
+    }
+
+    let guest_path = c_simple_guest_as_string().expect("C guest binary not found");
+
+    let mut config = SandboxConfiguration::default();
+    config.set_heap_size(1024 * 1024); // 1MB heap
+
+    let fs_image = HyperlightFSBuilder::new().build().unwrap();
+
+    let mut sandbox: MultiUseSandbox =
+        UninitializedSandbox::new(GuestBinary::FilePath(guest_path), Some(config))
+            .unwrap()
+            .with_hyperlight_fs(fs_image)
+            .evolve()
+            .unwrap();
+
+    // Run the C test that verifies unmount fails with open file
+    let size: i64 = 128 * 1024;
+    let result: i32 = sandbox
+        .call("TestUnmountWithOpenFile", ("/opentest".to_string(), size))
+        .unwrap();
+
+    assert_eq!(
+        result, 1,
+        "unmount with open file test should pass (got error code {})",
+        result
+    );
+}
+
+/// Test: IsGuestCreatedMount correctly identifies guest-created mounts.
+#[test]
+fn test_guest_created_fat_mount_identification() {
+    let mut sandbox = create_sandbox_without_fat();
+
+    // Before creating, should not be guest-created
+    let before: bool = sandbox
+        .call("IsGuestCreatedMount", "/temp".to_string())
+        .unwrap();
+    assert!(!before, "non-existent mount should not be guest-created");
+
+    // Create mount
+    let size: i64 = 128 * 1024;
+    let _: bool = sandbox
+        .call("CreateFatMount", ("/temp".to_string(), size))
+        .unwrap();
+
+    // Now should be guest-created
+    let after: bool = sandbox
+        .call("IsGuestCreatedMount", "/temp".to_string())
+        .unwrap();
+    assert!(after, "created mount should be guest-created");
+
+    // After unmount, should not be guest-created
+    let _: bool = sandbox.call("UnmountFat", "/temp".to_string()).unwrap();
+
+    let after_unmount: bool = sandbox
+        .call("IsGuestCreatedMount", "/temp".to_string())
+        .unwrap();
+    assert!(
+        !after_unmount,
+        "unmounted mount should not be guest-created"
+    );
+}
+
+/// Test: Creating duplicate mount at same path fails.
+#[test]
+fn test_guest_created_fat_mount_duplicate_fails() {
+    let mut sandbox = create_sandbox_without_fat();
+
+    let size: i64 = 128 * 1024;
+
+    // First mount succeeds
+    let first: bool = sandbox
+        .call("CreateFatMount", ("/dupe".to_string(), size))
+        .unwrap();
+    assert!(first, "first mount should succeed");
+
+    // Second mount at same path fails
+    let second: bool = sandbox
+        .call("CreateFatMount", ("/dupe".to_string(), size))
+        .unwrap();
+    assert!(!second, "duplicate mount should fail");
+
+    // Cleanup
+    let _: bool = sandbox.call("UnmountFat", "/dupe".to_string()).unwrap();
+}
+
+/// Test: Creating mount with invalid path fails.
+#[test]
+fn test_guest_created_fat_mount_invalid_path() {
+    let mut sandbox = create_sandbox_without_fat();
+
+    let size: i64 = 128 * 1024;
+
+    // Relative path should fail
+    let result: bool = sandbox
+        .call("CreateFatMount", ("relative".to_string(), size))
+        .unwrap();
+    assert!(!result, "relative path should fail");
+}
+
+/// Test: Creating mount with invalid size fails.
+#[test]
+fn test_guest_created_fat_mount_invalid_size() {
+    let mut sandbox = create_sandbox_without_fat();
+
+    // Size too small (< 64KB)
+    let small: bool = sandbox
+        .call("CreateFatMount", ("/small".to_string(), 1024_i64))
+        .unwrap();
+    assert!(!small, "too-small size should fail");
+
+    // Negative size
+    let negative: bool = sandbox
+        .call("CreateFatMount", ("/neg".to_string(), -1_i64))
+        .unwrap();
+    assert!(!negative, "negative size should fail");
+}
+
+/// Test: Creating mount at exactly MIN_FAT_SIZE (64KB) boundary succeeds.
+#[test]
+fn test_guest_created_fat_mount_minimum_size_boundary() {
+    let mut sandbox = create_sandbox_without_fat();
+
+    // Exactly 64KB (MIN_FAT_SIZE) should work
+    let min_size: i64 = 64 * 1024;
+    let at_min: bool = sandbox
+        .call("CreateFatMount", ("/minsize".to_string(), min_size))
+        .unwrap();
+    assert!(at_min, "exactly 64KB (MIN_FAT_SIZE) should succeed");
+
+    // Write a small file to verify it's functional
+    let content = b"boundary test".to_vec();
+    let wrote: bool = sandbox
+        .call(
+            "WriteFatFile",
+            ("/minsize/test.txt".to_string(), content.clone()),
+        )
+        .unwrap();
+    assert!(wrote, "write to min-size FAT should work");
+
+    // Read back
+    let read: Vec<u8> = sandbox
+        .call("ReadFatFile", "/minsize/test.txt".to_string())
+        .unwrap();
+    assert_eq!(read, content, "content should match");
+
+    // Cleanup
+    let _: bool = sandbox.call("UnmountFat", "/minsize".to_string()).unwrap();
+
+    // One byte below minimum should fail
+    let below_min: bool = sandbox
+        .call("CreateFatMount", ("/toosmall".to_string(), min_size - 1))
+        .unwrap();
+    assert!(!below_min, "64KB - 1 should fail");
+}
+
+/// Test: Guest-created mount with host-provided mount coexist.
+///
+/// This tests the scenario where both host and guest create mounts.
+#[test]
+fn test_guest_created_fat_mount_with_host_mount() {
+    // Create sandbox with host-provided FAT mount and larger heap for guest allocations
+    let temp_dir = TempDir::new().unwrap();
+    let fat_path = temp_dir.path().join("test.fat");
+
+    let fs_image = HyperlightFSBuilder::new()
+        .add_empty_fat_mount_at(&fat_path, "/data", DEFAULT_TEST_FAT_SIZE)
+        .unwrap()
+        .build()
+        .unwrap();
+
+    // Use larger heap (1MB) for guest FAT allocations
+    let mut config = SandboxConfiguration::default();
+    config.set_heap_size(1024 * 1024);
+
+    let mut sandbox = create_fat_sandbox_with_config(fs_image, Some(config));
+
+    // Write to host-provided mount
+    let host_content = b"from host mount".to_vec();
+    let _: bool = sandbox
+        .call(
+            "WriteFatFile",
+            ("/data/host.txt".to_string(), host_content.clone()),
+        )
+        .unwrap();
+
+    // Create guest mount
+    let size: i64 = 128 * 1024;
+    let created: bool = sandbox
+        .call("CreateFatMount", ("/guest".to_string(), size))
+        .unwrap();
+    assert!(created, "guest mount should succeed alongside host mount");
+
+    // Write to guest mount
+    let guest_content = b"from guest mount".to_vec();
+    let _: bool = sandbox
+        .call(
+            "WriteFatFile",
+            ("/guest/guest.txt".to_string(), guest_content.clone()),
+        )
+        .unwrap();
+
+    // Verify both mounts work independently
+    let read_host: Vec<u8> = sandbox
+        .call("ReadFatFile", "/data/host.txt".to_string())
+        .unwrap();
+    let read_guest: Vec<u8> = sandbox
+        .call("ReadFatFile", "/guest/guest.txt".to_string())
+        .unwrap();
+
+    assert_eq!(read_host, host_content, "host mount content should match");
+    assert_eq!(
+        read_guest, guest_content,
+        "guest mount content should match"
+    );
+
+    // Host mount should NOT be guest-created
+    let host_is_guest: bool = sandbox
+        .call("IsGuestCreatedMount", "/data".to_string())
+        .unwrap();
+    assert!(
+        !host_is_guest,
+        "host-provided mount should not be guest-created"
+    );
+
+    // Guest mount should be guest-created
+    let guest_is_guest: bool = sandbox
+        .call("IsGuestCreatedMount", "/guest".to_string())
+        .unwrap();
+    assert!(guest_is_guest, "guest mount should be guest-created");
+
+    // Trying to unmount host mount should fail
+    let unmount_host: bool = sandbox.call("UnmountFat", "/data".to_string()).unwrap();
+    assert!(!unmount_host, "unmounting host mount should fail");
+
+    // Unmounting guest mount should succeed
+    let unmount_guest: bool = sandbox.call("UnmountFat", "/guest".to_string()).unwrap();
+    assert!(unmount_guest, "unmounting guest mount should succeed");
+}
+
+/// Test: Re-creating mount after unmount works.
+#[test]
+fn test_guest_created_fat_mount_recreate_after_unmount() {
+    let mut sandbox = create_sandbox_without_fat();
+
+    let size: i64 = 128 * 1024;
+
+    // Create, write, unmount
+    let _: bool = sandbox
+        .call("CreateFatMount", ("/cycle".to_string(), size))
+        .unwrap();
+    let content1 = b"first incarnation".to_vec();
+    let _: bool = sandbox
+        .call(
+            "WriteFatFile",
+            ("/cycle/file.txt".to_string(), content1.clone()),
+        )
+        .unwrap();
+    let _: bool = sandbox.call("UnmountFat", "/cycle".to_string()).unwrap();
+
+    // Re-create at same path
+    let recreate: bool = sandbox
+        .call("CreateFatMount", ("/cycle".to_string(), size))
+        .unwrap();
+    assert!(recreate, "re-create after unmount should succeed");
+
+    // File from before should not exist (fresh FAT)
+    let read_old: Vec<u8> = sandbox
+        .call("ReadFatFile", "/cycle/file.txt".to_string())
+        .unwrap();
+    assert!(
+        read_old.is_empty(),
+        "old file should not exist on fresh mount"
+    );
+
+    // Can write new content
+    let content2 = b"second incarnation".to_vec();
+    let write2: bool = sandbox
+        .call(
+            "WriteFatFile",
+            ("/cycle/new.txt".to_string(), content2.clone()),
+        )
+        .unwrap();
+    assert!(write2, "write to recreated mount should succeed");
+
+    let read2: Vec<u8> = sandbox
+        .call("ReadFatFile", "/cycle/new.txt".to_string())
+        .unwrap();
+    assert_eq!(read2, content2);
+
+    // Cleanup
+    let _: bool = sandbox.call("UnmountFat", "/cycle".to_string()).unwrap();
 }

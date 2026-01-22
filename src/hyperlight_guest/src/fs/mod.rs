@@ -80,7 +80,31 @@ limitations under the License.
 //! - If `/` is a read-only mount → routes to RO backend with full path `/data/file.txt`
 //!
 //! This allows mixing read-only and read-write mounts in the same filesystem tree.
+//!
+//! ## Guest-Created FAT Mounts
+//!
+//! Guests can also create FAT filesystems dynamically at runtime:
+//!
+//! ```ignore
+//! use hyperlight_guest::fs;
+//!
+//! // Create a 512KB FAT mount at /scratch
+//! fs::create_fat_mount("/scratch", 512 * 1024)?;
+//!
+//! // Use it like any other FAT mount
+//! let mut file = fs::OpenOptions::new()
+//!     .write(true)
+//!     .create(true)
+//!     .open("/scratch/temp.txt")?;
+//! file.write_all(b"temporary data")?;
+//!
+//! // When done, unmount to free memory
+//! fs::unmount("/scratch")?;
+//! ```
+//!
+//! **Note:** Guest-created mounts use heap memory and are NOT visible to the host.
 
+mod dynamic_fat;
 mod error;
 mod fat;
 pub(crate) mod fd;
@@ -88,11 +112,12 @@ mod file;
 mod manifest;
 pub mod vfs;
 
+pub use dynamic_fat::{create_fat_mount, is_guest_created_mount, unmount};
 pub use error::FsError;
 pub use fat::GuestFatFile;
 pub use fd::{
     FatFdEntry, FdEntry, OpenFile, SharedRoFile, alloc_fat_fd, alloc_ro_fd, dup_fd, dup_fd_to,
-    free_fd, get_fat_fd, get_fd_entry, get_ro_fd,
+    free_fd, get_fat_fd, get_fd_entry, get_ro_fd, has_open_files_on_mount,
 };
 pub use file::{
     DirEntry, File, OpenOptions, Stat, chdir, cwd, mkdir, open, read_dir, rename, rmdir, stat,

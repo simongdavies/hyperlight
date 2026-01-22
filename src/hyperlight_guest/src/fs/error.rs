@@ -70,10 +70,12 @@ pub enum FsError {
     IoError,
     /// Out of memory.
     OutOfMemory,
-    /// File is locked by another process/sandbox.
+    /// Resource is in use and cannot be freed (e.g., unmount with open files).
     FileLocked,
     /// Platform does not support this operation.
     PlatformNotSupported,
+    /// Permission denied (cannot perform operation on this resource).
+    PermissionDenied,
 }
 
 impl FsError {
@@ -100,6 +102,7 @@ impl FsError {
             FsError::OutOfMemory => -1,          // Generic (ENOMEM)
             FsError::FileLocked => -1,           // Generic (EAGAIN)
             FsError::PlatformNotSupported => -2, // ENOTSUP
+            FsError::PermissionDenied => -12,    // EACCES
         }
     }
 }
@@ -126,6 +129,7 @@ impl fmt::Display for FsError {
             FsError::OutOfMemory => write!(f, "out of memory"),
             FsError::FileLocked => write!(f, "file is locked"),
             FsError::PlatformNotSupported => write!(f, "platform not supported"),
+            FsError::PermissionDenied => write!(f, "permission denied"),
         }
     }
 }
@@ -154,6 +158,7 @@ impl embedded_io::Error for FsError {
             FsError::OutOfMemory => ErrorKind::OutOfMemory,
             FsError::FileLocked => ErrorKind::PermissionDenied,
             FsError::PlatformNotSupported => ErrorKind::Unsupported,
+            FsError::PermissionDenied => ErrorKind::PermissionDenied,
         }
     }
 }

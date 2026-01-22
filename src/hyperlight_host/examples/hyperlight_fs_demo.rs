@@ -20,6 +20,7 @@ limitations under the License.
 //!
 //! 1. **ReadOnly mounts**: Static files mapped from host into guest
 //! 2. **FAT mounts**: Read-write filesystem for dynamic data
+//! 3. **Guest-created mounts**: Dynamic FAT creation at runtime
 //!
 //! # Usage
 //!
@@ -35,13 +36,15 @@ limitations under the License.
 //! - Guest creating directories (FAT)
 //! - Listing directory contents (FAT)
 //! - Host-Guest interoperability via MAP_SHARED (zero-copy verification)
+//! - Guest dynamically creating FAT mounts at runtime
+//! - Guest unmounting filesystems
 
 use std::path::Path;
 use std::process::ExitCode;
 
 use hyperlight_host::GuestBinary;
 use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
-use hyperlight_host::sandbox::{MultiUseSandbox, UninitializedSandbox};
+use hyperlight_host::sandbox::{MultiUseSandbox, SandboxConfiguration, UninitializedSandbox};
 
 /// Path to the test guest binary.
 fn get_guest_path() -> &'static str {
@@ -113,8 +116,12 @@ fn run_demo() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
+    // Configure with larger heap for guest-created FAT demo (Part 6)
+    let mut config = SandboxConfiguration::default();
+    config.set_heap_size(1024 * 1024); // 1MB heap
+
     let mut sandbox: MultiUseSandbox =
-        UninitializedSandbox::new(GuestBinary::FilePath(guest_path.into()), None)?
+        UninitializedSandbox::new(GuestBinary::FilePath(guest_path.into()), Some(config))?
             .with_hyperlight_fs(fs_image)
             .evolve()?;
     println!("   ✓ Sandbox created and initialized");
@@ -299,6 +306,108 @@ fn run_demo() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     // =========================================================================
+    // Part 6: Guest-Created Dynamic FAT Mounts
+    // =========================================================================
+
+    println!("═══════════════════════════════════════════════════════════════");
+    println!("  🔧 Guest-Created Dynamic FAT Mount Demo");
+    println!("═══════════════════════════════════════════════════════════════");
+    println!();
+    println!("   Guests can dynamically create FAT filesystems at runtime,");
+    println!("   allocating memory from their heap. These mounts are private");
+    println!("   to the guest and can be unmounted when no longer needed.");
+    println!();
+
+    // Check that existing host-provided mount is not guest-created
+    println!("   1️⃣  Checking /data mount origin...");
+    let is_guest_created: bool = sandbox.call("IsGuestCreatedMount", "/data".to_string())?;
+    if is_guest_created {
+        println!("      ✗ /data incorrectly reported as guest-created!");
+    } else {
+        println!("      ✓ /data correctly identified as host-provided");
+    }
+    println!();
+
+    // Guest creates a new dynamic FAT mount
+    println!("   2️⃣  Guest creates /scratch mount (128 KB dynamic FAT)...");
+    let create_result: bool =
+        sandbox.call("CreateFatMount", ("/scratch".to_string(), 128 * 1024i64))?;
+    if create_result {
+        println!("      ✓ /scratch mount created by guest");
+    } else {
+        println!("      ✗ Failed to create /scratch mount");
+        return Err("guest failed to create dynamic FAT mount".into());
+    }
+    println!();
+
+    // Verify it's marked as guest-created
+    println!("   3️⃣  Verifying /scratch is guest-created...");
+    let is_scratch_guest: bool = sandbox.call("IsGuestCreatedMount", "/scratch".to_string())?;
+    if is_scratch_guest {
+        println!("      ✓ /scratch correctly identified as guest-created");
+    } else {
+        println!("      ✗ /scratch incorrectly reported as host-provided!");
+    }
+    println!();
+
+    // Write a file to the guest-created mount
+    println!("   4️⃣  Guest writes /scratch/temp.txt...");
+    let temp_content = b"This file is on a guest-created filesystem!".to_vec();
+    let write_scratch: bool = sandbox.call(
+        "WriteFatFile",
+        ("/scratch/temp.txt".to_string(), temp_content.clone()),
+    )?;
+    if write_scratch {
+        println!("      ✓ File written to guest-created mount");
+    } else {
+        println!("      ✗ Failed to write to /scratch");
+    }
+    println!();
+
+    // Read it back
+    println!("   5️⃣  Guest reads /scratch/temp.txt...");
+    let read_scratch: Vec<u8> = sandbox.call("ReadFatFile", "/scratch/temp.txt".to_string())?;
+    if read_scratch == temp_content {
+        println!(
+            "      ✓ Content: \"{}\"",
+            String::from_utf8_lossy(&read_scratch)
+        );
+    } else {
+        println!("      ✗ Content mismatch!");
+    }
+    println!();
+
+    // Unmount the guest-created filesystem
+    println!("   6️⃣  Guest unmounts /scratch...");
+    let unmount_result: bool = sandbox.call("UnmountFat", "/scratch".to_string())?;
+    if unmount_result {
+        println!("      ✓ /scratch unmounted successfully");
+    } else {
+        println!("      ✗ Failed to unmount /scratch");
+    }
+    println!();
+
+    // Verify it's gone (trying to read should fail)
+    println!("   7️⃣  Verifying /scratch is unmounted...");
+    let exists_after: i32 = sandbox.call("ExistsFat", "/scratch/temp.txt".to_string())?;
+    if exists_after == 0 {
+        println!("      ✓ /scratch no longer accessible (correctly unmounted)");
+    } else {
+        println!("      ✗ /scratch still accessible after unmount!");
+    }
+    println!();
+
+    // Verify we can't unmount host-provided mounts
+    println!("   8️⃣  Attempting to unmount host-provided /data (should fail)...");
+    let unmount_host: bool = sandbox.call("UnmountFat", "/data".to_string())?;
+    if !unmount_host {
+        println!("      ✓ Correctly refused to unmount host-provided mount");
+    } else {
+        println!("      ✗ Incorrectly allowed unmounting host-provided mount!");
+    }
+    println!();
+
+    // =========================================================================
     // Summary
     // =========================================================================
 
@@ -316,6 +425,8 @@ fn run_demo() -> Result<(), Box<dyn std::error::Error>> {
     println!("   • Getting file statistics");
     println!("   • Deleting files");
     println!("   • Host-Guest interoperability via MAP_SHARED");
+    println!("   • Guest-created dynamic FAT mounts");
+    println!("   • Unmounting guest-created filesystems");
     println!();
     println!("   FAT image location: {}", fat_path.display());
     println!();

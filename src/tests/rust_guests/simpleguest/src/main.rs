@@ -345,6 +345,42 @@ fn chdir(path: String) -> bool {
     fs::chdir(&path).is_ok()
 }
 
+// ============================================================================
+// Guest-Created FAT Mount Test Functions
+// ============================================================================
+
+/// Creates a guest-side FAT mount at the specified path.
+/// This allocates memory from the guest heap and formats it as FAT.
+/// Returns true on success, false on error.
+#[guest_function("CreateFatMount")]
+fn create_fat_mount(path: String, size: i64) -> bool {
+    if !fs::is_initialized() {
+        return false;
+    }
+    if size <= 0 {
+        return false;
+    }
+    fs::create_fat_mount(&path, size as usize).is_ok()
+}
+
+/// Unmounts a guest-created FAT mount.
+/// Returns true on success, false on error.
+/// Fails if the mount was host-provided (not guest-created).
+#[guest_function("UnmountFat")]
+fn unmount_fat(path: String) -> bool {
+    if !fs::is_initialized() {
+        return false;
+    }
+    fs::unmount(&path).is_ok()
+}
+
+/// Checks if a mount was created by the guest (not host-provided).
+/// Returns true if guest-created, false otherwise.
+#[guest_function("IsGuestCreatedMount")]
+fn is_guest_created_mount(path: String) -> bool {
+    fs::is_guest_created_mount(&path)
+}
+
 #[guest_function("EchoDouble")]
 fn echo_double(value: f64) -> f64 {
     value
