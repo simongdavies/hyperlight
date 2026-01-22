@@ -16,20 +16,27 @@ limitations under the License.
 
 //! File descriptor table for HyperlightFS.
 //!
-//! Manages open files dynamically. Each open file tracks:
-//! - The current read position within the file
-//! - The file size and guest memory address
+//! Manages open files dynamically. Supports two types of files:
+//! - **Read-only files**: Memory-mapped from the host manifest (cheap to clone)
+//! - **FAT files**: Read-write files on FAT filesystem mounts (owned handles)
+//!
+//! This unified table allows the C API to use integer file descriptors for both types.
 
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 
 use super::error::FsError;
+use super::fat::GuestFatFile;
+
+/// O_APPEND flag value (matches Linux ABI: 0x0400).
+/// Used to track append mode for POSIX-compliant write() behavior.
+const O_APPEND: i32 = 0x0400;
 
 /// First file descriptor available for allocation.
 /// FDs 0-2 are reserved for stdin/stdout/stderr (POSIX compatibility).
 const FIRST_AVAILABLE_FD: usize = 3;
 
-/// An open file entry.
+/// An open read-only file entry (memory-mapped from manifest).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpenFile {
     /// Current read position within the file.
@@ -40,19 +47,79 @@ pub struct OpenFile {
     pub guest_address: u64,
 }
 
+/// A FAT file entry with its open flags.
+///
+/// Tracks the original open() flags so fcntl F_GETFL can return accurate values
+/// and write() can honor O_APPEND semantics.
+pub struct FatFdEntry {
+    /// The underlying FAT file handle.
+    pub file: GuestFatFile<'static>,
+    /// Original open() flags (O_RDONLY, O_WRONLY, O_RDWR, O_APPEND, etc.).
+    /// Updated by fcntl F_SETFL for modifiable flags (O_APPEND).
+    pub flags: i32,
+}
+
+impl FatFdEntry {
+    /// Create a new FAT fd entry with the given file and flags.
+    pub fn new(file: GuestFatFile<'static>, flags: i32) -> Self {
+        Self { file, flags }
+    }
+
+    /// Returns true if O_APPEND flag is set.
+    #[inline]
+    pub fn is_append(&self) -> bool {
+        (self.flags & O_APPEND) != 0
+    }
+
+    /// Set or clear the O_APPEND flag.
+    pub fn set_append(&mut self, append: bool) {
+        if append {
+            self.flags |= O_APPEND;
+        } else {
+            self.flags &= !O_APPEND;
+        }
+    }
+}
+
+/// Entry in the unified file descriptor table.
+///
+/// Supports both read-only memory-mapped files and FAT filesystem files.
+pub enum FdEntry {
+    /// Read-only memory-mapped file from manifest.
+    ReadOnly(OpenFile),
+    /// FAT filesystem file with open flags.
+    /// The `'static` lifetime is valid because FAT filesystems live for
+    /// the guest's entire execution.
+    Fat(FatFdEntry),
+}
+
+impl FdEntry {
+    /// Returns true if this is a read-only file.
+    pub fn is_readonly(&self) -> bool {
+        matches!(self, FdEntry::ReadOnly(_))
+    }
+
+    /// Returns true if this is a FAT file.
+    pub fn is_fat(&self) -> bool {
+        matches!(self, FdEntry::Fat(_))
+    }
+}
+
 /// File descriptor table.
 struct FdTable {
     /// Slots for open files. None = slot is free, Some = open file.
     /// Freed slots are reused on subsequent allocations.
-    slots: Vec<Option<OpenFile>>,
+    slots: Vec<Option<FdEntry>>,
 }
 
 impl FdTable {
     fn new() -> Self {
         // Pre-allocate reserved slots (0=stdin, 1=stdout, 2=stderr)
-        Self {
-            slots: alloc::vec![None; FIRST_AVAILABLE_FD],
+        let mut slots = Vec::with_capacity(FIRST_AVAILABLE_FD + 8);
+        for _ in 0..FIRST_AVAILABLE_FD {
+            slots.push(None);
         }
+        Self { slots }
     }
 }
 
@@ -76,31 +143,48 @@ impl FdTableCell {
     }
 }
 
-/// Allocate a new file descriptor for an open file.
+/// Allocate a new file descriptor for a read-only file.
 ///
 /// Returns the file descriptor number. Reuses freed slots when available,
 /// otherwise appends to the table.
-pub fn alloc_fd(open_file: OpenFile) -> i32 {
+pub fn alloc_ro_fd(open_file: OpenFile) -> i32 {
+    alloc_fd_entry(FdEntry::ReadOnly(open_file))
+}
+
+/// Allocate a new file descriptor for a FAT file.
+///
+/// # Arguments
+/// * `fat_file` - The FAT file handle
+/// * `flags` - Original open() flags (for fcntl F_GETFL and O_APPEND handling)
+///
+/// Returns the file descriptor number. Reuses freed slots when available,
+/// otherwise appends to the table.
+pub fn alloc_fat_fd(fat_file: GuestFatFile<'static>, flags: i32) -> i32 {
+    alloc_fd_entry(FdEntry::Fat(FatFdEntry::new(fat_file, flags)))
+}
+
+/// Allocate a file descriptor for any entry type.
+fn alloc_fd_entry(entry: FdEntry) -> i32 {
     let table = FD_TABLE.get();
 
     // Try to reuse a freed slot (skip reserved 0-2)
     for (idx, slot) in table.slots.iter_mut().enumerate().skip(FIRST_AVAILABLE_FD) {
         if slot.is_none() {
-            *slot = Some(open_file);
+            *slot = Some(entry);
             return idx as i32;
         }
     }
 
     // No free slot, append new entry
     let fd = table.slots.len() as i32;
-    table.slots.push(Some(open_file));
+    table.slots.push(Some(entry));
     fd
 }
 
-/// Get an open file by file descriptor.
+/// Get an open file entry by file descriptor.
 ///
-/// Returns a mutable reference to the OpenFile entry.
-pub fn get_fd(fd: i32) -> Result<&'static mut OpenFile, FsError> {
+/// Returns a mutable reference to the FdEntry.
+pub fn get_fd_entry(fd: i32) -> Result<&'static mut FdEntry, FsError> {
     if (fd as usize) < FIRST_AVAILABLE_FD {
         return Err(FsError::InvalidFd);
     }
@@ -113,7 +197,31 @@ pub fn get_fd(fd: i32) -> Result<&'static mut OpenFile, FsError> {
         .ok_or(FsError::InvalidFd)
 }
 
+/// Get a read-only file by file descriptor.
+///
+/// Returns a mutable reference to the OpenFile entry.
+/// Returns `InvalidFd` if fd is invalid or refers to a FAT file.
+pub fn get_ro_fd(fd: i32) -> Result<&'static mut OpenFile, FsError> {
+    match get_fd_entry(fd)? {
+        FdEntry::ReadOnly(file) => Ok(file),
+        FdEntry::Fat(_) => Err(FsError::InvalidFd),
+    }
+}
+
+/// Get a FAT file entry by file descriptor.
+///
+/// Returns a mutable reference to the FatFdEntry (file + flags).
+/// Returns `InvalidFd` if fd is invalid or refers to a read-only file.
+pub fn get_fat_fd(fd: i32) -> Result<&'static mut FatFdEntry, FsError> {
+    match get_fd_entry(fd)? {
+        FdEntry::Fat(entry) => Ok(entry),
+        FdEntry::ReadOnly(_) => Err(FsError::InvalidFd),
+    }
+}
+
 /// Close a file descriptor, freeing the slot for reuse.
+///
+/// For FAT files, this drops the handle which flushes pending writes.
 pub fn free_fd(fd: i32) -> Result<(), FsError> {
     if (fd as usize) < FIRST_AVAILABLE_FD {
         return Err(FsError::InvalidFd);
@@ -122,6 +230,7 @@ pub fn free_fd(fd: i32) -> Result<(), FsError> {
     let table = FD_TABLE.get();
     match table.slots.get_mut(fd as usize) {
         Some(slot @ Some(_)) => {
+            // Drop the entry (flushes FAT files)
             *slot = None;
             Ok(())
         }
@@ -141,6 +250,18 @@ pub fn is_valid_fd(fd: i32) -> bool {
         .slots
         .get(fd as usize)
         .is_some_and(|slot| slot.is_some())
+}
+
+/// Check if a file descriptor refers to a read-only file.
+#[cfg(test)]
+pub fn is_readonly_fd(fd: i32) -> bool {
+    get_fd_entry(fd).is_ok_and(|e| e.is_readonly())
+}
+
+/// Check if a file descriptor refers to a FAT file.
+#[cfg(test)]
+pub fn is_fat_fd(fd: i32) -> bool {
+    get_fd_entry(fd).is_ok_and(|e| e.is_fat())
 }
 
 /// Get the number of currently open files.
@@ -163,7 +284,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_alloc_and_free() {
+    fn test_alloc_and_free_readonly() {
         reset();
 
         let file = OpenFile {
@@ -173,13 +294,15 @@ mod tests {
         };
 
         // Allocate (first available is fd 3, since 0-2 are reserved)
-        let fd = alloc_fd(file);
+        let fd = alloc_ro_fd(file);
         assert_eq!(fd, 3);
         assert!(is_valid_fd(fd));
+        assert!(is_readonly_fd(fd));
+        assert!(!is_fat_fd(fd));
         assert_eq!(open_count(), 1);
 
         // Get and verify
-        let entry = get_fd(fd).unwrap();
+        let entry = get_ro_fd(fd).unwrap();
         assert_eq!(entry.size, 100);
 
         // Free
@@ -195,12 +318,12 @@ mod tests {
     fn test_invalid_fd() {
         reset();
 
-        assert_eq!(get_fd(-1), Err(FsError::InvalidFd));
-        assert_eq!(get_fd(1000), Err(FsError::InvalidFd)); // Out of bounds
-        assert_eq!(get_fd(0), Err(FsError::InvalidFd)); // Reserved (stdin)
-        assert_eq!(get_fd(1), Err(FsError::InvalidFd)); // Reserved (stdout)
-        assert_eq!(get_fd(2), Err(FsError::InvalidFd)); // Reserved (stderr)
-        assert_eq!(get_fd(3), Err(FsError::InvalidFd)); // Not open yet
+        assert_eq!(get_ro_fd(-1), Err(FsError::InvalidFd));
+        assert_eq!(get_ro_fd(1000), Err(FsError::InvalidFd)); // Out of bounds
+        assert_eq!(get_ro_fd(0), Err(FsError::InvalidFd)); // Reserved (stdin)
+        assert_eq!(get_ro_fd(1), Err(FsError::InvalidFd)); // Reserved (stdout)
+        assert_eq!(get_ro_fd(2), Err(FsError::InvalidFd)); // Reserved (stderr)
+        assert_eq!(get_ro_fd(3), Err(FsError::InvalidFd)); // Not open yet
     }
 
     #[test]
@@ -214,9 +337,9 @@ mod tests {
         };
 
         // Allocate three fds (starting from 3 since 0-2 are reserved)
-        let fd0 = alloc_fd(file);
-        let fd1 = alloc_fd(file);
-        let fd2 = alloc_fd(file);
+        let fd0 = alloc_ro_fd(file);
+        let fd1 = alloc_ro_fd(file);
+        let fd2 = alloc_ro_fd(file);
         assert_eq!(fd0, 3);
         assert_eq!(fd1, 4);
         assert_eq!(fd2, 5);
@@ -227,7 +350,7 @@ mod tests {
         assert_eq!(open_count(), 2);
 
         // Next alloc should reuse slot 4
-        let fd3 = alloc_fd(file);
+        let fd3 = alloc_ro_fd(file);
         assert_eq!(fd3, 4);
         assert_eq!(open_count(), 3);
 
@@ -244,20 +367,48 @@ mod tests {
             guest_address: 0x1000,
         };
 
-        let fd = alloc_fd(file);
+        let fd = alloc_ro_fd(file);
         assert_eq!(fd, 3); // First available after reserved
 
         // Update position
         {
-            let entry = get_fd(fd).unwrap();
+            let entry = get_ro_fd(fd).unwrap();
             entry.position = 50;
         }
 
         // Verify update persisted
         {
-            let entry = get_fd(fd).unwrap();
+            let entry = get_ro_fd(fd).unwrap();
             assert_eq!(entry.position, 50);
         }
+
+        reset();
+    }
+
+    #[test]
+    fn test_mixed_readonly_and_fat_fds() {
+        reset();
+
+        let ro_file = OpenFile {
+            position: 0,
+            size: 100,
+            guest_address: 0x1000,
+        };
+
+        // Allocate RO fd
+        let ro_fd = alloc_ro_fd(ro_file);
+        assert_eq!(ro_fd, 3);
+        assert!(is_readonly_fd(ro_fd));
+        assert!(!is_fat_fd(ro_fd));
+
+        // get_ro_fd works for RO
+        assert!(get_ro_fd(ro_fd).is_ok());
+        // get_fat_fd fails for RO
+        assert_eq!(get_fat_fd(ro_fd), Err(FsError::InvalidFd));
+
+        // Note: We can't test alloc_fat_fd without a real GuestFatFile,
+        // which requires an initialized FAT filesystem. That's tested
+        // in the integration tests.
 
         reset();
     }

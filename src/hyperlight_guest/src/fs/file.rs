@@ -98,12 +98,19 @@ use super::manifest;
 ///     .write(true)
 ///     .truncate(true)
 ///     .open("/data/existing.txt")?;
+///
+/// // Create new file, fail if exists (O_CREAT | O_EXCL equivalent)
+/// let file = OpenOptions::new()
+///     .write(true)
+///     .create_new(true)
+///     .open("/data/must_not_exist.txt")?;
 /// ```
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OpenOptions {
     read: bool,
     write: bool,
     create: bool,
+    create_new: bool,
     truncate: bool,
 }
 
@@ -117,6 +124,7 @@ impl OpenOptions {
             read: false,
             write: false,
             create: false,
+            create_new: false,
             truncate: false,
         }
     }
@@ -158,6 +166,29 @@ impl OpenOptions {
         self
     }
 
+    /// Sets the option to create a new file, failing if it already exists.
+    ///
+    /// This is equivalent to `O_CREAT | O_EXCL` in POSIX terms.
+    ///
+    /// # Threading Note
+    ///
+    /// In traditional POSIX, O_EXCL provides atomicity to prevent race conditions
+    /// where two processes both see "file doesn't exist" and both try to create it.
+    /// In Hyperlight guests, code execution is **single-threaded by design**, so
+    /// the check-then-create sequence is inherently atomic - nothing can interleave
+    /// between the existence check and the file creation.
+    ///
+    /// If guest multi-threading is ever added, the `GuestFatFile` type is marked
+    /// `!Send + !Sync` which will cause compile errors, forcing a review of the
+    /// concurrency model before any unsafe sharing can occur.
+    ///
+    /// Only supported for FAT filesystems.
+    #[must_use]
+    pub const fn create_new(mut self, create_new: bool) -> Self {
+        self.create_new = create_new;
+        self
+    }
+
     /// Opens the file at the specified path with the configured options.
     ///
     /// If neither `read` nor `write` is set, defaults to `read(true)`.
@@ -169,9 +200,16 @@ impl OpenOptions {
     /// - [`FsError::NotAFile`] if the path refers to a directory
     /// - [`FsError::ReadOnly`] if write/create/truncate on a read-only mount
     /// - [`FsError::InvalidArgument`] if `truncate` is set without `write`
+    /// - [`FsError::AlreadyExists`] if `create_new` is set and file exists
     pub fn open(self, path: &str) -> Result<File, FsError> {
         // Validate: truncate requires write
         if self.truncate && !self.write {
+            return Err(FsError::InvalidArgument);
+        }
+
+        // Validate: create_new is mutually exclusive with create and truncate
+        // (create_new implies create semantics but fails if exists)
+        if self.create_new && (self.create || self.truncate) {
             return Err(FsError::InvalidArgument);
         }
 
@@ -182,7 +220,14 @@ impl OpenOptions {
             self.read
         };
 
-        open_with_options(path, read, self.write, self.create, self.truncate)
+        open_with_options(
+            path,
+            read,
+            self.write,
+            self.create,
+            self.create_new,
+            self.truncate,
+        )
     }
 }
 use super::vfs::MountBackend;
@@ -429,19 +474,19 @@ impl RoFile {
 
     /// Get the current position in the file.
     pub fn position(&self) -> Result<u64, FsError> {
-        let entry = fd::get_fd(self.fd)?;
+        let entry = fd::get_ro_fd(self.fd)?;
         Ok(entry.position)
     }
 
     /// Get the size of the file in bytes.
     pub fn size(&self) -> Result<u64, FsError> {
-        let entry = fd::get_fd(self.fd)?;
+        let entry = fd::get_ro_fd(self.fd)?;
         Ok(entry.size)
     }
 
     /// Get the remaining bytes from current position to end of file.
     pub fn remaining(&self) -> Result<u64, FsError> {
-        let entry = fd::get_fd(self.fd)?;
+        let entry = fd::get_ro_fd(self.fd)?;
         Ok(entry.size.saturating_sub(entry.position))
     }
 }
@@ -463,7 +508,7 @@ impl Read for RoFile {
             return Ok(0);
         }
 
-        let entry = fd::get_fd(self.fd)?;
+        let entry = fd::get_ro_fd(self.fd)?;
 
         // Calculate how many bytes we can read
         let remaining = entry.size.saturating_sub(entry.position) as usize;
@@ -496,7 +541,7 @@ impl Read for RoFile {
 
 impl Seek for RoFile {
     fn seek(&mut self, pos: SeekFrom) -> Result<u64, Self::Error> {
-        let entry = fd::get_fd(self.fd)?;
+        let entry = fd::get_ro_fd(self.fd)?;
 
         let new_pos: i64 = match pos {
             SeekFrom::Start(n) => n as i64,
@@ -566,17 +611,26 @@ fn resolve_path(path: &str) -> Result<ResolvedPath, FsError> {
 /// - [`FsError::NotFound`] if the path doesn't exist
 /// - [`FsError::NotAFile`] if the path refers to a directory
 pub fn open(path: &str) -> Result<File, FsError> {
-    open_with_options(path, true, false, false, false)
+    open_with_options(path, true, false, false, false, false)
 }
 
 /// Internal implementation for opening files with specific options.
 ///
 /// Use [`OpenOptions`] for the public API.
+///
+/// # Arguments
+///
+/// * `read` - Open for reading
+/// * `write` - Open for writing
+/// * `create` - Create file if it doesn't exist
+/// * `create_new` - Create file, fail if it already exists (O_EXCL)
+/// * `truncate` - Truncate file to zero length on open
 fn open_with_options(
     path: &str,
     read: bool,
     write: bool,
     create: bool,
+    create_new: bool,
     truncate: bool,
 ) -> Result<File, FsError> {
     match resolve_path(path)? {
@@ -594,7 +648,7 @@ fn open_with_options(
                 guest_address: inode.guest_address,
             };
 
-            let fd = fd::alloc_fd(open_file);
+            let fd = fd::alloc_ro_fd(open_file);
             Ok(File::ReadOnly(RoFile::from_fd(fd)))
         }
         ResolvedPath::Fat {
@@ -607,7 +661,14 @@ fn open_with_options(
             let mount = vfs.get_mount_mut(mount_idx).ok_or(FsError::NotFound)?;
 
             if let MountBackend::Fat(fat) = mount.backend_mut() {
-                let fat_file = fat.open(&relative_path, read, write, create, truncate)?;
+                // Handle create_new (O_EXCL) - must fail if file exists
+                // NOTE: In single-threaded guest, this check-then-create is atomic.
+                // See OpenOptions::create_new() docs for threading considerations.
+                let fat_file = if create_new {
+                    fat.create_new(&relative_path)?
+                } else {
+                    fat.open(&relative_path, read, write, create, truncate)?
+                };
                 Ok(File::Fat(fat_file))
             } else {
                 // Should never happen - resolve_path already confirmed it's Fat

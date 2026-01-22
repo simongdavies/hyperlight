@@ -17,6 +17,9 @@
 5. [Guest APIs](#guest-apis)
    - [Guest VFS Internals](#55-guest-vfs-internals)
 6. [C API Reference](#c-api-reference)
+   - [Unsupported Operations](#65-unsupported-operations)
+   - [POSIX Compliance Notes](#66-posix-compliance-notes)
+   - [Missing APIs](#67-missing-apis)
 7. [Mount Points and Namespace](#mount-points-and-namespace)
 8. [Data Serialization](#data-serialization)
 9. [Memory Layout](#memory-layout)
@@ -1207,6 +1210,71 @@ The following operations return `-2` (ENOTSUP):
 | chmod/chown | FAT has no Unix permissions |
 | mknod | No device files |
 | File locking (fcntl F_SETLK) | Not implemented |
+| dup() / dup2() | FAT file handles have mutable state (position, buffers) that cannot be shared across duplicated descriptors without reference counting |
+| openat() with real dirfd | Only `AT_FDCWD` is supported; passing an actual directory fd returns ENOTSUP |
+| mkdirat() with real dirfd | Only `AT_FDCWD` is supported |
+
+### 6.6 POSIX Compliance Notes
+
+HyperlightFS aims for POSIX-like semantics where practical. This section documents both compliance and intentional deviations.
+
+#### 6.6.1 Fully Compliant
+
+| Feature | Notes |
+|---------|-------|
+| O_RDONLY, O_WRONLY, O_RDWR | Standard access modes |
+| O_CREAT | Creates file if not exists |
+| O_EXCL | With O_CREAT, fails if file exists (atomic create-if-not-exists) |
+| O_TRUNC | Truncates file to zero length |
+| O_APPEND | Seeks to EOF before each write (POSIX-compliant) |
+| fcntl F_GETFL | Returns original open() flags including O_APPEND |
+| fcntl F_SETFL | Can modify O_APPEND flag (per POSIX, only O_APPEND/O_NONBLOCK/O_ASYNC are changeable) |
+| lseek SEEK_SET/CUR/END | All three modes supported |
+| write() error on RDONLY fd | Returns EBADF (fd not open for writing) |
+
+#### 6.6.2 Limitations
+
+| Feature | Behavior | POSIX Spec | Rationale |
+|---------|----------|------------|-----------|
+| O_EXCL without O_CREAT | Returns EINVAL | Undefined | Catches guest bugs early |
+| O_NONBLOCK | Ignored | Non-blocking I/O | No async I/O in guest VM |
+| O_SYNC | Ignored | Synchronous writes | FAT buffers writes; host flushes on close |
+| fcntl F_SETFL O_NONBLOCK | Accepted, ignored | Enable non-blocking | No async I/O support |
+| Global errno | Not implemented | Per-thread error | Return negative error codes instead |
+| AT_FDCWD only | openat/mkdirat | Full dirfd support | Would require tracking directory paths per fd |
+
+### 6.7 Missing APIs
+
+The following POSIX APIs are commonly used but not currently implemented. Future versions may add these.
+
+#### 6.7.1 High Priority (Commonly Used)
+
+| API | Purpose | Implementation Difficulty |
+|-----|---------|--------------------------|
+| `ftruncate(fd, len)` | Truncate open file to specified length | Medium - fatfs has `truncate()` |
+| `truncate(path, len)` | Truncate file by path | Easy - open + ftruncate + close |
+| `fsync(fd)` | Flush file data to storage | Easy - fatfs has `flush()` |
+| `pread(fd, buf, n, off)` | Read at offset without seeking | Easy - save pos, seek, read, restore |
+| `pwrite(fd, buf, n, off)` | Write at offset without seeking | Easy - save pos, seek, write, restore |
+
+#### 6.7.2 Medium Priority
+
+| API | Purpose | Notes |
+|-----|---------|-------|
+| `rewinddir(dirp)` | Reset directory stream to beginning | Easy - reset index |
+| `seekdir(dirp, pos)` / `telldir(dirp)` | Position in directory stream | Easy - expose index |
+| `fchdir(fd)` | Change directory by fd | Medium - track directory paths |
+
+#### 6.7.3 Low Priority (Unlikely to Add)
+
+| API | Purpose | Reason Not Implemented |
+|-----|---------|----------------------|
+| `link()` | Hard links | FAT doesn't support hard links |
+| `symlink()` / `readlink()` | Symbolic links | FAT doesn't support symlinks |
+| `chmod()` / `chown()` | Change permissions/owner | FAT has no Unix permissions |
+| `utime()` / `utimes()` | Set file timestamps | Low priority; fatfs supports timestamps |
+| `umask()` | Creation permission mask | No real permissions in FAT |
+| `flock()` / `lockf()` | File locking | Single-threaded guest makes this less critical |
 
 ---
 
@@ -1667,16 +1735,21 @@ The `fatfs` crate auto-selects the appropriate FAT variant based on volume size:
 
 ### 13.3 Implementation Limitations
 
-| Limitation | Status |
-|------------|--------|
-| Global errno | Not implemented (negative returns instead) |
-| File locking | Not implemented |
-| Async I/O | Not supported |
-| Memory-mapped files (guest mmap) | Not supported |
-| Sparse files | Not supported |
-| Extended attributes | Not supported |
-| Multi-sandbox FAT sharing | Not supported (exclusive lock) |
-| Read-only FAT mounts | Future enhancement (see §3.4) |
+| Limitation | Status | Notes |
+|------------|--------|-------|
+| Global errno | Not implemented | Negative return values indicate specific errors (see §6.4) |
+| File locking (flock/fcntl) | Not implemented | Single-threaded guest reduces need |
+| Async I/O | Not supported | Guest runs synchronously |
+| Memory-mapped files (guest mmap) | Not supported | Direct file access via read/write only |
+| Sparse files | Not supported | FAT doesn't support sparse files |
+| Extended attributes | Not supported | FAT doesn't support xattrs |
+| Multi-sandbox FAT sharing | Not supported | Exclusive lock per FAT image |
+| Read-only FAT mounts | Future enhancement | See §3.4 |
+| dup() / dup2() | Returns ENOTSUP | FAT handles have mutable state that can't be shared |
+| openat() with real dirfd | Returns ENOTSUP | Only AT_FDCWD is supported |
+| ftruncate() | Not implemented | Future enhancement (see §6.7.1) |
+| pread() / pwrite() | Not implemented | Future enhancement (see §6.7.1) |
+| fsync() | Not implemented | Future enhancement; close() flushes |
 
 ### 13.4 Resource Limits
 

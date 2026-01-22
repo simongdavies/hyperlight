@@ -41,7 +41,7 @@ mod filesystem;
 mod storage;
 mod time;
 
-pub(crate) use file::GuestFatFile;
+pub use file::GuestFatFile;
 pub(crate) use filesystem::GuestFat;
 pub(crate) use storage::RawMemoryStorage;
 pub(crate) use time::HyperlightTimeProvider;

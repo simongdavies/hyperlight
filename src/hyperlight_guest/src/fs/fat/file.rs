@@ -15,8 +15,25 @@ limitations under the License.
 */
 
 //! FAT file handle implementation.
+//!
+//! # Threading Model
+//!
+//! Hyperlight guests are **single-threaded by design**. This module assumes
+//! single-threaded execution for all file operations. The `GuestFatFile` type
+//! is explicitly marked `!Send + !Sync` via a `PhantomData<*const ()>` marker.
+//!
+//! If guest multi-threading is ever added in the future, attempting to share
+//! `GuestFatFile` across threads will cause **compile-time errors**, forcing
+//! a review of the concurrency model. This is intentional - file handles have
+//! mutable internal state (file position, buffers) that would require
+//! synchronization primitives (`Mutex`, `RwLock`) to be thread-safe.
+//!
+//! The single-threaded assumption allows for simpler, faster code without
+//! synchronization overhead, while the `!Send + !Sync` markers ensure we don't
+//! accidentally create unsafe conditions if threading is added later.
 
 use core::fmt;
+use core::marker::PhantomData;
 
 use fatfs::{Read, Seek, SeekFrom, Write};
 
@@ -27,6 +44,17 @@ use crate::fs::error::FsError;
 /// A file handle for a file on a FAT filesystem.
 ///
 /// Wraps a `fatfs::File` and tracks read/write permissions.
+///
+/// # Thread Safety
+///
+/// This type is intentionally `!Send + !Sync` because:
+/// 1. File handles have mutable internal state (position, buffers)
+/// 2. The FAT filesystem itself is not thread-safe
+/// 3. Guest code is single-threaded by design
+///
+/// The `PhantomData<*const ()>` marker ensures that if multi-threading is
+/// ever added to guests, code that tries to share file handles across threads
+/// will fail to compile, forcing explicit consideration of the threading model.
 pub struct GuestFatFile<'a> {
     /// The underlying fatfs file.
     file: FatFile<'a>,
@@ -34,15 +62,24 @@ pub struct GuestFatFile<'a> {
     can_read: bool,
     /// Whether this file is open for writing.
     can_write: bool,
+    /// Marker to make this type `!Send + !Sync`.
+    ///
+    /// Raw pointers are `!Send + !Sync` by default in Rust.
+    /// This ensures GuestFatFile cannot be sent across threads or shared
+    /// without explicit unsafe code - protecting against future threading mistakes.
+    _not_send_sync: PhantomData<*const ()>,
 }
 
 impl<'a> GuestFatFile<'a> {
     /// Create a new file handle.
+    ///
+    /// The returned handle is `!Send + !Sync` - see struct docs for rationale.
     pub(super) fn new(file: FatFile<'a>, can_read: bool, can_write: bool) -> Self {
         Self {
             file,
             can_read,
             can_write,
+            _not_send_sync: PhantomData,
         }
     }
 
@@ -129,6 +166,35 @@ impl<'a> GuestFatFile<'a> {
     /// - `FsError::IoError` if seeking to invalid position
     pub fn seek(&mut self, pos: SeekFrom) -> Result<u64, FsError> {
         self.file.seek(pos).map_err(map_fatfs_error)
+    }
+
+    /// Seek to a position in the file using raw values.
+    ///
+    /// This is a convenience method for C API callers who don't have access
+    /// to the fatfs::SeekFrom type.
+    ///
+    /// # Arguments
+    /// * `whence` - 0 for SEEK_SET, 1 for SEEK_CUR, 2 for SEEK_END
+    /// * `offset` - Offset in bytes (absolute for SET, relative for CUR/END)
+    ///
+    /// # Errors
+    ///
+    /// - `FsError::InvalidArgument` if whence is invalid
+    /// - `FsError::IoError` if seeking to invalid position
+    pub fn seek_raw(&mut self, whence: i32, offset: i64) -> Result<u64, FsError> {
+        let pos = match whence {
+            0 => {
+                // SEEK_SET: offset must be non-negative
+                if offset < 0 {
+                    return Err(FsError::InvalidArgument);
+                }
+                SeekFrom::Start(offset as u64)
+            }
+            1 => SeekFrom::Current(offset), // SEEK_CUR
+            2 => SeekFrom::End(offset),     // SEEK_END
+            _ => return Err(FsError::InvalidArgument),
+        };
+        self.seek(pos)
     }
 
     /// Flush any buffered data to the filesystem.

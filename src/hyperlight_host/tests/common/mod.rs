@@ -17,16 +17,13 @@ use hyperlight_host::func::HostFunction;
 #[cfg(gdb)]
 use hyperlight_host::sandbox::config::DebugInfo;
 use hyperlight_host::{GuestBinary, MultiUseSandbox, Result, UninitializedSandbox};
-use hyperlight_testing::{c_simple_guest_as_string, simple_guest_as_string};
+use hyperlight_testing::{c_simple_guest_as_string, simple_guest_as_string, simple_guest_by_env};
 
 /// Returns a rust/c simpleguest depending on environment variable GUEST.
 /// Uses rust guest by default. Run test with environment variable GUEST="c" to use the c version
 /// If a test is only applicable to rust, use `new_uninit_rust`` instead
 pub fn new_uninit() -> Result<UninitializedSandbox> {
-    UninitializedSandbox::new(
-        GuestBinary::FilePath(get_c_or_rust_simpleguest_path()),
-        None,
-    )
+    UninitializedSandbox::new(GuestBinary::FilePath(simple_guest_by_env()), None)
 }
 
 /// Use this instead of the `new_uninit` if you want your test to only run with the rust guest, not the c guest
@@ -62,7 +59,7 @@ pub fn new_uninit_c() -> Result<UninitializedSandbox> {
 pub fn get_simpleguest_sandboxes(
     writer: Option<HostFunction<i32, (String,)>>, // An optional writer to make sure correct info is passed to the host printer
 ) -> Vec<MultiUseSandbox> {
-    let elf_path = get_c_or_rust_simpleguest_path();
+    let elf_path = simple_guest_by_env();
 
     let sandboxes = [
         // in hypervisor elf
@@ -83,7 +80,7 @@ pub fn get_simpleguest_sandboxes(
 pub fn get_uninit_simpleguest_sandboxes(
     writer: Option<HostFunction<i32, (String,)>>, // An optional writer to make sure correct info is passed to the host printer
 ) -> Vec<UninitializedSandbox> {
-    let elf_path = get_c_or_rust_simpleguest_path();
+    let elf_path = simple_guest_by_env();
 
     let sandboxes = [
         // in hypervisor elf
@@ -99,14 +96,4 @@ pub fn get_uninit_simpleguest_sandboxes(
             sandbox
         })
         .collect()
-}
-
-// returns the the path of simpleguest binary. Picks rust/c version depending on environment variable GUEST (or rust by default if unset)
-pub(crate) fn get_c_or_rust_simpleguest_path() -> String {
-    let guest_type = std::env::var("GUEST").unwrap_or("rust".to_string());
-    match guest_type.as_str() {
-        "rust" => simple_guest_as_string().unwrap(),
-        "c" => c_simple_guest_as_string().unwrap(),
-        _ => panic!("Unknown guest type '{guest_type}', use either 'rust' or 'c'"),
-    }
 }

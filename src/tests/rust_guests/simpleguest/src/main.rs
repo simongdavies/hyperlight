@@ -345,44 +345,6 @@ fn chdir(path: String) -> bool {
     fs::chdir(&path).is_ok()
 }
 
-/// Writes to a file using the current working directory for relative paths.
-/// Returns true on success, false on error.
-#[guest_function("WriteFatFileRelative")]
-fn write_fat_file_relative(path: String, content: Vec<u8>) -> bool {
-    if !fs::is_initialized() {
-        return false;
-    }
-
-    let file_result = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&path);
-
-    match file_result {
-        Ok(mut file) => {
-            if file.write_all(&content).is_err() {
-                return false;
-            }
-            file.flush().is_ok()
-        }
-        Err(_) => false,
-    }
-}
-
-/// Reads from a file using the current working directory for relative paths.
-/// Returns empty vec on error.
-#[guest_function("ReadFatFileRelative")]
-fn read_fat_file_relative(path: String) -> Vec<u8> {
-    if !fs::is_initialized() {
-        return Vec::new();
-    }
-    match fs::open(&path) {
-        Ok(mut file) => file.read_to_vec().unwrap_or_default(),
-        Err(_) => Vec::new(),
-    }
-}
-
 #[guest_function("EchoDouble")]
 fn echo_double(value: f64) -> f64 {
     value

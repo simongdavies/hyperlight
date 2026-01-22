@@ -83,12 +83,17 @@ limitations under the License.
 
 mod error;
 mod fat;
-mod fd;
+pub(crate) mod fd;
 mod file;
 mod manifest;
 pub mod vfs;
 
 pub use error::FsError;
+pub use fat::GuestFatFile;
+pub use fd::{
+    FatFdEntry, FdEntry, OpenFile, alloc_fat_fd, alloc_ro_fd, free_fd, get_fat_fd, get_fd_entry,
+    get_ro_fd,
+};
 pub use file::{
     DirEntry, File, OpenOptions, Stat, chdir, cwd, mkdir, open, read_dir, rename, rmdir, stat,
     unlink,

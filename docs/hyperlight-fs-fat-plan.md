@@ -1004,7 +1004,7 @@ impl UninitializedSandbox {
 - `WriteFatFile`, `ReadFatFile`, `DeleteFatFile`
 - `MkdirFat`, `RmdirFat`, `ListDirFat`
 - `RenameFat`, `StatFatSize`, `ExistsFat`
-- `GetCwd`, `Chdir`, `WriteFatFileRelative`, `ReadFatFileRelative`
+- `GetCwd`, `Chdir`
 
 **Acceptance criteria:**
 - [x] All 12 integration tests pass

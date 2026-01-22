@@ -11,6 +11,10 @@
 #define GUEST_STACK_SIZE (65536) // default stack size
 #define MAX_BUFFER_SIZE (1024)
 
+// Buffer sizes for FS operations
+#define FS_DIR_BUFFER_SIZE (4096)   // Buffer for directory listing results
+#define FS_PATH_BUFFER_SIZE (256)   // Buffer for path strings (CWD, etc.)
+
 static char big_array[1024 * 1024] = {0};
 
 const char *echo(const char *str) { return str; }
@@ -466,6 +470,866 @@ hl_Vec *read_file(const hl_FunctionCall *params) {
     return hl_flatbuffer_result_from_Bytes(buffer, (size_t)bytes_read);
 }
 
+// =============================================================================
+// FAT Filesystem Functions (for integration tests)
+// =============================================================================
+
+// Writes content to a file on a FAT mount.
+// Returns 1 on success, 0 on error.
+hl_Vec *write_fat_file(const hl_FunctionCall *params) {
+    const char *path = params->parameters[0].value.String;
+    hl_Vec content = params->parameters[1].value.VecBytes;
+    
+    if (!hl_fs_initialized()) {
+        return hl_flatbuffer_result_from_Bool(false);
+    }
+    
+    // Open file for writing, create if doesn't exist, truncate
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC);
+    if (fd < 0) {
+        return hl_flatbuffer_result_from_Bool(false);
+    }
+    
+    // Write content
+    int64_t written = write(fd, content.data, content.len);
+    close(fd);
+    
+    return hl_flatbuffer_result_from_Bool(written == (int64_t)content.len);
+}
+
+// Reads a file from a FAT mount and returns its contents.
+// Returns empty vec on error.
+hl_Vec *read_fat_file(const hl_FunctionCall *params) {
+    const char *path = params->parameters[0].value.String;
+    
+    if (!hl_fs_initialized()) {
+        return hl_flatbuffer_result_from_Bytes(NULL, 0);
+    }
+    
+    // Open file for reading
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        return hl_flatbuffer_result_from_Bytes(NULL, 0);
+    }
+    
+    // Get file size via lseek
+    int64_t file_size = lseek(fd, 0, SEEK_END);
+    if (file_size < 0) {
+        close(fd);
+        return hl_flatbuffer_result_from_Bytes(NULL, 0);
+    }
+    
+    // Seek back to start
+    if (lseek(fd, 0, SEEK_SET) < 0) {
+        close(fd);
+        return hl_flatbuffer_result_from_Bytes(NULL, 0);
+    }
+    
+    // Allocate buffer for file contents
+    uint8_t *buffer = malloc((size_t)file_size);
+    if (!buffer) {
+        close(fd);
+        return hl_flatbuffer_result_from_Bytes(NULL, 0);
+    }
+    
+    // Read entire file
+    int64_t bytes_read = read(fd, buffer, (size_t)file_size);
+    close(fd);
+    
+    if (bytes_read < 0) {
+        free(buffer);
+        return hl_flatbuffer_result_from_Bytes(NULL, 0);
+    }
+    
+    return hl_flatbuffer_result_from_Bytes(buffer, (size_t)bytes_read);
+}
+
+// Deletes a file from a FAT mount.
+// Returns 1 on success, 0 on error.
+int delete_fat_file(const char *path) {
+    if (!hl_fs_initialized()) {
+        return 0;
+    }
+    return unlink(path) == 0 ? 1 : 0;
+}
+
+// Creates a directory on a FAT mount.
+// Returns 1 on success, 0 on error.
+int mkdir_fat(const char *path) {
+    if (!hl_fs_initialized()) {
+        return 0;
+    }
+    return mkdir(path, 0755) == 0 ? 1 : 0;
+}
+
+// Removes an empty directory from a FAT mount.
+// Returns 1 on success, 0 on error.
+int rmdir_fat(const char *path) {
+    if (!hl_fs_initialized()) {
+        return 0;
+    }
+    return rmdir(path) == 0 ? 1 : 0;
+}
+
+// Lists directory contents on a FAT mount.
+// Returns entry names as a newline-separated string.
+const char *list_dir_fat(const char *path) {
+    static char dir_buf[FS_DIR_BUFFER_SIZE];
+    if (!hl_fs_initialized()) {
+        return "";
+    }
+    int64_t result = hl_fs_readdir(path, dir_buf, sizeof(dir_buf));
+    if (result < 0) {
+        return "";
+    }
+    return dir_buf;
+}
+
+// Renames a file or directory on a FAT mount.
+// Returns 1 on success, 0 on error.
+int rename_fat(const char *oldpath, const char *newpath) {
+    if (!hl_fs_initialized()) {
+        return 0;
+    }
+    return rename(oldpath, newpath) == 0 ? 1 : 0;
+}
+
+// Gets the current working directory.
+// Returns pointer to static buffer with CWD, or empty string on error.
+const char *get_cwd(void) {
+    static char cwd_buffer[FS_PATH_BUFFER_SIZE];
+    if (!hl_fs_initialized()) {
+        return "";
+    }
+    if (getcwd(cwd_buffer, sizeof(cwd_buffer)) == NULL) {
+        return "";
+    }
+    return cwd_buffer;
+}
+
+// Changes the current working directory.
+// Returns 1 on success, 0 on error.
+int do_chdir(const char *path) {
+    if (!hl_fs_initialized()) {
+        return 0;
+    }
+    return chdir(path) == 0 ? 1 : 0;
+}
+
+
+
+// Gets file size on FAT mount.
+// Returns -1 on error, otherwise the file size.
+int64_t stat_fat_size(const char *path) {
+    if (!hl_fs_initialized()) {
+        return -1;
+    }
+    hl_Stat st;
+    if (stat(path, &st) < 0) {
+        return -1;
+    }
+    return (int64_t)st.size;
+}
+
+// Checks if a path exists on FAT mount.
+// Returns 1 for file, 2 for directory, 0 for not found, -1 for error.
+int exists_fat(const char *path) {
+    if (!hl_fs_initialized()) {
+        return -1;
+    }
+    hl_Stat st;
+    if (stat(path, &st) < 0) {
+        return 0;  // Not found
+    }
+    return st.is_dir ? 2 : 1;
+}
+
+// ============================================================================
+// New C API test functions (opendir/readdir/closedir, access, openat, fcntl)
+// ============================================================================
+
+// Test opendir/readdir/closedir - returns entry count or -1 on error
+int test_opendir_readdir(const char *path) {
+    if (!hl_fs_initialized()) {
+        return -1;
+    }
+
+    hl_hl_DIR *dir = opendir(path);
+    if (dir == NULL) {
+        return -1;
+    }
+
+    int count = 0;
+    hl_hl_dirent_t *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        count++;
+    }
+
+    if (closedir(dir) != 0) {
+        return -1;
+    }
+
+    return count;
+}
+
+// Test opendir and list entries - returns names as newline-separated string
+const char *test_opendir_list(const char *path) {
+    static char result[FS_DIR_BUFFER_SIZE];
+    result[0] = '\0';
+
+    if (!hl_fs_initialized()) {
+        return "";
+    }
+
+    hl_hl_DIR *dir = opendir(path);
+    if (dir == NULL) {
+        return "";
+    }
+
+    char *ptr = result;
+    char *end = result + sizeof(result) - 2;
+
+    hl_hl_dirent_t *entry;
+    while ((entry = readdir(dir)) != NULL && ptr < end) {
+        // Append "D:" or "F:" prefix based on type
+        if (ptr < end) {
+            *ptr++ = (entry->d_type == hl_HL_DT_DIR) ? 'D' : 'F';
+        }
+        if (ptr < end) {
+            *ptr++ = ':';
+        }
+        // Copy name
+        const char *name = entry->d_name;
+        while (*name && ptr < end) {
+            *ptr++ = *name++;
+        }
+        if (ptr < end) {
+            *ptr++ = '\n';
+        }
+    }
+    *ptr = '\0';
+
+    closedir(dir);
+    return result;
+}
+
+// Test access() function
+// Returns result of access(path, mode) 
+int test_access(const char *path, int mode) {
+    if (!hl_fs_initialized()) {
+        return hl_HL_ENOTSUP;
+    }
+    return access(path, mode);
+}
+
+// Test openat with AT_FDCWD - should work like open()
+int test_openat_cwd(const char *path, int flags) {
+    if (!hl_fs_initialized()) {
+        return hl_HL_ENOTSUP;
+    }
+    int fd = openat(hl_HL_AT_FDCWD, path, flags);
+    if (fd >= 0) {
+        close(fd);
+        return 1;  // Success
+    }
+    return fd;  // Error code
+}
+
+// Test fcntl F_GETFL/F_SETFL
+int test_fcntl_flags(const char *path) {
+    if (!hl_fs_initialized()) {
+        return -1;
+    }
+
+    // Open a file
+    int fd = open(path, hl_HL_O_RDONLY);
+    if (fd < 0) {
+        return -1;
+    }
+
+    // Get flags
+    int flags = fcntl(fd, hl_HL_F_GETFL, 0);
+    if (flags < 0) {
+        close(fd);
+        return -2;
+    }
+
+    // Set flags (should succeed even if no-op)
+    int result = fcntl(fd, hl_HL_F_SETFL, flags);
+    close(fd);
+
+    if (result < 0) {
+        return -3;
+    }
+
+    return flags;  // Return original flags
+}
+
+// Test dup (should return ENOTSUP for FAT files)
+// Returns true if dup correctly returns ENOTSUP, false otherwise.
+bool test_dup(const char *path) {
+    if (!hl_fs_initialized()) {
+        return false;  // Can't test without FS
+    }
+
+    int fd = open(path, hl_HL_O_RDONLY);
+    if (fd < 0) {
+        return false;  // Can't open file to test
+    }
+
+    int result = dup(fd);
+    close(fd);
+
+    // dup should return ENOTSUP for FAT files (until we implement Rc<RefCell<>>)
+    return result == hl_HL_ENOTSUP;
+}
+
+// Test dup2 (should return ENOTSUP for FAT files)
+// Returns true if dup2 correctly returns ENOTSUP, false otherwise.
+bool test_dup2(const char *path) {
+    if (!hl_fs_initialized()) {
+        return false;  // Can't test without FS
+    }
+
+    int fd = open(path, hl_HL_O_RDONLY);
+    if (fd < 0) {
+        return false;  // Can't open file to test
+    }
+
+    // Use fd 100 as target - arbitrary high value unlikely to conflict
+    const int target_fd = 100;
+    int result = dup2(fd, target_fd);
+    close(fd);
+
+    // dup2 should return ENOTSUP for FAT files (until we implement Rc<RefCell<>>)
+    return result == hl_HL_ENOTSUP;
+}
+
+// Test mkdirat with AT_FDCWD
+int test_mkdirat_cwd(const char *path) {
+    if (!hl_fs_initialized()) {
+        return -1;
+    }
+
+    // Create directory using mkdirat with AT_FDCWD
+    int result = mkdirat(hl_HL_AT_FDCWD, path, 0755);
+    if (result < 0) {
+        return result;  // Error code
+    }
+
+    // Verify it exists
+    hl_Stat st;
+    if (stat(path, &st) < 0 || !st.is_dir) {
+        // Should never happen: mkdir succeeded but stat fails or not a dir
+        return -2;
+    }
+
+    // Clean up
+    rmdir(path);
+    return 1;  // Success
+}
+
+HYPERLIGHT_WRAP_FUNCTION(test_opendir_readdir, Int, 1, String)
+HYPERLIGHT_WRAP_FUNCTION(test_opendir_list, String, 1, String)
+HYPERLIGHT_WRAP_FUNCTION(test_access, Int, 2, String, Int)
+HYPERLIGHT_WRAP_FUNCTION(test_openat_cwd, Int, 2, String, Int)
+HYPERLIGHT_WRAP_FUNCTION(test_fcntl_flags, Int, 1, String)
+HYPERLIGHT_WRAP_FUNCTION(test_dup, Bool, 1, String)
+HYPERLIGHT_WRAP_FUNCTION(test_dup2, Bool, 1, String)
+HYPERLIGHT_WRAP_FUNCTION(test_mkdirat_cwd, Int, 1, String)
+
+// =============================================================================
+// Open Flag Tests - Testing O_TRUNC, O_EXCL, O_APPEND, O_CREAT
+// =============================================================================
+
+// Test O_TRUNC: Opening an existing file with O_TRUNC should truncate it.
+// Writes "ORIGINAL", then opens with O_TRUNC and writes "NEW", verifies only "NEW" remains.
+// Returns 1 on success, negative error code on failure.
+int test_o_trunc(const char *path) {
+    if (!hl_fs_initialized()) {
+        return -1;
+    }
+
+    // First, create a file with some content
+    int fd = open(path, hl_HL_O_WRONLY | hl_HL_O_CREAT | hl_HL_O_TRUNC);
+    if (fd < 0) {
+        return -2;
+    }
+    const char *original = "ORIGINAL_LONG_CONTENT";
+    write(fd, original, strlen(original));
+    close(fd);
+
+    // Now open with O_TRUNC and write shorter content
+    fd = open(path, hl_HL_O_WRONLY | hl_HL_O_TRUNC);
+    if (fd < 0) {
+        return -3;
+    }
+    const char *new_content = "NEW";
+    write(fd, new_content, strlen(new_content));
+    close(fd);
+
+    // Read back and verify only "NEW" is there (not "NEWGINAL_LONG_CONTENT")
+    fd = open(path, hl_HL_O_RDONLY);
+    if (fd < 0) {
+        return -4;
+    }
+    char buf[64] = {0};
+    int64_t bytes_read = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+
+    if (bytes_read != 3) {
+        return -5;  // Wrong length - O_TRUNC didn't work
+    }
+    if (strcmp(buf, "NEW") != 0) {
+        return -6;  // Wrong content
+    }
+
+    // Clean up
+    unlink(path);
+    return 1;  // Success
+}
+
+// Test O_EXCL: Opening with O_CREAT | O_EXCL should fail if file exists.
+// Returns 1 on success (correct behavior), negative error code on failure.
+int test_o_excl(const char *path) {
+    if (!hl_fs_initialized()) {
+        return -1;
+    }
+
+    // First, create a file
+    int fd = open(path, hl_HL_O_WRONLY | hl_HL_O_CREAT | hl_HL_O_TRUNC);
+    if (fd < 0) {
+        return -2;
+    }
+    write(fd, "EXISTS", 6);
+    close(fd);
+
+    // Now try to open with O_CREAT | O_EXCL - should FAIL because file exists
+    fd = open(path, hl_HL_O_WRONLY | hl_HL_O_CREAT | hl_HL_O_EXCL);
+    if (fd >= 0) {
+        // Should have failed!
+        close(fd);
+        unlink(path);
+        return -3;  // O_EXCL didn't reject existing file
+    }
+
+    // Good - it failed as expected. Now verify the original content is untouched.
+    fd = open(path, hl_HL_O_RDONLY);
+    if (fd < 0) {
+        return -4;
+    }
+    char buf[32] = {0};
+    read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+
+    if (strcmp(buf, "EXISTS") != 0) {
+        return -5;  // File was somehow modified
+    }
+
+    // Clean up
+    unlink(path);
+    return 1;  // Success - O_EXCL correctly rejected existing file
+}
+
+// Test O_EXCL with new file: O_CREAT | O_EXCL should succeed for new file.
+// Returns 1 on success, negative error code on failure.
+int test_o_excl_new_file(const char *path) {
+    if (!hl_fs_initialized()) {
+        return -1;
+    }
+
+    // Make sure file doesn't exist first
+    unlink(path);
+
+    // Open with O_CREAT | O_EXCL - should succeed for new file
+    int fd = open(path, hl_HL_O_WRONLY | hl_HL_O_CREAT | hl_HL_O_EXCL);
+    if (fd < 0) {
+        return -2;  // Should have succeeded for new file
+    }
+
+    write(fd, "CREATED", 7);
+    close(fd);
+
+    // Verify content
+    fd = open(path, hl_HL_O_RDONLY);
+    if (fd < 0) {
+        return -3;
+    }
+    char buf[32] = {0};
+    read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+
+    if (strcmp(buf, "CREATED") != 0) {
+        unlink(path);
+        return -4;
+    }
+
+    // Clean up
+    unlink(path);
+    return 1;  // Success
+}
+
+// Test O_EXCL without O_CREAT: Should return EINVAL (undefined per POSIX, we reject it).
+// Returns 1 on success (EINVAL returned), negative error code on failure.
+int test_o_excl_no_creat(const char *path) {
+    if (!hl_fs_initialized()) {
+        return -1;
+    }
+
+    // First create a file so we have something to try opening
+    int fd = open(path, hl_HL_O_WRONLY | hl_HL_O_CREAT | hl_HL_O_TRUNC);
+    if (fd < 0) {
+        return -2;
+    }
+    write(fd, "TEST", 4);
+    close(fd);
+
+    // Now try to open with O_EXCL but WITHOUT O_CREAT - should fail with EINVAL
+    fd = open(path, hl_HL_O_WRONLY | hl_HL_O_EXCL);
+    if (fd >= 0) {
+        // Should have failed!
+        close(fd);
+        unlink(path);
+        return -3;  // O_EXCL without O_CREAT should have been rejected
+    }
+
+    // Verify we got EINVAL (or at least some error)
+    // The fd should be negative error code
+    if (fd != hl_HL_EINVAL) {
+        unlink(path);
+        return -4;  // Wrong error code
+    }
+
+    // Clean up
+    unlink(path);
+    return 1;  // Success - O_EXCL without O_CREAT correctly returned EINVAL
+}
+
+// Test O_APPEND: Writes should always go to end of file.
+// Returns 1 on success, negative error code on failure.
+int test_o_append(const char *path) {
+    if (!hl_fs_initialized()) {
+        return -1;
+    }
+
+    // Create a file with initial content
+    int fd = open(path, hl_HL_O_WRONLY | hl_HL_O_CREAT | hl_HL_O_TRUNC);
+    if (fd < 0) {
+        return -2;
+    }
+    write(fd, "FIRST", 5);
+    close(fd);
+
+    // Open with O_APPEND and write more
+    fd = open(path, hl_HL_O_WRONLY | hl_HL_O_APPEND);
+    if (fd < 0) {
+        return -3;
+    }
+    write(fd, "SECOND", 6);
+    close(fd);
+
+    // Read back and verify both parts are there
+    fd = open(path, hl_HL_O_RDONLY);
+    if (fd < 0) {
+        return -4;
+    }
+    char buf[64] = {0};
+    int64_t bytes_read = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+
+    if (bytes_read != 11) {
+        unlink(path);
+        return -5;  // Wrong length
+    }
+    if (strcmp(buf, "FIRSTSECOND") != 0) {
+        unlink(path);
+        return -6;  // Content wrong - append didn't work
+    }
+
+    // Clean up
+    unlink(path);
+    return 1;  // Success
+}
+
+// Test O_CREAT: Create file if it doesn't exist.
+// Returns 1 on success, negative error code on failure.
+int test_o_creat(const char *path) {
+    if (!hl_fs_initialized()) {
+        return -1;
+    }
+
+    // Make sure file doesn't exist
+    unlink(path);
+
+    // Verify file doesn't exist
+    hl_Stat st;
+    if (stat(path, &st) >= 0) {
+        return -2;  // File shouldn't exist yet
+    }
+
+    // Open with O_CREAT - should create it
+    int fd = open(path, hl_HL_O_WRONLY | hl_HL_O_CREAT);
+    if (fd < 0) {
+        return -3;
+    }
+    write(fd, "CREATED_BY_O_CREAT", 18);
+    close(fd);
+
+    // Verify file now exists and has content
+    if (stat(path, &st) < 0) {
+        return -4;  // File should exist now
+    }
+
+    fd = open(path, hl_HL_O_RDONLY);
+    if (fd < 0) {
+        return -5;
+    }
+    char buf[64] = {0};
+    read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+
+    if (strcmp(buf, "CREATED_BY_O_CREAT") != 0) {
+        unlink(path);
+        return -6;
+    }
+
+    // Clean up
+    unlink(path);
+    return 1;  // Success
+}
+
+// Test O_RDWR: Can both read and write to file.
+// Returns 1 on success, negative error code on failure.
+int test_o_rdwr(const char *path) {
+    if (!hl_fs_initialized()) {
+        return -1;
+    }
+
+    // Create file with O_RDWR | O_CREAT | O_TRUNC
+    int fd = open(path, hl_HL_O_RDWR | hl_HL_O_CREAT | hl_HL_O_TRUNC);
+    if (fd < 0) {
+        return -2;
+    }
+
+    // Write some data
+    write(fd, "RDWR_TEST", 9);
+
+    // Seek back to beginning
+    lseek(fd, 0, hl_HL_SEEK_SET);
+
+    // Read it back using the same fd
+    char buf[32] = {0};
+    int64_t bytes_read = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+
+    if (bytes_read != 9) {
+        unlink(path);
+        return -3;
+    }
+    if (strcmp(buf, "RDWR_TEST") != 0) {
+        unlink(path);
+        return -4;
+    }
+
+    // Clean up
+    unlink(path);
+    return 1;  // Success
+}
+
+// Test O_APPEND after lseek: Writes should still go to end even after lseek.
+// This verifies POSIX O_APPEND semantics where each write seeks to EOF first.
+// Returns 1 on success, negative error code on failure.
+int test_o_append_after_lseek(const char *path) {
+    if (!hl_fs_initialized()) {
+        return -1;
+    }
+
+    // Create file with initial content
+    int fd = open(path, hl_HL_O_WRONLY | hl_HL_O_CREAT | hl_HL_O_TRUNC);
+    if (fd < 0) {
+        return -2;
+    }
+    write(fd, "FIRST", 5);
+    close(fd);
+
+    // Open with O_APPEND
+    fd = open(path, hl_HL_O_WRONLY | hl_HL_O_APPEND);
+    if (fd < 0) {
+        return -3;
+    }
+
+    // Seek to beginning - this should be ignored for writes due to O_APPEND
+    lseek(fd, 0, hl_HL_SEEK_SET);
+
+    // Write more data - should go to END, not position 0
+    write(fd, "SECOND", 6);
+    close(fd);
+
+    // Read back and verify content
+    fd = open(path, hl_HL_O_RDONLY);
+    if (fd < 0) {
+        return -4;
+    }
+    char buf[64] = {0};
+    int64_t bytes_read = read(fd, (uint8_t*)buf, sizeof(buf) - 1);
+    close(fd);
+
+    if (bytes_read != 11) {
+        unlink(path);
+        return -5;  // Wrong length - O_APPEND might have been ignored
+    }
+    if (strcmp(buf, "FIRSTSECOND") != 0) {
+        unlink(path);
+        return -6;  // Content wrong - write went to position 0 instead of end
+    }
+
+    unlink(path);
+    return 1;  // Success - O_APPEND works correctly after lseek
+}
+
+// Test fcntl F_GETFL returns accurate flags including O_APPEND.
+// Returns 1 on success, negative error code on failure.
+int test_fcntl_getfl_accuracy(const char *path) {
+    if (!hl_fs_initialized()) {
+        return -1;
+    }
+
+    // Create file
+    int fd = open(path, hl_HL_O_RDWR | hl_HL_O_CREAT | hl_HL_O_TRUNC);
+    if (fd < 0) {
+        return -2;
+    }
+    close(fd);
+
+    // Open with O_WRONLY | O_APPEND
+    fd = open(path, hl_HL_O_WRONLY | hl_HL_O_APPEND);
+    if (fd < 0) {
+        return -3;
+    }
+
+    // Get flags with fcntl
+    int flags = hl_fs_fcntl(fd, hl_HL_F_GETFL, 0);
+    close(fd);
+
+    // Verify O_WRONLY is set
+    if ((flags & 0x3) != hl_HL_O_WRONLY) {
+        unlink(path);
+        return -4;  // Access mode wrong
+    }
+
+    // Verify O_APPEND is set
+    if ((flags & hl_HL_O_APPEND) == 0) {
+        unlink(path);
+        return -5;  // O_APPEND not returned by F_GETFL
+    }
+
+    unlink(path);
+    return 1;  // Success
+}
+
+// Test fcntl F_SETFL can enable O_APPEND on a file not opened with it.
+// Returns 1 on success, negative error code on failure.
+int test_fcntl_setfl_append(const char *path) {
+    if (!hl_fs_initialized()) {
+        return -1;
+    }
+
+    // Create file with initial content
+    int fd = open(path, hl_HL_O_WRONLY | hl_HL_O_CREAT | hl_HL_O_TRUNC);
+    if (fd < 0) {
+        return -2;
+    }
+    write(fd, "FIRST", 5);
+    close(fd);
+
+    // Open WITHOUT O_APPEND
+    fd = open(path, hl_HL_O_WRONLY);
+    if (fd < 0) {
+        return -3;
+    }
+
+    // Use F_SETFL to enable O_APPEND
+    hl_fs_fcntl(fd, hl_HL_F_SETFL, hl_HL_O_APPEND);
+
+    // Verify F_GETFL now shows O_APPEND
+    int flags = hl_fs_fcntl(fd, hl_HL_F_GETFL, 0);
+    if ((flags & hl_HL_O_APPEND) == 0) {
+        close(fd);
+        unlink(path);
+        return -4;  // F_SETFL didn't enable O_APPEND
+    }
+
+    // Write - should go to end due to dynamically enabled O_APPEND
+    write(fd, "SECOND", 6);
+    close(fd);
+
+    // Read back and verify
+    fd = open(path, hl_HL_O_RDONLY);
+    if (fd < 0) {
+        return -5;
+    }
+    char buf[64] = {0};
+    read(fd, (uint8_t*)buf, sizeof(buf) - 1);
+    close(fd);
+
+    if (strcmp(buf, "FIRSTSECOND") != 0) {
+        unlink(path);
+        return -6;  // F_SETFL O_APPEND didn't work
+    }
+
+    unlink(path);
+    return 1;  // Success
+}
+
+// Test openat with real directory fd returns ENOTSUP.
+// Returns 1 on success (ENOTSUP returned), negative error code on failure.
+int test_openat_real_dirfd(const char *path) {
+    if (!hl_fs_initialized()) {
+        return -1;
+    }
+
+    // First create a file to open
+    int fd = open(path, hl_HL_O_WRONLY | hl_HL_O_CREAT | hl_HL_O_TRUNC);
+    if (fd < 0) {
+        return -2;
+    }
+    close(fd);
+
+    // Try to use the fd (which is a file, not directory) as dirfd
+    // This should return ENOTSUP since we only support AT_FDCWD
+    int result = hl_fs_openat(fd, "somefile.txt", hl_HL_O_RDONLY);
+
+    unlink(path);
+
+    // We expect ENOTSUP (-2) because non-AT_FDCWD dirfd is not supported
+    if (result == -2) {  // HL_ENOTSUP
+        return 1;  // Success - correctly returned ENOTSUP
+    }
+    return -3;  // Wrong error or unexpected success
+}
+
+HYPERLIGHT_WRAP_FUNCTION(test_o_trunc, Int, 1, String)
+HYPERLIGHT_WRAP_FUNCTION(test_o_excl, Int, 1, String)
+HYPERLIGHT_WRAP_FUNCTION(test_o_excl_new_file, Int, 1, String)
+HYPERLIGHT_WRAP_FUNCTION(test_o_excl_no_creat, Int, 1, String)
+HYPERLIGHT_WRAP_FUNCTION(test_o_append, Int, 1, String)
+HYPERLIGHT_WRAP_FUNCTION(test_o_creat, Int, 1, String)
+HYPERLIGHT_WRAP_FUNCTION(test_o_rdwr, Int, 1, String)
+HYPERLIGHT_WRAP_FUNCTION(test_o_append_after_lseek, Int, 1, String)
+HYPERLIGHT_WRAP_FUNCTION(test_fcntl_getfl_accuracy, Int, 1, String)
+HYPERLIGHT_WRAP_FUNCTION(test_fcntl_setfl_append, Int, 1, String)
+HYPERLIGHT_WRAP_FUNCTION(test_openat_real_dirfd, Int, 1, String)
+
+HYPERLIGHT_WRAP_FUNCTION(delete_fat_file, Bool, 1, String)
+HYPERLIGHT_WRAP_FUNCTION(mkdir_fat, Bool, 1, String)
+HYPERLIGHT_WRAP_FUNCTION(rmdir_fat, Bool, 1, String)
+HYPERLIGHT_WRAP_FUNCTION(list_dir_fat, String, 1, String)
+HYPERLIGHT_WRAP_FUNCTION(rename_fat, Bool, 2, String, String)
+HYPERLIGHT_WRAP_FUNCTION(get_cwd, String, 0)
+HYPERLIGHT_WRAP_FUNCTION(do_chdir, Bool, 1, String)
+HYPERLIGHT_WRAP_FUNCTION(stat_fat_size, Long, 1, String)
+HYPERLIGHT_WRAP_FUNCTION(exists_fat, Int, 1, String)
+
 HYPERLIGHT_WRAP_FUNCTION(is_fs_initialized, Int, 0)
 HYPERLIGHT_WRAP_FUNCTION(guest_fn_checks_if_host_returns_float_value, Float, 2, Float, Float)
 HYPERLIGHT_WRAP_FUNCTION(guest_fn_checks_if_host_returns_double_value, Double, 2, Double, Double)
@@ -548,6 +1412,41 @@ void hyperlight_main(void)
     HYPERLIGHT_REGISTER_FUNCTION("IsFsInitialized", is_fs_initialized);
     hl_register_function_definition("ReadFile", read_file, 1, (hl_ParameterType[]){hl_ParameterType_String}, hl_ReturnType_VecBytes);
     hl_register_function_definition("RandomReadChunks", random_read_chunks, 1, (hl_ParameterType[]){hl_ParameterType_String}, hl_ReturnType_VecBytes);
+    // FAT filesystem functions
+    hl_register_function_definition("WriteFatFile", write_fat_file, 2, (hl_ParameterType[]){hl_ParameterType_String, hl_ParameterType_VecBytes}, hl_ReturnType_Bool);
+    hl_register_function_definition("ReadFatFile", read_fat_file, 1, (hl_ParameterType[]){hl_ParameterType_String}, hl_ReturnType_VecBytes);
+    HYPERLIGHT_REGISTER_FUNCTION("DeleteFatFile", delete_fat_file);
+    HYPERLIGHT_REGISTER_FUNCTION("MkdirFat", mkdir_fat);
+    HYPERLIGHT_REGISTER_FUNCTION("RmdirFat", rmdir_fat);
+    HYPERLIGHT_REGISTER_FUNCTION("ListDirFat", list_dir_fat);
+    HYPERLIGHT_REGISTER_FUNCTION("RenameFat", rename_fat);
+    HYPERLIGHT_REGISTER_FUNCTION("StatFatSize", stat_fat_size);
+    HYPERLIGHT_REGISTER_FUNCTION("ExistsFat", exists_fat);
+    // CWD functions
+    HYPERLIGHT_REGISTER_FUNCTION("GetCwd", get_cwd);
+    HYPERLIGHT_REGISTER_FUNCTION("Chdir", do_chdir);
+    // New C API test functions
+    HYPERLIGHT_REGISTER_FUNCTION("TestOpendirReaddir", test_opendir_readdir);
+    HYPERLIGHT_REGISTER_FUNCTION("TestOpendirList", test_opendir_list);
+    HYPERLIGHT_REGISTER_FUNCTION("TestAccess", test_access);
+    HYPERLIGHT_REGISTER_FUNCTION("TestOpenatCwd", test_openat_cwd);
+    HYPERLIGHT_REGISTER_FUNCTION("TestFcntlFlags", test_fcntl_flags);
+    HYPERLIGHT_REGISTER_FUNCTION("TestDup", test_dup);
+    HYPERLIGHT_REGISTER_FUNCTION("TestDup2", test_dup2);
+    HYPERLIGHT_REGISTER_FUNCTION("TestMkdiratCwd", test_mkdirat_cwd);
+    // Open flag tests
+    HYPERLIGHT_REGISTER_FUNCTION("TestOTrunc", test_o_trunc);
+    HYPERLIGHT_REGISTER_FUNCTION("TestOExcl", test_o_excl);
+    HYPERLIGHT_REGISTER_FUNCTION("TestOExclNewFile", test_o_excl_new_file);
+    HYPERLIGHT_REGISTER_FUNCTION("TestOExclNoCreat", test_o_excl_no_creat);
+    HYPERLIGHT_REGISTER_FUNCTION("TestOAppend", test_o_append);
+    HYPERLIGHT_REGISTER_FUNCTION("TestOCreat", test_o_creat);
+    HYPERLIGHT_REGISTER_FUNCTION("TestORdwr", test_o_rdwr);
+    // POSIX compliance tests
+    HYPERLIGHT_REGISTER_FUNCTION("TestOAppendAfterLseek", test_o_append_after_lseek);
+    HYPERLIGHT_REGISTER_FUNCTION("TestFcntlGetflAccuracy", test_fcntl_getfl_accuracy);
+    HYPERLIGHT_REGISTER_FUNCTION("TestFcntlSetflAppend", test_fcntl_setfl_append);
+    HYPERLIGHT_REGISTER_FUNCTION("TestOpenatRealDirfd", test_openat_real_dirfd);
 }
 
 // This dispatch function is only used when the host dispatches a guest function

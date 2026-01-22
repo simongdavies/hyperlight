@@ -152,6 +152,10 @@ impl GuestFat {
 
     /// Create a new file, failing if it already exists.
     ///
+    /// This implements O_CREAT | O_EXCL semantics - atomic "create if not exists".
+    /// In the single-threaded guest environment, checking existence then creating
+    /// is inherently atomic.
+    ///
     /// # Errors
     ///
     /// - `FsError::AlreadyExists` if file already exists
@@ -159,8 +163,13 @@ impl GuestFat {
     pub fn create_new(&self, path: &str) -> Result<GuestFatFile<'_>, FsError> {
         let root = self.fs.root_dir();
 
-        // fatfs create_file will fail with AlreadyExists if file exists
-        // We just need to map the error appropriately
+        // fatfs::Dir::create_file does NOT fail if file exists - it opens it!
+        // We must explicitly check for existence first.
+        // NOTE: In single-threaded guest, this check-then-create is atomic.
+        if root.open_file(path).is_ok() {
+            return Err(FsError::AlreadyExists);
+        }
+
         let file = root.create_file(path).map_err(map_fatfs_error)?;
         Ok(GuestFatFile::new(file, true, true))
     }

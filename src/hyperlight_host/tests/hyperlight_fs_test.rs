@@ -31,7 +31,7 @@ use std::path::PathBuf;
 use hyperlight_host::GuestBinary;
 use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
 use hyperlight_host::sandbox::{MultiUseSandbox, UninitializedSandbox};
-use hyperlight_testing::simple_guest_as_string;
+use hyperlight_testing::{c_simple_guest_as_string, simple_guest_by_env};
 use tempfile::TempDir;
 
 /// Default FAT image size for tests (1 MiB).
@@ -41,16 +41,21 @@ const DEFAULT_TEST_FAT_SIZE: usize = 1024 * 1024;
 /// Larger FAT image size for tests that need more space (2 MiB).
 const LARGE_TEST_FAT_SIZE: usize = 2 * 1024 * 1024;
 
-/// Helper to get the guest binary path.
-fn guest_binary_path() -> String {
-    simple_guest_as_string().expect("Guest binary not found")
+/// Returns true if we should skip C-only tests (i.e., GUEST=rust is set).
+///
+/// C-only tests exercise C API functions that only exist in the C guest.
+/// When running with GUEST=rust, these tests should be skipped.
+fn skip_c_only_tests() -> bool {
+    std::env::var("GUEST")
+        .map(|v| v.eq_ignore_ascii_case("rust"))
+        .unwrap_or(false)
 }
 
 /// Helper to create a sandbox with FAT support.
 fn create_fat_sandbox(
     fs_image: hyperlight_host::hyperlight_fs::HyperlightFSImage,
 ) -> MultiUseSandbox {
-    let guest_path = guest_binary_path();
+    let guest_path = simple_guest_by_env();
     UninitializedSandbox::new(GuestBinary::FilePath(guest_path), None)
         .unwrap()
         .with_hyperlight_fs(fs_image)
@@ -751,19 +756,19 @@ fn test_guest_fat_cwd_operations() {
     let new_cwd: String = sandbox.call("GetCwd", ()).unwrap();
     assert_eq!(new_cwd, "/data/workdir", "CWD should be /data/workdir");
 
-    // Write using relative path
+    // Write using relative path (regular WriteFatFile handles relative paths via VFS)
     let content = b"Relative path content".to_vec();
     let write_result: bool = sandbox
         .call(
-            "WriteFatFileRelative",
+            "WriteFatFile",
             ("relative.txt".to_string(), content.clone()),
         )
         .unwrap();
     assert!(write_result, "write with relative path should succeed");
 
-    // Read using relative path
+    // Read using relative path (regular ReadFatFile handles relative paths via VFS)
     let read_result: Vec<u8> = sandbox
-        .call("ReadFatFileRelative", "relative.txt".to_string())
+        .call("ReadFatFile", "relative.txt".to_string())
         .unwrap();
     assert_eq!(read_result, content, "relative read should match");
 
@@ -782,7 +787,7 @@ fn test_guest_fat_cwd_operations() {
 
     // Verify we can still read the file with relative path from new CWD
     let read_from_parent: Vec<u8> = sandbox
-        .call("ReadFatFileRelative", "workdir/relative.txt".to_string())
+        .call("ReadFatFile", "workdir/relative.txt".to_string())
         .unwrap();
     assert_eq!(
         read_from_parent, content,
@@ -1147,7 +1152,7 @@ fn test_sandbox_fs_path_not_in_mount_error() {
 #[test]
 fn test_sandbox_fs_no_hyperlight_fs_error() {
     // Create sandbox WITHOUT HyperlightFS
-    let guest_path = guest_binary_path();
+    let guest_path = simple_guest_by_env();
     let uninit = UninitializedSandbox::new(GuestBinary::FilePath(guest_path), None).unwrap();
     let mut sandbox: MultiUseSandbox = uninit.evolve().unwrap();
 
@@ -1246,7 +1251,7 @@ fn test_sandbox_fs_rename_cross_mount_fails() {
     let temp_dir = TempDir::new().unwrap();
     let fat1_path = temp_dir.path().join("fat1.fat");
     let fat2_path = temp_dir.path().join("fat2.fat");
-    let guest_path = guest_binary_path();
+    let guest_path = simple_guest_by_env();
 
     let fs = HyperlightFSBuilder::new()
         .add_empty_fat_mount_at(&fat1_path, "/data1", 1024 * 1024) // 1MB minimum
@@ -1326,5 +1331,548 @@ fn test_sandbox_fs_read_dir_file_sizes() {
         b_entry.stat.size,
         content_b.len() as u64,
         "b.txt size should match content length"
+    );
+}
+
+// =============================================================================
+// C Guest Only Tests - Testing C API bindings (opendir, access, fcntl, etc.)
+// =============================================================================
+//
+// These tests exercise C-specific API bindings that don't have Rust equivalents.
+// They use c_simple_guest_as_string() directly rather than the GUEST env var.
+
+/// Helper to create a C guest sandbox with FAT support.
+fn create_c_guest_fat_sandbox(
+    fs_image: hyperlight_host::hyperlight_fs::HyperlightFSImage,
+) -> MultiUseSandbox {
+    let guest_path = c_simple_guest_as_string().expect("C guest binary not found");
+    UninitializedSandbox::new(GuestBinary::FilePath(guest_path), None)
+        .unwrap()
+        .with_hyperlight_fs(fs_image)
+        .evolve()
+        .unwrap()
+}
+
+/// Helper to create a C guest sandbox with an empty FAT mount at /data.
+fn create_c_guest_empty_fat_sandbox() -> (TempDir, MultiUseSandbox) {
+    let temp_dir = TempDir::new().unwrap();
+    let fat_path = temp_dir.path().join("test.fat");
+
+    let fs = HyperlightFSBuilder::new()
+        .add_empty_fat_mount_at(&fat_path, "/data", DEFAULT_TEST_FAT_SIZE)
+        .expect("create FAT mount")
+        .build()
+        .expect("build fs");
+
+    let sandbox = create_c_guest_fat_sandbox(fs);
+    (temp_dir, sandbox)
+}
+
+/// Test: C API opendir/readdir/closedir returns correct entry count.
+#[test]
+fn test_c_api_opendir_readdir_count() {
+    if skip_c_only_tests() {
+        return;
+    }
+    let (_temp_dir, mut sandbox) = create_c_guest_empty_fat_sandbox();
+
+    // Create some files and directories
+    sandbox.fs_mkdir("/data/subdir").unwrap();
+    sandbox.fs_write_file("/data/file1.txt", b"one").unwrap();
+    sandbox.fs_write_file("/data/file2.txt", b"two").unwrap();
+
+    // Call C guest function to count entries via opendir/readdir
+    let count: i32 = sandbox
+        .call("TestOpendirReaddir", "/data".to_string())
+        .unwrap();
+
+    // Should have 3 entries: subdir, file1.txt, file2.txt
+    assert_eq!(count, 3, "opendir/readdir should return 3 entries");
+}
+
+/// Test: C API opendir/readdir returns entries with type prefixes.
+#[test]
+fn test_c_api_opendir_list_with_types() {
+    if skip_c_only_tests() {
+        return;
+    }
+    let (_temp_dir, mut sandbox) = create_c_guest_empty_fat_sandbox();
+
+    // Create a directory and a file
+    sandbox.fs_mkdir("/data/mydir").unwrap();
+    sandbox
+        .fs_write_file("/data/myfile.txt", b"content")
+        .unwrap();
+
+    // Call C guest function to list entries with D:/F: prefixes
+    let listing: String = sandbox
+        .call("TestOpendirList", "/data".to_string())
+        .unwrap();
+
+    // Should contain "D:mydir" and "F:myfile.txt"
+    assert!(
+        listing.contains("D:mydir"),
+        "listing should contain 'D:mydir': {}",
+        listing
+    );
+    assert!(
+        listing.contains("F:myfile.txt"),
+        "listing should contain 'F:myfile.txt': {}",
+        listing
+    );
+}
+
+/// Test: C API access() with F_OK checks file existence.
+#[test]
+fn test_c_api_access_f_ok() {
+    if skip_c_only_tests() {
+        return;
+    }
+    let (_temp_dir, mut sandbox) = create_c_guest_empty_fat_sandbox();
+
+    // Create a file
+    sandbox.fs_write_file("/data/exists.txt", b"hi").unwrap();
+
+    // F_OK = 0 - check existence
+    let result: i32 = sandbox
+        .call("TestAccess", ("/data/exists.txt".to_string(), 0_i32))
+        .unwrap();
+    assert_eq!(result, 0, "access(F_OK) should return 0 for existing file");
+
+    // Check non-existent file
+    let result: i32 = sandbox
+        .call("TestAccess", ("/data/noexist.txt".to_string(), 0_i32))
+        .unwrap();
+    assert!(result < 0, "access(F_OK) should fail for non-existent file");
+}
+
+/// Test: C API access() with R_OK checks read permission.
+#[test]
+fn test_c_api_access_r_ok() {
+    if skip_c_only_tests() {
+        return;
+    }
+    let (_temp_dir, mut sandbox) = create_c_guest_empty_fat_sandbox();
+
+    // Create a file
+    sandbox
+        .fs_write_file("/data/readable.txt", b"data")
+        .unwrap();
+
+    // R_OK = 4 - check read permission
+    let result: i32 = sandbox
+        .call("TestAccess", ("/data/readable.txt".to_string(), 4_i32))
+        .unwrap();
+    assert_eq!(result, 0, "access(R_OK) should return 0 for readable file");
+}
+
+/// Test: C API access() with W_OK checks write permission.
+#[test]
+fn test_c_api_access_w_ok() {
+    if skip_c_only_tests() {
+        return;
+    }
+    let (_temp_dir, mut sandbox) = create_c_guest_empty_fat_sandbox();
+
+    // Create a file (FAT files are writable)
+    sandbox
+        .fs_write_file("/data/writable.txt", b"data")
+        .unwrap();
+
+    // W_OK = 2 - check write permission
+    let result: i32 = sandbox
+        .call("TestAccess", ("/data/writable.txt".to_string(), 2_i32))
+        .unwrap();
+    assert_eq!(result, 0, "access(W_OK) should return 0 for writable file");
+}
+
+/// Test: C API openat with AT_FDCWD works like open().
+#[test]
+fn test_c_api_openat_with_at_fdcwd() {
+    if skip_c_only_tests() {
+        return;
+    }
+    let (_temp_dir, mut sandbox) = create_c_guest_empty_fat_sandbox();
+
+    // Create a file
+    sandbox
+        .fs_write_file("/data/openat_test.txt", b"test")
+        .unwrap();
+
+    // O_RDONLY = 0
+    let result: i32 = sandbox
+        .call(
+            "TestOpenatCwd",
+            ("/data/openat_test.txt".to_string(), 0_i32),
+        )
+        .unwrap();
+    assert_eq!(result, 1, "openat(AT_FDCWD) should succeed with O_RDONLY");
+}
+
+/// Test: C API fcntl F_GETFL/F_SETFL works.
+#[test]
+fn test_c_api_fcntl_flags() {
+    if skip_c_only_tests() {
+        return;
+    }
+    let (_temp_dir, mut sandbox) = create_c_guest_empty_fat_sandbox();
+
+    // Create a file
+    sandbox
+        .fs_write_file("/data/fcntl_test.txt", b"test")
+        .unwrap();
+
+    // TestFcntlFlags opens with O_RDONLY, gets flags, sets them back
+    // Returns the flags on success, negative on error
+    let flags: i32 = sandbox
+        .call("TestFcntlFlags", "/data/fcntl_test.txt".to_string())
+        .unwrap();
+
+    assert!(
+        flags >= 0,
+        "fcntl F_GETFL/F_SETFL should succeed, got: {}",
+        flags
+    );
+}
+
+/// Test: C API dup returns ENOTSUP for FAT files.
+///
+/// This tests that dup() correctly returns ENOTSUP since FAT file handles
+/// don't support duplication (would need Rc<RefCell<>> internally).
+#[test]
+fn test_c_api_dup_returns_enotsup() {
+    if skip_c_only_tests() {
+        return;
+    }
+    let (_temp_dir, mut sandbox) = create_c_guest_empty_fat_sandbox();
+
+    // Create a file
+    sandbox
+        .fs_write_file("/data/dup_test.txt", b"test")
+        .unwrap();
+
+    // TestDup returns true if dup() correctly returns ENOTSUP
+    let result: bool = sandbox
+        .call("TestDup", "/data/dup_test.txt".to_string())
+        .unwrap();
+
+    assert!(
+        result,
+        "dup() should return ENOTSUP for FAT files (until Rc<RefCell<>> implemented)"
+    );
+}
+
+/// Test: C API dup2 returns ENOTSUP for FAT files.
+///
+/// This tests that dup2() correctly returns ENOTSUP since FAT file handles
+/// don't support duplication (would need Rc<RefCell<>> internally).
+#[test]
+fn test_c_api_dup2_returns_enotsup() {
+    if skip_c_only_tests() {
+        return;
+    }
+    let (_temp_dir, mut sandbox) = create_c_guest_empty_fat_sandbox();
+
+    // Create a file
+    sandbox
+        .fs_write_file("/data/dup2_test.txt", b"test")
+        .unwrap();
+
+    // TestDup2 returns true if dup2() correctly returns ENOTSUP
+    let result: bool = sandbox
+        .call("TestDup2", "/data/dup2_test.txt".to_string())
+        .unwrap();
+
+    assert!(
+        result,
+        "dup2() should return ENOTSUP for FAT files (until Rc<RefCell<>> implemented)"
+    );
+}
+
+/// Test: C API mkdirat with AT_FDCWD works like mkdir().
+#[test]
+fn test_c_api_mkdirat_with_at_fdcwd() {
+    if skip_c_only_tests() {
+        return;
+    }
+    let (_temp_dir, mut sandbox) = create_c_guest_empty_fat_sandbox();
+
+    // TestMkdiratCwd creates a dir, verifies it, then removes it
+    // Returns 1 on success, negative on error
+    let result: i32 = sandbox
+        .call("TestMkdiratCwd", "/data/mkdirat_test".to_string())
+        .unwrap();
+
+    assert_eq!(result, 1, "mkdirat(AT_FDCWD) should succeed");
+}
+
+/// Test: C API opendir on empty directory returns 0 entries.
+#[test]
+fn test_c_api_opendir_empty_dir() {
+    if skip_c_only_tests() {
+        return;
+    }
+    let (_temp_dir, mut sandbox) = create_c_guest_empty_fat_sandbox();
+
+    // Create an empty directory
+    sandbox.fs_mkdir("/data/emptydir").unwrap();
+
+    // Count entries
+    let count: i32 = sandbox
+        .call("TestOpendirReaddir", "/data/emptydir".to_string())
+        .unwrap();
+
+    assert_eq!(count, 0, "empty directory should have 0 entries");
+}
+
+/// Test: C API opendir on non-existent path returns -1.
+#[test]
+fn test_c_api_opendir_nonexistent() {
+    if skip_c_only_tests() {
+        return;
+    }
+    let (_temp_dir, mut sandbox) = create_c_guest_empty_fat_sandbox();
+
+    // Try to open non-existent directory
+    let count: i32 = sandbox
+        .call("TestOpendirReaddir", "/data/nonexistent".to_string())
+        .unwrap();
+
+    assert_eq!(count, -1, "opendir on non-existent path should return -1");
+}
+
+// =============================================================================
+// Open Flag Tests - Testing O_TRUNC, O_EXCL, O_APPEND, O_CREAT, O_RDWR
+// =============================================================================
+
+/// Test: O_TRUNC flag truncates existing file content.
+///
+/// Opens file with O_TRUNC, writes shorter content than original,
+/// verifies only new content remains (old content is gone).
+#[test]
+fn test_c_api_o_trunc() {
+    if skip_c_only_tests() {
+        return;
+    }
+    let (_temp_dir, mut sandbox) = create_c_guest_empty_fat_sandbox();
+
+    let result: i32 = sandbox
+        .call("TestOTrunc", "/data/trunc_test.txt".to_string())
+        .unwrap();
+
+    assert_eq!(
+        result, 1,
+        "O_TRUNC test should succeed (got error code {})",
+        result
+    );
+}
+
+/// Test: O_EXCL flag rejects opening existing file.
+///
+/// O_CREAT | O_EXCL should fail with error if file already exists.
+/// This is the atomic "create if not exists" pattern.
+#[test]
+fn test_c_api_o_excl_existing() {
+    if skip_c_only_tests() {
+        return;
+    }
+    let (_temp_dir, mut sandbox) = create_c_guest_empty_fat_sandbox();
+
+    let result: i32 = sandbox
+        .call("TestOExcl", "/data/excl_test.txt".to_string())
+        .unwrap();
+
+    assert_eq!(
+        result, 1,
+        "O_EXCL test should succeed (got error code {})",
+        result
+    );
+}
+
+/// Test: O_EXCL flag allows creating new file.
+///
+/// O_CREAT | O_EXCL should succeed when file doesn't exist.
+#[test]
+fn test_c_api_o_excl_new_file() {
+    if skip_c_only_tests() {
+        return;
+    }
+    let (_temp_dir, mut sandbox) = create_c_guest_empty_fat_sandbox();
+
+    let result: i32 = sandbox
+        .call("TestOExclNewFile", "/data/excl_new.txt".to_string())
+        .unwrap();
+
+    assert_eq!(
+        result, 1,
+        "O_EXCL new file test should succeed (got error code {})",
+        result
+    );
+}
+
+/// Test: O_EXCL without O_CREAT returns EINVAL.
+///
+/// Per POSIX, O_EXCL without O_CREAT is undefined behavior.
+/// We choose to return EINVAL to catch bugs in guest code.
+#[test]
+fn test_c_api_o_excl_no_creat() {
+    if skip_c_only_tests() {
+        return;
+    }
+    let (_temp_dir, mut sandbox) = create_c_guest_empty_fat_sandbox();
+
+    let result: i32 = sandbox
+        .call("TestOExclNoCreat", "/data/excl_no_creat.txt".to_string())
+        .unwrap();
+
+    assert_eq!(
+        result, 1,
+        "O_EXCL without O_CREAT should return EINVAL (got error code {})",
+        result
+    );
+}
+
+/// Test: O_APPEND flag ensures writes go to end of file.
+///
+/// Opens file with O_APPEND, writes additional content,
+/// verifies original + new content are concatenated.
+#[test]
+fn test_c_api_o_append() {
+    if skip_c_only_tests() {
+        return;
+    }
+    let (_temp_dir, mut sandbox) = create_c_guest_empty_fat_sandbox();
+
+    let result: i32 = sandbox
+        .call("TestOAppend", "/data/append_test.txt".to_string())
+        .unwrap();
+
+    assert_eq!(
+        result, 1,
+        "O_APPEND test should succeed (got error code {})",
+        result
+    );
+}
+
+/// Test: O_CREAT flag creates file if it doesn't exist.
+#[test]
+fn test_c_api_o_creat() {
+    if skip_c_only_tests() {
+        return;
+    }
+    let (_temp_dir, mut sandbox) = create_c_guest_empty_fat_sandbox();
+
+    let result: i32 = sandbox
+        .call("TestOCreat", "/data/creat_test.txt".to_string())
+        .unwrap();
+
+    assert_eq!(
+        result, 1,
+        "O_CREAT test should succeed (got error code {})",
+        result
+    );
+}
+
+/// Test: O_RDWR flag allows both reading and writing.
+#[test]
+fn test_c_api_o_rdwr() {
+    if skip_c_only_tests() {
+        return;
+    }
+    let (_temp_dir, mut sandbox) = create_c_guest_empty_fat_sandbox();
+
+    let result: i32 = sandbox
+        .call("TestORdwr", "/data/rdwr_test.txt".to_string())
+        .unwrap();
+
+    assert_eq!(
+        result, 1,
+        "O_RDWR test should succeed (got error code {})",
+        result
+    );
+}
+// =============================================================================
+// POSIX Compliance Tests
+// =============================================================================
+
+/// Test: O_APPEND after lseek - writes should still go to end.
+///
+/// POSIX requires that O_APPEND causes each write to seek to EOF first,
+/// even if lseek was called in between.
+#[test]
+fn test_c_api_o_append_after_lseek() {
+    if skip_c_only_tests() {
+        return;
+    }
+    let (_temp_dir, mut sandbox) = create_c_guest_empty_fat_sandbox();
+
+    let result: i32 = sandbox
+        .call(
+            "TestOAppendAfterLseek",
+            "/data/append_lseek.txt".to_string(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        result, 1,
+        "O_APPEND after lseek test should succeed (got error code {})",
+        result
+    );
+}
+
+/// Test: fcntl F_GETFL returns accurate flags including O_APPEND.
+#[test]
+fn test_c_api_fcntl_getfl_accuracy() {
+    if skip_c_only_tests() {
+        return;
+    }
+    let (_temp_dir, mut sandbox) = create_c_guest_empty_fat_sandbox();
+
+    let result: i32 = sandbox
+        .call("TestFcntlGetflAccuracy", "/data/getfl_test.txt".to_string())
+        .unwrap();
+
+    assert_eq!(
+        result, 1,
+        "F_GETFL accuracy test should succeed (got error code {})",
+        result
+    );
+}
+
+/// Test: fcntl F_SETFL can enable O_APPEND after open.
+#[test]
+fn test_c_api_fcntl_setfl_append() {
+    if skip_c_only_tests() {
+        return;
+    }
+    let (_temp_dir, mut sandbox) = create_c_guest_empty_fat_sandbox();
+
+    let result: i32 = sandbox
+        .call("TestFcntlSetflAppend", "/data/setfl_test.txt".to_string())
+        .unwrap();
+
+    assert_eq!(
+        result, 1,
+        "F_SETFL O_APPEND test should succeed (got error code {})",
+        result
+    );
+}
+
+/// Test: openat with non-AT_FDCWD dirfd returns ENOTSUP.
+#[test]
+fn test_c_api_openat_real_dirfd() {
+    if skip_c_only_tests() {
+        return;
+    }
+    let (_temp_dir, mut sandbox) = create_c_guest_empty_fat_sandbox();
+
+    let result: i32 = sandbox
+        .call("TestOpenatRealDirfd", "/data/openat_test.txt".to_string())
+        .unwrap();
+
+    assert_eq!(
+        result, 1,
+        "openat with real dirfd should return ENOTSUP (got error code {})",
+        result
     );
 }

@@ -444,7 +444,7 @@ pub(crate) fn set_up_hypervisor_partition(
 
 #[cfg(test)]
 mod tests {
-    use hyperlight_testing::{c_simple_guest_as_string, simple_guest_as_string};
+    use hyperlight_testing::{simple_guest_as_string, simple_guest_by_env};
 
     use super::evolve_impl_multi_use;
     use crate::sandbox::uninitialized::GuestBinary;
@@ -550,16 +550,6 @@ mod tests {
         );
     }
 
-    /// Returns the simpleguest path (Rust or C) based on GUEST env var.
-    fn get_c_or_rust_simpleguest_path() -> String {
-        let guest_type = std::env::var("GUEST").unwrap_or("rust".to_string());
-        match guest_type.as_str() {
-            "rust" => simple_guest_as_string().unwrap(),
-            "c" => c_simple_guest_as_string().unwrap(),
-            _ => panic!("Unknown guest type '{guest_type}', use either 'rust' or 'c'"),
-        }
-    }
-
     /// Integration test: Guest reads file content from HyperlightFS.
     ///
     /// This test verifies the full end-to-end pipeline:
@@ -606,7 +596,7 @@ mod tests {
             .unwrap();
 
         // Create and evolve sandbox with HyperlightFS (supports both Rust and C guests)
-        let guest_bin_path = get_c_or_rust_simpleguest_path();
+        let guest_bin_path = simple_guest_by_env();
         let mut sandbox: MultiUseSandbox =
             UninitializedSandbox::new(GuestBinary::FilePath(guest_bin_path), None)
                 .unwrap()
@@ -647,7 +637,7 @@ mod tests {
     /// Works with both Rust and C guests (set GUEST=c for C guest).
     #[test]
     fn test_guest_fs_not_initialized_without_hyperlight_fs() {
-        let guest_bin_path = get_c_or_rust_simpleguest_path();
+        let guest_bin_path = simple_guest_by_env();
         let u_sbox =
             UninitializedSandbox::new(GuestBinary::FilePath(guest_bin_path), None).unwrap();
         let mut sandbox = evolve_impl_multi_use(u_sbox).unwrap();
