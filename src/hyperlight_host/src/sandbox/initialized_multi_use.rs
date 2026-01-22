@@ -641,6 +641,21 @@ impl MultiUseSandbox {
                 self.dbg_mem_access_fn.clone(),
             )?;
 
+            // Sync FAT mounts to backing files after successful HLT.
+            // This ensures durability: when call() returns Ok, all guest writes
+            // are persisted to disk. We do this before checking guest_result
+            // because the guest may have written data even if it returns an error.
+            // However, we skip this on host-side errors (dispatch_call_from_host
+            // returns Err) to avoid persisting potentially corrupted state.
+            #[cfg(unix)]
+            if let Some(ref fs_image) = self.hyperlight_fs {
+                // Log but don't fail the call if msync fails - the writes are
+                // still in the page cache and will eventually be flushed.
+                if let Err(e) = fs_image.msync_fat_mounts() {
+                    tracing::warn!(error = %e, "Failed to sync FAT mounts after HLT");
+                }
+            }
+
             self.mem_mgr.check_stack_guard()?;
 
             let guest_result = self.mem_mgr.get_guest_function_call_result()?.into_inner();

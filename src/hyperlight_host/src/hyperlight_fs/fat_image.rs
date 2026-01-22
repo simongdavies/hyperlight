@@ -626,6 +626,63 @@ impl FatImage {
         self.is_temp
     }
 
+    /// Synchronously flush dirty pages to the backing file.
+    ///
+    /// This calls `msync(MS_SYNC)` on the mmap'd region, ensuring all writes
+    /// made by the guest are durably persisted to the backing file before
+    /// returning.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the sync succeeded, or an error if `msync` failed.
+    ///
+    /// # Notes
+    ///
+    /// - This is called automatically by the sandbox on successful HLT
+    /// - The kernel tracks dirty pages; calling this on clean pages is fast
+    /// - For temporary images (`is_temp() == true`), this is a no-op since
+    ///   the file will be deleted on drop anyway
+    pub fn msync(&self) -> Result<()> {
+        // Skip sync for temp files - they're deleted on drop anyway
+        if self.is_temp {
+            trace!(path = %self.path.display(), "Skipping msync for temp FAT image");
+            return Ok(());
+        }
+
+        trace!(
+            path = %self.path.display(),
+            size = self.mmap_size,
+            "Calling msync(MS_SYNC) on FAT image"
+        );
+
+        // SAFETY: mmap_ptr and mmap_size are valid from construction and remain
+        // valid until Drop. MS_SYNC is a safe flag that just requests synchronous
+        // write-back of dirty pages.
+        let result = unsafe {
+            libc::msync(
+                self.mmap_ptr as *mut libc::c_void,
+                self.mmap_size,
+                libc::MS_SYNC,
+            )
+        };
+
+        if result != 0 {
+            let err = std::io::Error::last_os_error();
+            error!(
+                path = %self.path.display(),
+                error = %err,
+                "msync(MS_SYNC) failed on FAT image"
+            );
+            return Err(HyperlightError::Error(format!(
+                "msync failed on FAT image {:?}: {}",
+                self.path, err
+            )));
+        }
+
+        debug!(path = %self.path.display(), "FAT image synced to disk");
+        Ok(())
+    }
+
     // ---- File Operations ----
 
     /// List the contents of a directory.

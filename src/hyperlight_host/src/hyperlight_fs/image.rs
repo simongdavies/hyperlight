@@ -285,6 +285,57 @@ impl HyperlightFSImage {
         &mut self.fat_mounts
     }
 
+    /// Synchronously flush all FAT mounts to their backing files.
+    ///
+    /// This calls `msync(MS_SYNC)` on each FAT mount's mmap'd region,
+    /// ensuring all writes made by the guest are durably persisted.
+    ///
+    /// Called automatically by the sandbox on successful VM halt (HLT).
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if all syncs succeeded. On error, returns the first error
+    /// encountered but still attempts to sync remaining mounts.
+    ///
+    /// # Notes
+    ///
+    /// - This is a no-op if there are no FAT mounts
+    /// - Temporary FAT images (created with `add_empty_fat_mount`) are skipped
+    ///   since they will be deleted on drop
+    /// - The kernel tracks dirty pages automatically; syncing clean pages is fast
+    #[cfg(unix)]
+    pub(crate) fn msync_fat_mounts(&self) -> crate::Result<()> {
+        if self.fat_mounts.is_empty() {
+            return Ok(());
+        }
+
+        tracing::debug!(
+            count = self.fat_mounts.len(),
+            "Syncing FAT mounts to backing files"
+        );
+
+        let mut first_error: Option<crate::HyperlightError> = None;
+
+        for mount in &self.fat_mounts {
+            if let Err(e) = mount.image().msync() {
+                tracing::warn!(
+                    mount_point = mount.mount_point(),
+                    error = %e,
+                    "Failed to sync FAT mount"
+                );
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
+                // Continue syncing other mounts
+            }
+        }
+
+        match first_error {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
     /// Find a FAT mount that contains the given guest path.
     ///
     /// Returns the index of the mount and the path relative to the mount point.

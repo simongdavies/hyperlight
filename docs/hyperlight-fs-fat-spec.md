@@ -1,25 +1,14 @@
 # HyperlightFS Specification
 
-## Document Status
-
-| Version | Date | Author | Status |
-|---------|------|--------|--------|
-| 1.0 | 2026-01-19 | Hyperlight Team | Draft |
-
 ## Table of Contents
 
 1. [Overview](#overview)
 2. [Architecture](#architecture)
 3. [File System Types](#file-system-types)
-   - [Data Persistence Guarantees](#35-data-persistence-guarantees)
-   - [Advisory Locking Limitations](#36-advisory-locking-limitations)
 4. [Host APIs](#host-apis)
 5. [Guest APIs](#guest-apis)
-   - [Guest VFS Internals](#55-guest-vfs-internals)
 6. [C API Reference](#c-api-reference)
-   - [Unsupported Operations](#65-unsupported-operations)
    - [POSIX Compliance Notes](#66-posix-compliance-notes)
-   - [Missing APIs](#67-missing-apis)
 7. [Mount Points and Namespace](#mount-points-and-namespace)
 8. [Data Serialization](#data-serialization)
 9. [Memory Layout](#memory-layout)
@@ -27,6 +16,8 @@
 11. [Error Handling](#error-handling)
 12. [Security Considerations](#security-considerations)
 13. [Limitations](#limitations)
+14. [Dependencies and Risks](#dependencies-and-risks)
+15. [Future Features](#future-features)
 
 ---
 
@@ -61,134 +52,123 @@ HyperlightFS is the filesystem subsystem for Hyperlight sandboxes. It provides a
 
 ## 2. Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              HOST PROCESS                                    │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  ┌──────────────────────────────────────────────────────────────────────┐   │
-│  │ HyperlightFSBuilder                                                   │   │
-│  │   ├── add_file("/host/config.json", "/config.json")     [RO mmap]    │   │
-│  │   ├── add_dir("/host/assets", "/assets")                [RO mmap]    │   │
-│  │   ├── add_fat_image("/host/data.fat", "/data")          [RW FAT]     │   │
-│  │   ├── add_empty_fat_mount("/tmp", 1MB)                  [RW FAT]     │   │
-│  │   ├── add_empty_fat_mount_at("out.fat", "/out", 1MB)    [RW FAT]     │   │
-│  │   └── build() → HyperlightFSImage                                    │   │
-│  └──────────────────────────────────────────────────────────────────────┘   │
-│                                      │                                       │
-│                                      ▼                                       │
-│  ┌──────────────────────────────────────────────────────────────────────┐   │
-│  │ HyperlightFSImage                                                     │   │
-│  │   ├── Manifest (FlatBuffer serialized metadata)                      │   │
-│  │   ├── RO file mappings (mmap PROT_READ pointers + metadata)          │   │
-│  │   ├── FAT image mappings (mmap MAP_SHARED, exclusive lock)           │   │
-│  │   └── Host file access APIs (read/write/list)                        │   │
-│  └──────────────────────────────────────────────────────────────────────┘   │
-│                                      │                                       │
-│                                      ▼                                       │
-│  ┌──────────────────────────────────────────────────────────────────────┐   │
-│  │ Sandbox                                                               │   │
-│  │   ├── Guest memory with FS regions mapped                            │   │
-│  │   ├── File access APIs (read/write during pause)                     │   │
-│  │   └── Extraction APIs (get FAT data after execution)                 │   │
-│  └──────────────────────────────────────────────────────────────────────┘   │
-│                                                                              │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                              GUEST VM                                        │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  ┌──────────────────────────────────────────────────────────────────────┐   │
-│  │ Guest Memory Layout                                                   │   │
-│  │   ├── Manifest region (FlatBuffer with file/mount metadata)          │   │
-│  │   ├── RO files region (demand-paged from host mmap)                  │   │
-│  │   ├── Host FAT regions (MAP_SHARED from host backing file)           │   │
-│  │   └── Guest FAT regions (allocated from guest heap via create_fat_mount)│
-│  └──────────────────────────────────────────────────────────────────────┘   │
-│                                                                              │
-│  ┌──────────────────────────────────────────────────────────────────────┐   │
-│  │ Unified VFS Layer (hyperlight_guest::fs)                             │   │
-│  │   ├── Mount table (mount_point → backend)                            │   │
-│  │   ├── File descriptor table                                          │   │
-│  │   ├── Current working directory                                      │   │
-│  │   └── Path resolution (longest-prefix mount matching)                │   │
-│  └──────────────────────────────────────────────────────────────────────┘   │
-│                                                                              │
-│  ┌─────────────────────┐     ┌─────────────────────────────────────────┐   │
-│  │ RO Backend          │     │ FAT Backend                              │   │
-│  │   └── Direct memory │     │   └── fatfs crate over memory buffer    │   │
-│  │       read from     │     │       with Read/Write/Seek              │   │
-│  │       mapped region │     │                                         │   │
-│  └─────────────────────┘     └─────────────────────────────────────────┘   │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph HOST["HOST PROCESS"]
+        subgraph Builder["HyperlightFSBuilder"]
+            B1["add_file('/host/config.json', '/config.json') [RO mmap]"]
+            B2["add_dir('/host/assets', '/assets') [RO mmap]"]
+            B3["add_fat_image('/host/data.fat', '/data') [RW FAT]"]
+            B4["add_empty_fat_mount('/tmp', 1MB) [RW FAT]"]
+            B5["add_empty_fat_mount_at('out.fat', '/out', 1MB) [RW FAT]"]
+            B6["build() → HyperlightFSImage"]
+        end
+        
+        subgraph Image["HyperlightFSImage"]
+            I1["Manifest (FlatBuffer serialized metadata)"]
+            I2["RO file mappings (mmap PROT_READ pointers + metadata)"]
+            I3["FAT image mappings (mmap MAP_SHARED, exclusive lock)"]
+            I4["Host file access APIs (read/write/list)"]
+        end
+        
+        subgraph Sandbox["Sandbox"]
+            S1["Guest memory with FS regions mapped"]
+            S2["File access APIs (read/write during pause)"]
+            S3["Extraction APIs (get FAT data after execution)"]
+        end
+        
+        Builder --> Image
+        Image --> Sandbox
+    end
+    
+    subgraph GUEST["GUEST VM"]
+        subgraph Memory["Guest Memory Layout"]
+            M1["Manifest region (FlatBuffer with file/mount metadata)"]
+            M2["RO files region (demand-paged from host mmap)"]
+            M3["Host FAT regions (MAP_SHARED from host backing file)"]
+            M4["Guest FAT regions (allocated from guest heap via create_fat_mount)"]
+        end
+        
+        subgraph VFS["Unified VFS Layer (hyperlight_guest::fs)"]
+            V1["Mount table (mount_point → backend)"]
+            V2["File descriptor table"]
+            V3["Current working directory"]
+            V4["Path resolution (longest-prefix mount matching)"]
+        end
+        
+        subgraph Backends[" "]
+            RO["RO Backend<br/>Direct memory read<br/>from mapped region"]
+            FAT["FAT Backend<br/>fatfs crate over memory buffer<br/>with Read/Write/Seek"]
+        end
+        
+        Memory --> VFS
+        VFS --> RO
+        VFS --> FAT
+    end
+    
+    Sandbox -.->|"maps into"| Memory
 ```
 
 ### 2.1 How FAT RW Mounting Works (MAP_SHARED Flow)
 
 The key aspect of this design is that **the same physical memory pages** are shared between the host process and guest VM. Here's the complete flow:
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│ STEP 1: Builder opens/creates backing file                                   │
-│                                                                              │
-│   For add_fat_image("/host/data.fat", "/data"):                             │
-│   ┌─────────────────────────────────────────────────────────────────────┐   │
-│   │ 1. Open existing file: /host/data.fat                               │   │
-│   │ 2. Validate FAT format                                             │   │
-│   │ 3. Acquire exclusive lock: flock(fd, LOCK_EX)                       │   │
-│   │ 4. mmap(fd, MAP_SHARED, PROT_READ|PROT_WRITE) → host_ptr            │   │
-│   └─────────────────────────────────────────────────────────────────────┘   │
-│                                                                              │
-│   For add_empty_fat_mount("/tmp", 1MB):                                     │
-│   ┌─────────────────────────────────────────────────────────────────────┐   │
-│   │ 1. Create temp file: /tmp/hyperlight-fat-{sandbox_id}-{random} (1MB)│   │
-│   │ 2. Format as FAT using fatfs crate                                 │   │
-│   │ 3. Acquire exclusive lock: flock(fd, LOCK_EX)                       │   │
-│   │ 4. mmap(fd, MAP_SHARED, PROT_READ|PROT_WRITE) → host_ptr            │   │
-│   └─────────────────────────────────────────────────────────────────────┘   │
-│                                                                              │
-│   Result: host_ptr points to pages backed by the file                       │
-│   The OS kernel manages the mapping: file ↔ page cache ↔ host_ptr          │
-├─────────────────────────────────────────────────────────────────────────────┤
-│ STEP 2: Sandbox evolution maps into guest                                    │
-│                                                                              │
-│   sandbox.evolve()                                                          │
-│   ┌─────────────────────────────────────────────────────────────────────┐   │
-│   │ 1. Choose guest physical address (GPA) for FAT region               │   │
-│   │ 2. Tell hypervisor to map host_ptr → GPA with RW permissions:       │   │
-│   │    • KVM:  kvm_userspace_memory_region { userspace_addr: host_ptr } │   │
-│   │    • MSHV: mshv_user_mem_region { userspace_addr: host_ptr }        │   │
-│   │ 3. Update manifest with guest_address = GPA                         │   │
-│   └─────────────────────────────────────────────────────────────────────┘   │
-│                                                                              │
-│   Result: Guest sees FAT image at GPA, backed by SAME pages as host_ptr    │
-├─────────────────────────────────────────────────────────────────────────────┤
-│ STEP 3: Guest writes to FAT                                                  │
-│                                                                              │
-│   guest: open("/tmp/foo.txt", O_CREAT|O_WRONLY); write(fd, "hello", 5);    │
-│   ┌─────────────────────────────────────────────────────────────────────┐   │
-│   │ 1. VFS resolves /tmp → FAT mount at GPA                             │   │
-│   │ 2. fatfs computes target address within FAT image region            │   │
-│   │ 3. Guest CPU executes store instruction to GPA                      │   │
-│   │ 4. If page not present: #PF → hypervisor handles by mapping page    │   │
-│   │ 5. Store completes → page marked dirty in host page cache           │   │
-│   │ 6. Kernel writeback daemon eventually flushes to backing file       │   │
-│   │    (or immediately on msync/HLT - see §3.5)                         │   │
-│   └─────────────────────────────────────────────────────────────────────┘   │
-│                                                                              │
-│   Result: Write goes to shared page → persists to backing file              │
-├─────────────────────────────────────────────────────────────────────────────┤
-│ STEP 4: Cleanup on drop                                                      │
-│                                                                              │
-│   drop(HyperlightFSImage)                                                   │
-│   ┌─────────────────────────────────────────────────────────────────────┐   │
-│   │ 1. munmap(host_ptr) - unmap from host                               │   │
-│   │ 2. Hypervisor unmaps from guest (sandbox already dropped)           │   │
-│   │ 3. close(fd) - releases exclusive lock                              │   │
-│   │ 4. For temp files: unlink() deletes the file                        │   │
-│   │    For add_empty_fat_mount_at(): file PERSISTS on disk              │   │
-│   └─────────────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph STEP1["STEP 1: Builder opens/creates backing file"]
+        direction TB
+        subgraph ExistingFAT["add_fat_image('/host/data.fat', '/data')"]
+            E1["1. Open existing file: /host/data.fat"]
+            E2["2. Validate FAT format"]
+            E3["3. Acquire exclusive lock: flock(fd, LOCK_EX)"]
+            E4["4. mmap(fd, MAP_SHARED, PROT_READ|PROT_WRITE) → host_ptr"]
+            E1 --> E2 --> E3 --> E4
+        end
+        
+        subgraph NewFAT["add_empty_fat_mount('/tmp', 1MB)"]
+            N1["1. Create temp file: /tmp/hyperlight-fat-{sandbox_id}-{random}"]
+            N2["2. Format as FAT using fatfs crate"]
+            N3["3. Acquire exclusive lock: flock(fd, LOCK_EX)"]
+            N4["4. mmap(fd, MAP_SHARED, PROT_READ|PROT_WRITE) → host_ptr"]
+            N1 --> N2 --> N3 --> N4
+        end
+        
+        Result1["Result: host_ptr → pages backed by file<br/>Kernel manages: file ↔ page cache ↔ host_ptr"]
+    end
+    
+    subgraph STEP2["STEP 2: Sandbox evolution maps into guest"]
+        direction TB
+        EV1["1. Choose guest physical address (GPA) for FAT region"]
+        EV2["2. Tell hypervisor to map host_ptr → GPA with RW permissions<br/>• KVM: kvm_userspace_memory_region { userspace_addr: host_ptr }<br/>• MSHV: mshv_user_mem_region { userspace_addr: host_ptr }"]
+        EV3["3. Update manifest with guest_address = GPA"]
+        EV1 --> EV2 --> EV3
+        Result2["Result: Guest sees FAT at GPA, backed by SAME pages as host_ptr"]
+    end
+    
+    subgraph STEP3["STEP 3: Guest writes to FAT"]
+        direction TB
+        GW0["guest: open('/tmp/foo.txt', O_CREAT|O_WRONLY); write(fd, 'hello', 5);"]
+        GW1["1. VFS resolves /tmp → FAT mount at GPA"]
+        GW2["2. fatfs computes target address within FAT image region"]
+        GW3["3. Guest CPU executes store instruction to GPA"]
+        GW4["4. If page not present: #PF → hypervisor maps page"]
+        GW5["5. Store completes → page marked dirty in host page cache"]
+        GW6["6. Kernel writeback daemon flushes to backing file<br/>(or immediately on msync/HLT - see §3.5)"]
+        GW0 --> GW1 --> GW2 --> GW3 --> GW4 --> GW5 --> GW6
+        Result3["Result: Write → shared page → persists to backing file"]
+    end
+    
+    subgraph STEP4["STEP 4: Cleanup on drop"]
+        direction TB
+        D0["drop(HyperlightFSImage)"]
+        D1["1. munmap(host_ptr) - unmap from host"]
+        D2["2. Hypervisor unmaps from guest (sandbox already dropped)"]
+        D3["3. close(fd) - releases exclusive lock"]
+        D4["4. For temp files: unlink() deletes file<br/>   For add_empty_fat_mount_at(): file PERSISTS"]
+        D0 --> D1 --> D2 --> D3 --> D4
+    end
+    
+    STEP1 --> STEP2 --> STEP3 --> STEP4
 ```
 
 **Why this is zero-copy:**
@@ -214,7 +194,7 @@ The key aspect of this design is that **the same physical memory pages** are sha
 | Consistency | Static snapshot at build time |
 | Sharing | Shared across sandboxes via page cache |
 | Performance | Zero-copy, demand-paged |
-| Locking | Shared lock (`flock(LOCK_SH)`) blocks external writers |
+| Locking | None (file can be modified externally during execution) |
 | Platform | Linux (KVM/MSHV) initially; Windows (WHP) is TODO |
 
 **Use cases:**
@@ -227,12 +207,13 @@ The key aspect of this design is that **the same physical memory pages** are sha
 
 | Property | Value |
 |----------|-------|
-| Backing | Host file mmap'd with `MAP_SHARED` (writes persist automatically) |
+| Backing | Varies: host file (`add_fat_image`), temp file (`add_empty_fat_mount`), or guest heap (`create_fat_mount`) |
 | Access | Read-write |
 | Format | FAT (via `fatfs` crate, auto-selects FAT12/16/32) |
 | Source | Host file, programmatic creation, or guest allocation |
 | Size | Fixed at creation time (cannot grow) |
-| Exclusivity | Each backing file can only be mapped to one sandbox at a time |
+| Persistence | `add_fat_image`/`add_empty_fat_mount_at`: persists; `add_empty_fat_mount`: deleted on drop; guest-created: never persisted |
+| Exclusivity | Host-backed: one sandbox per file; Guest-created: N/A |
 | Platform | Linux (KVM/MSHV) initially; Windows (WHP) is TODO |
 
 **Use cases:**
@@ -250,29 +231,22 @@ The key aspect of this design is that **the same physical memory pages** are sha
 | Create file | ❌ | ✅ |
 | Delete file | ❌ | ✅ |
 | Create directory | ❌ | ✅ |
-| Zero-copy | ✅ | ✅ (via MAP_SHARED) |
-| Auto-persist | N/A | ✅ (writes go to host file) |
+| Zero-copy | ✅ | Host-backed only (via MAP_SHARED) |
+| Auto-persist | N/A | Host-backed only; guest-created: ❌ |
 | Guest creation | ❌ | ✅ |
-| Multi-sandbox | ✅ (shared) | ❌ (exclusive) |
+| Multi-sandbox | ✅ (shared) | Host-backed: ❌ (exclusive); guest-created: N/A |
 | Max file size | uint64 (no practical limit) | ~4GB (FAT limitation) |
-| Guest memory used | None (zero-copy) | None for host FAT; heap for guest-created |
+| Guest memory used | None (zero-copy) | Host-backed: none; guest-created: heap |
 
-### 3.4 Future Enhancement: Read-Only FAT Mounts
+### 3.4 Data Persistence Guarantees
 
-A future version will support mounting FAT images as **read-only**. This would:
-- Use `mmap(MAP_SHARED, PROT_READ)` for zero-copy RO access
-- Allow sharing across sandboxes via shared lock (`flock(LOCK_SH)`)
-- Shared lock allows multiple readers, blocks external writers
-- Provide directory structure and metadata that RO mmap files lack
-- Enable mounting pre-built data archives in FAT format
+> **Note:** This section applies to **Linux only** (KVM and MSHV). FAT mounts are not yet supported on Windows (WHP). Both KVM and MSHV use the same Linux kernel page cache.
 
-### 3.5 Data Persistence Guarantees
+When using `MAP_SHARED` for host-backed FAT mounts, writes made by the guest are written to the Linux kernel's page cache. The kernel asynchronously flushes dirty pages to the backing file. This has important implications:
 
-When using `MAP_SHARED` for FAT mounts, writes made by the guest are written to the kernel's page cache. The kernel asynchronously flushes dirty pages to the backing file. This has important implications:
-
-**Normal operation:**
+**Normal operation (Linux):**
 - Guest writes → page cache → kernel writeback → backing file
-- Typical writeback latency: seconds (controlled by `vm.dirty_writeback_centisecs`)
+- Typical writeback latency: ~5-30 seconds (see `/proc/sys/vm/dirty_writeback_centisecs`, default 500 centisecs = 5 seconds)
 - Normal process termination flushes all dirty pages
 
 **Crash scenarios:**
@@ -281,7 +255,7 @@ When using `MAP_SHARED` for FAT mounts, writes made by the guest are written to 
 
 **Hyperlight's guarantee:**
 
-When a sandbox with RW FAT mounts halts (HLT), the host automatically calls `msync(MS_SYNC)` on all dirty FAT regions before returning control to the caller. This ensures:
+When a sandbox with RW FAT mounts halts (HLT), the host automatically calls `msync(MS_SYNC)` on all FAT regions before returning control to the caller. This ensures:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -289,9 +263,8 @@ When a sandbox with RW FAT mounts halts (HLT), the host automatically calls `msy
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  1. Guest executes HLT instruction                                          │
 │  2. VM exits to host                                                        │
-│  3. Host checks: has_rw_fat_mounts && dirty_pages?                          │
-│  4. If yes: msync(fat_region, MS_SYNC) for each FAT mount                   │
-│  5. Return to caller                                                        │
+│  3. For each non-temp FAT mount: msync(fat_region, MS_SYNC)                 │
+│  4. Return to caller                                                        │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -307,17 +280,18 @@ When a sandbox with RW FAT mounts halts (HLT), the host automatically calls `msy
 - Users should treat the FAT image as potentially invalid after any error
 
 **Implementation notes:**
-- `msync()` is only called if `has_rw_fat_mounts` is true (no overhead for RO-only)
-- The host tracks dirty state per FAT region (set on first guest write via dirty bit)
+- `msync()` is only called if there are FAT mounts (no overhead for RO-only sandboxes)
+- Temporary FAT mounts (`add_empty_fat_mount`) are skipped - they're deleted on drop anyway
+- The kernel tracks dirty pages automatically via page table dirty bits - no Hyperlight-side tracking needed
 - `MS_SYNC` ensures synchronous flush (blocks until I/O complete)
-- This is a host-side operation; guests cannot call `msync()`
+- This is a host-side operation; no guest cooperation required
+- Failures are logged but don't fail the call (writes are still in page cache)
 
 **Performance consideration:**
 - `msync()` can be slow for large dirty regions
 - For latency-sensitive use cases, consider smaller FAT images
-- The `MS_ASYNC` variant (non-blocking) may be offered as an opt-in in future
 
-### 3.6 Advisory Locking Limitations
+### 3.5 Advisory Locking Limitations
 
 Hyperlight uses `flock(LOCK_EX)` to ensure exclusive access to FAT backing files. This is an **advisory** lock, which has important implications:
 
@@ -364,50 +338,38 @@ Hyperlight uses `flock(LOCK_EX)` to ensure exclusive access to FAT backing files
 
 Builder for constructing a filesystem image before sandbox creation.
 
+#### 4.1.1 Typestate Pattern
+
+The builder uses a typestate pattern to prevent accidental sharing of FAT images:
+
 ```rust
-/// Resource limits for filesystem operations.
-/// 
-/// These limits only apply to resources that consume guest memory or
-/// have fixed overhead. Host-provided files and FAT images use zero-copy
-/// MAP_SHARED and have no size limits.
-pub struct FsLimits {
-    /// Max number of files/directories in manifest (default: 100,000)
-    /// 
-    /// Each entry adds ~100 bytes to the serialized manifest.
-    pub max_file_count: usize,
+/// Builder state: no FAT mounts added.
+pub struct NoFat;
+/// Builder state: at least one FAT mount added.
+pub struct WithFat;
+
+impl HyperlightFSBuilder<NoFat> {
+    /// Clonable - safe to share since no exclusive locks.
+    pub fn clone(&self) -> Self;
     
-    /// Max number of mount points (default: 64)
-    pub max_mount_count: usize,
-    
-    /// Max path length in bytes (default: 4096)
-    pub max_path_length: usize,
-    
-    /// Max open file descriptors per guest (default: 256)
-    pub max_open_files: usize,
+    /// Build borrows self (image can be reused).
+    pub fn build(&self) -> Result<HyperlightFSImage>;
 }
 
-impl Default for FsLimits {
-    fn default() -> Self {
-        Self {
-            max_file_count: 100_000,
-            max_mount_count: 64,
-            max_path_length: 4096,
-            max_open_files: 256,
-        }
-    }
+impl HyperlightFSBuilder<WithFat> {
+    /// NOT clonable - FAT images have exclusive locks.
+    // No Clone impl
+    
+    /// Build consumes self (FAT locks cannot be shared).
+    pub fn build(self) -> Result<HyperlightFSImage>;
 }
+```
 
-impl HyperlightFSBuilder {
-    /// Create a new empty builder with default limits.
-    pub fn new() -> Self;
-    
-    /// Create a new builder with custom resource limits.
-    /// 
-    /// Note: Size limits are NOT needed for host-provided files or FAT images
-    /// since they use zero-copy MAP_SHARED and don't consume guest memory.
-    /// Limits only apply to metadata overhead and runtime resources.
-    pub fn with_limits(limits: FsLimits) -> Self;
-    
+Adding a FAT mount transforms `HyperlightFSBuilder<NoFat>` → `HyperlightFSBuilder<WithFat>`,
+preventing accidental sharing of images with exclusive file locks.
+
+```rust
+impl<F> HyperlightFSBuilder<F> {
     /// Add a single read-only file (mmap'd from host).
     /// 
     /// # Arguments
@@ -421,26 +383,34 @@ impl HyperlightFSBuilder {
     pub fn add_file<P: AsRef<Path>>(
         self, 
         host_path: P, 
-        guest_path: &str
+        guest_path: impl Into<String>
     ) -> Result<Self>;
     
     /// Add a directory of read-only files with pattern matching.
     /// 
-    /// Returns a `DirectoryBuilder` that allows configuring include/exclude
+    /// Returns a `DirectoryBuilder<F>` that allows configuring include/exclude
     /// patterns before finalizing with `.done()`.
     pub fn add_dir<P: AsRef<Path>>(
         self,
         host_path: P,
-        guest_prefix: &str
-    ) -> Result<DirectoryBuilder>;
+        guest_prefix: impl Into<String>
+    ) -> Result<DirectoryBuilder<F>>;
+    
+    /// Get a summary of files that would be mapped.
+    pub fn file_summary(&self) -> Result<BuildManifest>;
+}
+
+impl HyperlightFSBuilder<NoFat> {
+    /// Create a new empty builder.
+    pub fn new() -> Self;
 }
 
 /// Builder for configuring directory mappings with glob patterns.
-pub struct DirectoryBuilder {
+pub struct DirectoryBuilder<F> {
     // ... internal fields
 }
 
-impl DirectoryBuilder {
+impl<F> DirectoryBuilder<F> {
     /// Include files matching a glob pattern.
     /// 
     /// Patterns use gitignore-style syntax:
@@ -457,15 +427,17 @@ impl DirectoryBuilder {
     pub fn exclude(self, pattern: &str) -> Self;
     
     /// Finalize the directory mapping and return to the parent builder.
-    pub fn done(self) -> Result<HyperlightFSBuilder>;
+    pub fn done(self) -> Result<HyperlightFSBuilder<F>>;
 }
 
-impl HyperlightFSBuilder {
+impl HyperlightFSBuilder<NoFat> {
     /// Mount a FAT image from a host file.
     /// 
     /// The file is mmap'd with `MAP_SHARED` so writes persist automatically.
     /// An exclusive lock is acquired on the file - attempting to map the same
     /// file into another sandbox will fail until this sandbox releases it.
+    /// 
+    /// **Note:** This transforms the builder from `NoFat` to `WithFat`.
     /// 
     /// # Arguments
     /// * `host_path` - Path to FAT image file on host
@@ -480,7 +452,7 @@ impl HyperlightFSBuilder {
         self,
         host_path: P,
         mount_point: &str
-    ) -> Result<Self>;
+    ) -> Result<HyperlightFSBuilder<WithFat>>;
     
     /// Create an empty FAT filesystem at a mount point.
     /// 
@@ -489,9 +461,7 @@ impl HyperlightFSBuilder {
     /// This provides consistency with `add_fat_image()` - both methods create a
     /// backing host file. The temp file is deleted when the HyperlightFSImage is dropped.
     /// 
-    /// The size is fixed at creation time. If the guest fills the filesystem,
-    /// subsequent writes will fail with ENOSPC. Consider using sparse files on
-    /// the host for efficient storage when the full size may not be used.
+    /// **Note:** This transforms the builder from `NoFat` to `WithFat`.
     /// 
     /// # Arguments
     /// * `mount_point` - Directory path in guest namespace  
@@ -506,17 +476,15 @@ impl HyperlightFSBuilder {
         self,
         mount_point: &str,
         size_bytes: usize
-    ) -> Result<Self>;
+    ) -> Result<HyperlightFSBuilder<WithFat>>;
     
     /// Create an empty FAT filesystem at a mount point, backed by a specified host file.
     /// 
     /// Similar to `add_empty_fat_mount()`, but the backing file is created at the
     /// specified host path and **persists after the HyperlightFSImage is dropped**.
     /// The file is mmap'd with `MAP_SHARED` so writes persist automatically.
-    /// This is useful for debugging, inspection, or reusing images across runs.
     /// 
-    /// The file is created (or truncated if it exists) and formatted as FAT.
-    /// An exclusive lock is acquired - same file cannot be used by another sandbox.
+    /// **Note:** This transforms the builder from `NoFat` to `WithFat`.
     /// 
     /// # Arguments
     /// * `host_path` - Path where backing file will be created on host
@@ -534,199 +502,187 @@ impl HyperlightFSBuilder {
         host_path: P,
         mount_point: &str,
         size_bytes: usize
+    ) -> Result<HyperlightFSBuilder<WithFat>>;
+    
+    /// Build from TOML string (returns image directly, not builder).
+    pub fn from_toml(toml: &str) -> Result<HyperlightFSImage>;
+    
+    /// Build from TOML file path (returns image directly, not builder).
+    pub fn from_toml_file(path: &str) -> Result<HyperlightFSImage>;
+    
+    /// Build from config struct (returns image directly, not builder).
+    pub fn from_config(config: &HyperlightFsConfig) -> Result<HyperlightFSImage>;
+}
+
+impl HyperlightFSBuilder<WithFat> {
+    /// Add another FAT image (stays in WithFat state).
+    pub fn add_fat_image<P: AsRef<Path>>(
+        self,
+        host_path: P,
+        mount_point: &str
     ) -> Result<Self>;
     
-    /// Preview what would be built without creating mappings.
-    pub fn list(&self) -> Result<BuildManifest>;
+    /// Add another empty FAT mount (stays in WithFat state).
+    pub fn add_empty_fat_mount(
+        self,
+        mount_point: &str,
+        size_bytes: usize
+    ) -> Result<Self>;
     
-    /// Build the filesystem image.
-    pub fn build(self) -> Result<HyperlightFSImage>;
-    
-    /// Build from TOML configuration.
-    pub fn from_toml(toml: &str) -> Result<Self>;
-    
-    /// Build from TOML configuration file.
-    pub fn from_config(config: &HyperlightFsConfig) -> Result<Self>;
+    /// Add another empty FAT mount at path (stays in WithFat state).
+    pub fn add_empty_fat_mount_at<P: AsRef<Path>>(
+        self,
+        host_path: P,
+        mount_point: &str,
+        size_bytes: usize
+    ) -> Result<Self>;
 }
 ```
 
-### 4.2 HyperlightFSImage
+#### 4.1.3 TOML Configuration Format
 
-Represents a built filesystem image with file access APIs.
+HyperlightFS can be configured via TOML files:
+
+```toml
+# Read-only file mapping
+[[file]]
+host_path = "/host/config.json"
+guest = "/config.json"
+
+# Read-only directory mapping
+[[directory]]
+host_path = "/host/assets"
+guest = "/assets"
+include = ["**/*.png", "**/*.jpg"]
+exclude = ["**/thumbs/**"]
+
+# Mount an existing FAT image file
+[[fat_image]]
+host_path = "/host/data.fat"
+mount_point = "/data"
+
+# Create an empty FAT mount (temp file, deleted on drop)
+[[fat_mount]]
+mount_point = "/scratch"
+size = "10MB"
+
+# Create an empty FAT mount at specific host path (persists after drop)
+[[fat_mount]]
+host_path = "/host/logs.fat"
+mount_point = "/logs"
+size = "50MB"
+```
+
+**Size Values:**
+- Integer: bytes (e.g., `size = 1048576`)
+- String: human-readable with suffix (e.g., `size = "10MB"`, `size = "1GiB"`)
+- Supported suffixes: B, KB, KiB, MB, MiB, GB, GiB
+
+### 4.2 Sandbox File Access
+
+File access methods on `MultiUseSandbox` for interacting with FAT mounts between guest function calls.
 
 ```rust
-impl HyperlightFSImage {
-    // === Metadata ===
+impl MultiUseSandbox {
+    // === File Operations ===
     
-    /// Get total size of all mapped regions.
-    pub fn total_size(&self) -> usize;
-    
-    /// List all mount points.
-    pub fn list_mounts(&self) -> Vec<MountInfo>;
-    
-    /// List all file mappings (RO files and FAT mount contents).
-    pub fn list_files(&self) -> Vec<FileInfo>;
-    
-    // === FAT Image Access (before sandbox) ===
-    
-    /// Read a file from a FAT mount.
+    /// Read a file from a FAT mount into memory.
     /// 
     /// # Errors
     /// * Path is not under a FAT mount
-    /// * Path not found
-    /// * Path is a directory
-    pub fn read_file(&self, guest_path: &str) -> Result<Vec<u8>>;
+    /// * File doesn't exist or is a directory
+    pub fn fs_read_file(&mut self, guest_path: &str) -> Result<Vec<u8>>;
     
-    /// Write a file to a FAT mount.
+    /// Write data to a file in a FAT mount.
+    /// 
+    /// Creates the file if it doesn't exist, or overwrites it if it does.
+    /// Parent directories must already exist.
     /// 
     /// # Errors
-    /// * Path is not under a FAT mount (RO files cannot be modified)
+    /// * Path is not under a FAT mount
     /// * Parent directory doesn't exist
     /// * Filesystem is full
-    pub fn write_file(&self, guest_path: &str, data: &[u8]) -> Result<()>;
-    
-    /// Delete a file from a FAT mount.
-    pub fn delete_file(&self, guest_path: &str) -> Result<()>;
-    
-    /// Create a directory in a FAT mount.
-    pub fn create_dir(&self, guest_path: &str) -> Result<()>;
-    
-    /// Delete an empty directory from a FAT mount.
-    pub fn delete_dir(&self, guest_path: &str) -> Result<()>;
+    pub fn fs_write_file(&mut self, guest_path: &str, data: &[u8]) -> Result<()>;
     
     /// Get file/directory metadata.
-    /// 
-    /// Works for both RO files and FAT files.
-    pub fn stat(&self, guest_path: &str) -> Result<FileStat>;
+    pub fn fs_stat(&mut self, guest_path: &str) -> Result<FatStat>;
     
     /// List directory contents.
+    pub fn fs_read_dir(&mut self, guest_path: &str) -> Result<Vec<FatEntry>>;
+    
+    /// Check if a path exists in a FAT mount.
+    pub fn fs_exists(&mut self, guest_path: &str) -> Result<bool>;
+    
+    // === Directory Operations ===
+    
+    /// Create a directory in a FAT mount.
     /// 
-    /// Works for both RO directories and FAT directories.
-    pub fn read_dir(&self, guest_path: &str) -> Result<Vec<DirEntry>>;
+    /// Parent directories must already exist.
+    pub fn fs_mkdir(&mut self, guest_path: &str) -> Result<()>;
     
-    // === FAT Image Extraction ===
+    /// Remove an empty directory from a FAT mount.
+    pub fn fs_remove_dir(&mut self, guest_path: &str) -> Result<()>;
     
-    /// Get raw FAT image data for a mount point.
-    pub fn get_fat_image_data(&self, mount_point: &str) -> Result<&[u8]>;
+    // === File Management ===
     
-    /// Write FAT image to a file.
-    pub fn save_fat_image<P: AsRef<Path>>(
-        &self, 
-        mount_point: &str, 
-        path: P
-    ) -> Result<()>;
+    /// Delete a file from a FAT mount.
+    pub fn fs_remove_file(&mut self, guest_path: &str) -> Result<()>;
+    
+    /// Rename/move a file or directory within a FAT mount.
+    /// 
+    /// Both paths must be within the same FAT mount.
+    pub fn fs_rename(&mut self, old_path: &str, new_path: &str) -> Result<()>;
+    
+    // === Streaming Access ===
+    
+    /// Open a file for reading with streaming access.
+    /// 
+    /// Returns a reader that implements `std::io::Read`.
+    pub fn fs_open_file(&mut self, guest_path: &str) -> Result<FatFileReader<'_>>;
+    
+    /// Create/overwrite a file with streaming access.
+    /// 
+    /// Returns a writer that implements `std::io::Write`.
+    pub fn fs_create_file(&mut self, guest_path: &str) -> Result<FatFileWriter<'_>>;
 }
 ```
 
-### 4.3 Sandbox File Access
-
-File access during sandbox lifecycle (when VM is paused).
+### 4.3 Host Data Types
 
 ```rust
-impl Sandbox {
-    // === During Execution (VM must be paused) ===
-    
-    /// Read a file from the guest filesystem.
-    /// 
-    /// # Errors
-    /// * VM is running (not paused)
-    /// * Path not found
-    pub fn fs_read_file(&self, guest_path: &str) -> Result<Vec<u8>>;
-    
-    /// Write a file to a FAT mount in guest filesystem.
-    /// 
-    /// # Errors
-    /// * VM is running (not paused)
-    /// * Path is RO (not under FAT mount)
-    pub fn fs_write_file(&self, guest_path: &str, data: &[u8]) -> Result<()>;
-    
-    /// Get file metadata.
-    pub fn fs_stat(&self, guest_path: &str) -> Result<FileStat>;
-    
-    /// List directory contents.
-    pub fn fs_read_dir(&self, guest_path: &str) -> Result<Vec<DirEntry>>;
-    
-    // === Post-Execution Extraction ===
-    
-    /// Get raw FAT image data for a mount point.
-    /// 
-    /// Returns the current state of the FAT filesystem including
-    /// any modifications made by the guest.
-    pub fn get_fat_image_data(&self, mount_point: &str) -> Result<Vec<u8>>;
-    
-    /// Save a specific file from FAT mount to host filesystem.
-    pub fn save_guest_file<P: AsRef<Path>>(
-        &self,
-        guest_path: &str,
-        host_path: P
-    ) -> Result<()>;
-    
-    /// Save entire FAT image to host filesystem.
-    pub fn save_fat_image<P: AsRef<Path>>(
-        &self,
-        mount_point: &str,
-        host_path: P
-    ) -> Result<()>;
-    
-    /// Save a directory tree from FAT mount to host filesystem.
-    pub fn save_guest_dir<P: AsRef<Path>>(
-        &self,
-        guest_path: &str,
-        host_path: P
-    ) -> Result<()>;
-}
-```
-
-### 4.4 Host Data Types
-
-```rust
-/// Information about a mount point.
-pub struct MountInfo {
-    /// Guest path where mounted (e.g., "/data")
-    pub mount_point: String,
-    /// Type of mount
-    pub mount_type: MountType,
-    /// Total size in bytes
-    pub size: u64,
-    /// Used space (FAT only, 0 for RO)
-    pub used: u64,
-}
-
-pub enum MountType {
-    /// Read-only memory-mapped files
-    ReadOnly,
-    /// Read-write FAT filesystem from host image
-    FatFromHost,
-    /// Read-write FAT filesystem created empty
-    FatEmpty,
-    /// Read-write FAT filesystem created by guest
-    FatGuest,
-}
-
-/// File metadata.
-pub struct FileStat {
-    /// Size in bytes
-    pub size: u64,
-    /// Is this a directory?
-    pub is_dir: bool,
-    /// Is this read-only?
-    pub is_readonly: bool,
-    /// Creation time (FAT only)
-    pub created: Option<DateTime>,
-    /// Modification time (FAT only)
-    pub modified: Option<DateTime>,
-    /// Access time (FAT only)
-    pub accessed: Option<DateTime>,
-}
-
-/// Directory entry.
-pub struct DirEntry {
-    /// Entry name (not full path)
+/// Directory entry returned by `read_dir()` and `fs_read_dir()`.
+pub struct FatEntry {
+    /// Name of the file or directory.
     pub name: String,
-    /// Is this a directory?
-    pub is_dir: bool,
-    /// Size in bytes (0 for directories)
+    /// Metadata (size, type, timestamps) at the time of the directory listing.
+    /// 
+    /// **Note**: This is a snapshot. If the file is modified after
+    /// `read_dir()` is called, these values will be stale.
+    pub stat: FatStat,
+}
+
+/// Metadata for a file or directory.
+/// 
+/// # FAT Timestamp Limitations
+/// 
+/// These are limitations of the FAT filesystem format itself:
+/// - **Created/Modified**: 2-second resolution (seconds are always even numbers)
+/// - **Accessed**: Date only - FAT stores no time component for last access
+/// 
+/// For `accessed`, we return midnight (00:00:00) as the time since FAT doesn't
+/// provide one.
+pub struct FatStat {
+    /// Size in bytes (0 for directories).
     pub size: u64,
+    /// Whether this is a directory.
+    pub is_dir: bool,
+    /// Creation timestamp (2-second resolution).
+    pub created: Option<NaiveDateTime>,
+    /// Last modification timestamp (2-second resolution).
+    pub modified: Option<NaiveDateTime>,
+    /// Last access date. Time component is always midnight (00:00:00) because
+    /// FAT only stores the date, not the time, for last access.
+    pub accessed: Option<NaiveDateTime>,
 }
 ```
 
@@ -743,22 +699,17 @@ pub struct DirEntry {
 pub fn is_initialized() -> bool;
 
 /// Get current working directory.
-pub fn getcwd() -> Result<String, FsError>;
+pub fn cwd() -> Result<String, FsError>;
 
 /// Change current working directory.
 pub fn chdir(path: &str) -> Result<(), FsError>;
 
 // === File Operations ===
 
-/// Open a file.
+/// Open a file for reading.
 /// 
-/// # Arguments
-/// * `path` - Absolute or relative path
-/// * `mode` - Open mode flags
-pub fn open(path: &str, mode: OpenMode) -> Result<File, FsError>;
-
-/// Create and open a new file (O_CREAT | O_WRONLY | O_TRUNC).
-pub fn create(path: &str) -> Result<File, FsError>;
+/// Convenience function equivalent to `OpenOptions::new().read(true).open(path)`.
+pub fn open(path: &str) -> Result<File, FsError>;
 
 /// Get file metadata by path.
 pub fn stat(path: &str) -> Result<Stat, FsError>;
@@ -767,6 +718,20 @@ pub fn stat(path: &str) -> Result<Stat, FsError>;
 pub fn unlink(path: &str) -> Result<(), FsError>;
 
 /// Rename/move a file or directory.
+/// 
+/// # Arguments
+/// * `old_path` - Current path of file/directory
+/// * `new_path` - New path for file/directory
+/// 
+/// # Errors
+/// * `NotFound` - Source path doesn't exist
+/// * `AlreadyExists` - Destination already exists
+/// * `InvalidArgument` - Cross-mount rename (old_path and new_path on different mounts)
+/// * `PermissionDenied` - Source is read-only
+/// 
+/// # Cross-Mount Validation
+/// The implementation resolves mount points for both paths and returns
+/// `InvalidArgument` if they differ. FAT doesn't support cross-mount renames.
 pub fn rename(old_path: &str, new_path: &str) -> Result<(), FsError>;
 
 // === Directory Operations ===
@@ -784,20 +749,49 @@ pub fn read_dir(path: &str) -> Result<Vec<DirEntry>, FsError>;
 
 /// Create a new FAT filesystem and mount it.
 /// 
+/// Allocates memory from the guest heap, formats it as FAT, and
+/// registers it in the VFS at the specified mount point.
+/// 
 /// # Arguments
-/// * `mount_point` - Where to mount (must not conflict)
-/// * `size_bytes` - Size to allocate from guest heap
+/// * `mount_point` - Absolute path where mount appears (e.g., "/scratch")
+/// * `size_bytes` - Size in bytes (min 64KB, max 128MB)
 /// 
 /// # Errors
-/// * Insufficient memory
-/// * Mount point already in use
-/// * Size too small for FAT
+/// * `InvalidPath` - Mount point doesn't start with "/"
+/// * `InvalidArgument` - Size < 64KB or > 128MB
+/// * `AlreadyExists` - Mount point conflicts with existing mount
+/// * `OutOfMemory` - Failed to allocate from guest heap
+/// * `IoError` - Failed to format FAT filesystem
+/// 
+/// # Notes
+/// - FAT variant (FAT12/16/32) is auto-selected based on size
+/// - Guest-created mounts are NOT visible to host (not MAP_SHARED)
+/// - Memory is freed when `unmount()` is called
 pub fn create_fat_mount(mount_point: &str, size_bytes: usize) -> Result<(), FsError>;
 
 /// Unmount a guest-created FAT filesystem.
 /// 
-/// Only works for mounts created by this guest via create_fat_mount().
+/// Removes the mount from VFS and frees the allocated memory.
+/// 
+/// # Arguments
+/// * `mount_point` - Path of mount to remove
+/// 
+/// # Errors
+/// * `NotFound` - Mount point doesn't exist
+/// * `PermissionDenied` - Cannot unmount host-provided mounts
+/// * `FileLocked` - Files are still open on this mount
+/// 
+/// # Notes
+/// - Only guest-created mounts can be unmounted
+/// - All files on the mount must be closed first
 pub fn unmount(mount_point: &str) -> Result<(), FsError>;
+
+/// Check if a mount was created by the guest.
+/// 
+/// # Returns
+/// - `true` if mount was created via `create_fat_mount()`
+/// - `false` if mount is host-provided or doesn't exist
+pub fn is_guest_created_mount(mount_point: &str) -> bool;
 ```
 
 ### 5.2 File Handle
@@ -809,77 +803,97 @@ pub struct File {
 
 impl File {
     /// Get file descriptor number (for C interop).
-    pub fn fd(&self) -> i32;
+    /// 
+    /// Returns `Some(fd)` for read-only memory-mapped files, `None` for FAT files.
+    pub fn fd(&self) -> Option<i32>;
+    
+    /// Returns true if this file is read-only.
+    pub fn is_readonly(&self) -> bool;
+    
+    /// Returns true if this file supports writing.
+    pub fn is_writable(&self) -> bool;
     
     /// Get current position.
-    pub fn position(&self) -> Result<u64, FsError>;
+    pub fn position(&mut self) -> Result<u64, FsError>;
     
     /// Get file size.
-    pub fn size(&self) -> Result<u64, FsError>;
+    pub fn size(&mut self) -> Result<u64, FsError>;
     
     /// Get remaining bytes from position to EOF.
-    pub fn remaining(&self) -> Result<u64, FsError>;
+    pub fn remaining(&mut self) -> Result<u64, FsError>;
     
     /// Read entire file into a Vec.
+    /// 
+    /// Seeks to beginning first, then reads until EOF.
     pub fn read_to_vec(&mut self) -> Result<Vec<u8>, FsError>;
     
-    /// Truncate file to current position (RW files only).
-    pub fn truncate(&mut self) -> Result<(), FsError>;
-    
-    /// Sync data to underlying storage (RW files only).
-    pub fn sync(&mut self) -> Result<(), FsError>;
-    
-    /// Get file metadata.
-    pub fn stat(&self) -> Result<Stat, FsError>;
+    /// Flush any buffered data to the underlying storage.
+    /// 
+    /// For read-only files, this is a no-op.
+    pub fn flush(&mut self) -> Result<(), FsError>;
 }
 
 // Implements embedded_io traits
 impl embedded_io::Read for File { ... }
-impl embedded_io::Write for File { ... }  // RW files only
+impl embedded_io::Write for File { ... }  // RW files only, returns ReadOnly error otherwise
 impl embedded_io::Seek for File { ... }
 ```
 
-### 5.3 Open Modes
+### 5.3 Open Options
+
+Files are opened using a builder pattern:
 
 ```rust
-bitflags! {
-    pub struct OpenMode: u32 {
-        /// Open for reading.
-        const READ = 0x01;
-        /// Open for writing.
-        const WRITE = 0x02;
-        /// Create file if it doesn't exist.
-        const CREATE = 0x04;
-        /// Truncate file to zero length.
-        const TRUNCATE = 0x08;
-        /// Append to end of file.
-        const APPEND = 0x10;
-        /// Fail if file already exists (with CREATE).
-        const EXCLUSIVE = 0x20;
-        
-        // Convenience combinations
-        const READ_ONLY = Self::READ.bits();
-        const WRITE_ONLY = Self::WRITE.bits();
-        const READ_WRITE = Self::READ.bits() | Self::WRITE.bits();
-        const CREATE_NEW = Self::WRITE.bits() | Self::CREATE.bits() | Self::EXCLUSIVE.bits();
-    }
+/// Builder for opening files with specific access options.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OpenOptions {
+    read: bool,
+    write: bool,
+    create: bool,
+    create_new: bool,  // O_CREAT | O_EXCL
+    truncate: bool,
 }
+
+impl OpenOptions {
+    /// Create a new `OpenOptions` with all options set to false.
+    pub fn new() -> Self;
+    
+    /// Open for reading.
+    pub fn read(self, read: bool) -> Self;
+    
+    /// Open for writing.
+    pub fn write(self, write: bool) -> Self;
+    
+    /// Create file if it doesn't exist (requires write).
+    pub fn create(self, create: bool) -> Self;
+    
+    /// Create new file, fail if exists (O_CREAT | O_EXCL).
+    pub fn create_new(self, create_new: bool) -> Self;
+    
+    /// Truncate file to zero length on open.
+    pub fn truncate(self, truncate: bool) -> Self;
+    
+    /// Open the file at the given path.
+    pub fn open(self, path: &str) -> Result<File, FsError>;
+}
+
+// Example usage:
+let file = OpenOptions::new()
+    .write(true)
+    .create(true)
+    .open("/data/output.txt")?;
 ```
 
 ### 5.4 Guest Data Types
 
 ```rust
 /// File metadata.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Stat {
-    /// Size in bytes.
+    /// Size in bytes (0 for directories).
     pub size: u64,
     /// Is this a directory?
     pub is_dir: bool,
-    /// Is this read-only?
-    pub is_readonly: bool,
-    /// Permission mode (faked for FAT).
-    pub mode: u32,
 }
 
 /// Directory entry.
@@ -904,17 +918,15 @@ The VFS maintains a mount table that maps guest paths to storage backends:
 
 ```rust
 /// Virtual filesystem managing mounts and path resolution.
-struct Vfs {
+pub struct Vfs {
     /// Mount table, sorted by path length descending for longest-prefix matching.
     mounts: Vec<Mount>,
-    /// File descriptor table (fd → open file handle).
-    fd_table: FdTable,
-    /// Current working directory.
+    /// Current working directory (always absolute).
     cwd: String,
 }
 
 /// A single mount point.
-struct Mount {
+pub struct Mount {
     /// Absolute path where this mount is rooted (e.g., "/data").
     path: String,
     /// The storage backend.
@@ -922,9 +934,9 @@ struct Mount {
 }
 
 /// Storage backend types.
-enum MountBackend {
+pub enum MountBackend {
     /// Read-only memory-mapped file/directory from manifest.
-    ReadOnly(ReadOnlyBackend),
+    ReadOnly,
     /// Read-write FAT filesystem.
     Fat(GuestFat),
 }
@@ -943,17 +955,16 @@ enum MountBackend {
 
 ```rust
 /// FAT filesystem wrapper for guest memory regions.
-struct GuestFat {
+pub struct GuestFat {
     /// fatfs FileSystem over RawMemoryStorage.
-    /// Uses 'static lifetime via UnsafeCell pattern (guest memory is stable).
     fs: fatfs::FileSystem<RawMemoryStorage>,
 }
 
 /// Adapts raw guest memory to fatfs I/O traits.
-struct RawMemoryStorage {
+pub struct RawMemoryStorage {
     /// Pointer to start of FAT image in guest memory.
     base: *mut u8,
-    /// Total size of FAT image.
+    /// Size of the memory region in bytes.
     size: usize,
     /// Current read/write position.
     position: usize,
@@ -962,34 +973,35 @@ struct RawMemoryStorage {
 
 **GuestFat operations:**
 - `from_memory(ptr, size)` - Open existing FAT filesystem in memory
-- `open(path, mode)` → `GuestFatFile` - Open file with specified mode
+- `open(path, read, write, create, truncate)` → `GuestFatFile` - Open file with specified mode
 - `read_dir(path)` → `Vec<DirEntry>` - List directory contents
 - `mkdir(path)` - Create directory
 - `rmdir(path)` - Remove empty directory
-- `unlink(path)` - Delete file
+- `remove(path)` - Delete file
 - `stat(path)` → `Stat` - Get file/directory metadata
 - `rename(old, new)` - Move/rename file or directory
 
 #### 5.5.3 File Handle Abstraction
 
 ```rust
-/// Unified file handle that works with any backend.
-enum FileHandle {
-    /// Read-only file from manifest.
-    ReadOnly {
-        /// Pointer to file data.
-        data: *const u8,
-        /// File size.
-        size: usize,
-        /// Current position.
-        position: usize,
-    },
-    /// File on FAT filesystem.
-    Fat(GuestFatFile),
+/// An open file handle (unified type for all backends).
+pub enum File {
+    /// Read-only memory-mapped file from the manifest.
+    ReadOnly(RoFile),
+    /// Read-write file on a FAT filesystem.
+    /// The 'static lifetime is valid because the FAT filesystem backing
+    /// memory is mapped by the host and lives for the guest's entire execution.
+    Fat(GuestFatFile<'static>),
+}
+
+/// Read-only file handle with file descriptor.
+pub struct RoFile {
+    /// File descriptor index (into internal fd table).
+    fd: i32,
 }
 ```
 
-The public `File` type wraps `FileHandle` and provides the API documented in §5.2.
+The public `File` type provides the API documented in §5.2.
 
 #### 5.5.4 TimeProvider
 
@@ -998,7 +1010,7 @@ fatfs requires a `TimeProvider` trait for file timestamps. Since guest VMs have 
 ```rust
 /// Always returns 1980-01-01 00:00:00 (FAT epoch).
 #[derive(Debug, Clone, Copy, Default)]
-struct HyperlightTimeProvider;
+pub struct HyperlightTimeProvider;
 
 impl fatfs::TimeProvider for HyperlightTimeProvider {
     fn get_current_date(&self) -> fatfs::Date {
@@ -1034,15 +1046,18 @@ Guest filesystem initialization on startup:
 
 ### 6.1 Constants
 
+**Note:** All constants are defined with `hl_HL_` prefix internally (e.g., `hl_HL_O_RDONLY`). 
+The header provides convenience macros that map standard POSIX names to these prefixed versions.
+
 ```c
-// Open flags
-#define O_RDONLY    0x0000
-#define O_WRONLY    0x0001
-#define O_RDWR      0x0002
-#define O_CREAT     0x0040
-#define O_EXCL      0x0080
-#define O_TRUNC     0x0200
-#define O_APPEND    0x0400
+// Open flags (macros -> hl_HL_* constants)
+#define O_RDONLY    hl_HL_O_RDONLY   // 0x0000
+#define O_WRONLY    hl_HL_O_WRONLY   // 0x0001
+#define O_RDWR      hl_HL_O_RDWR     // 0x0002
+#define O_CREAT     hl_HL_O_CREAT    // 0x0040
+#define O_EXCL      hl_HL_O_EXCL     // 0x0080
+#define O_TRUNC     hl_HL_O_TRUNC    // 0x0200
+#define O_APPEND    hl_HL_O_APPEND   // 0x0400
 
 // Seek whence
 #define SEEK_SET    0
@@ -1063,108 +1078,141 @@ Guest filesystem initialization on startup:
 
 // AT_* constants for openat
 #define AT_FDCWD    -100
+
+// access() mode flags
+#define R_OK        4   // Test for read permission
+#define W_OK        2   // Test for write permission
+#define X_OK        1   // Test for execute permission (always fails)
+#define F_OK        0   // Test for existence
 ```
 
 ### 6.2 Data Structures
 
 ```c
-// File status (stat/fstat)
+// File status (stat/fstat) - simplified for HyperlightFS
 typedef struct {
-    uint64_t st_size;       // File size in bytes
-    uint32_t st_mode;       // File mode (S_IFREG, S_IFDIR, permissions)
-    uint32_t st_nlink;      // Number of hard links (always 1)
-    uint32_t st_uid;        // User ID (always 0)
-    uint32_t st_gid;        // Group ID (always 0)
-    uint64_t st_atime;      // Access time (Unix timestamp, FAT only)
-    uint64_t st_mtime;      // Modification time (Unix timestamp, FAT only)
-    uint64_t st_ctime;      // Creation time (Unix timestamp, FAT only)
-    uint64_t _reserved[4];  // Reserved for future use
-} hl_stat_t;
+    uint64_t size;       // File size in bytes
+    int32_t  is_dir;     // 1 if directory, 0 if file
+    uint32_t _reserved[4]; // Reserved for future use
+} hl_Stat;
 
 // Directory entry (readdir)
 typedef struct {
-    uint64_t d_ino;         // Inode number (synthetic)
+    uint64_t d_ino;         // Inode number (synthetic, always 1)
     uint8_t  d_type;        // Entry type (DT_REG or DT_DIR)
     char     d_name[256];   // Entry name (null-terminated)
-} hl_dirent_t;
+} hl_hl_dirent_t;
 
 // Directory stream (opaque)
-typedef struct hl_DIR hl_DIR;
+typedef void hl_hl_DIR;
 ```
 
+#### 6.2.1 Directory Stream Implementation
+
+The C API maintains an internal table of open directory streams:
+
+- **Maximum concurrent streams:** 16 (`MAX_DIR_STREAMS`)
+- **`d_ino` field:** Synthetic inode number (always 1)
+- **`d_type` field:** `DT_REG` (8) for files, `DT_DIR` (4) for directories
+- **Stream lifecycle:** `opendir()` allocates, `closedir()` frees
+- **Error on exhaustion:** `opendir()` returns `NULL` if 16 streams already open
+
 ### 6.3 Functions
+
+**Note:** All functions use the `hl_fs_` prefix (e.g., `hl_fs_open`, `hl_fs_close`). For C guests, the header provides macros that map standard POSIX names to these prefixed versions:
+
+```c
+// In hyperlight_guest.h:
+#define open(path, flags) hl_fs_open(path, flags)
+#define close(fd) hl_fs_close(fd)
+// ... etc
+```
+
+The actual function signatures are:
 
 ```c
 // === File Operations ===
 
 /// Open a file.
-/// Returns file descriptor >= 0 on success, -1 on error.
-int open(const char *path, int flags);
-int open(const char *path, int flags, mode_t mode);  // mode ignored
+/// Returns file descriptor >= 0 on success, negative error code on failure.
+int hl_fs_open(const char *path, int flags);
 
 /// Open relative to directory fd.
-/// dirfd can be AT_FDCWD or a directory file descriptor.
-int openat(int dirfd, const char *path, int flags);
-int openat(int dirfd, const char *path, int flags, mode_t mode);
+/// dirfd must be AT_FDCWD; other values return HL_ENOTSUP.
+int hl_fs_openat(int dirfd, const char *path, int flags);
 
 /// Close a file descriptor.
-int close(int fd);
+int hl_fs_close(int fd);
 
 /// Read from file.
-/// Returns bytes read, 0 at EOF, -1 on error.
-ssize_t read(int fd, void *buf, size_t count);
+/// Returns bytes read, 0 at EOF, negative error code on failure.
+ssize_t hl_fs_read(int fd, void *buf, size_t count);
 
 /// Write to file.
-/// Returns bytes written, -1 on error.
-ssize_t write(int fd, const void *buf, size_t count);
+/// Returns bytes written, negative error code on failure.
+ssize_t hl_fs_write(int fd, const void *buf, size_t count);
 
 /// Seek in file.
-/// Returns new offset, -1 on error.
-off_t lseek(int fd, off_t offset, int whence);
+/// Returns new offset, negative error code on failure.
+off_t hl_fs_lseek(int fd, off_t offset, int whence);
 
 /// Get file status by fd.
-int fstat(int fd, hl_stat_t *statbuf);
+int hl_fs_fstat(int fd, hl_Stat *statbuf);
 
 /// Get file status by path.
-int stat(const char *path, hl_stat_t *statbuf);
+int hl_fs_stat(const char *path, hl_Stat *statbuf);
 
 /// File control operations.
-int fcntl(int fd, int cmd, ...);
+/// Supported: F_DUPFD, F_GETFD, F_SETFD, F_GETFL, F_SETFL (partial).
+/// F_GETFD/F_SETFD work but close-on-exec is meaningless (no exec in guest).
+/// F_SETFL only honors O_APPEND changes; other flags are ignored.
+int hl_fs_fcntl(int fd, int cmd, ...);
 
 // === Directory Operations ===
 
 /// Open a directory for reading.
-hl_DIR *opendir(const char *path);
+/// Returns pointer to directory stream, NULL on failure.
+hl_hl_DIR *hl_fs_opendir(const char *path);
 
 /// Read next directory entry.
 /// Returns pointer to static dirent, NULL at end or on error.
-hl_dirent_t *readdir(hl_DIR *dirp);
+/// **Note:** The returned struct is reused on each call.
+hl_hl_dirent_t *hl_fs_readdir_entry(hl_hl_DIR *dirp);
+
+/// Read directory contents into buffer as newline-separated names.
+/// Returns number of bytes written (excluding null terminator), 
+/// or negative error code on failure.
+ssize_t hl_fs_readdir(int fd, char *buf, size_t buf_size);
 
 /// Close directory stream.
-int closedir(hl_DIR *dirp);
+int hl_fs_closedir(hl_hl_DIR *dirp);
 
 /// Create a directory.
-int mkdir(const char *path, mode_t mode);  // mode ignored
+int hl_fs_mkdir(const char *path);
+
+/// Create a directory relative to dirfd.
+/// dirfd must be AT_FDCWD; other values return HL_ENOTSUP.
+int hl_fs_mkdirat(int dirfd, const char *path);
 
 /// Remove an empty directory.
-int rmdir(const char *path);
+int hl_fs_rmdir(const char *path);
 
 // === File Manipulation ===
 
 /// Delete a file.
-int unlink(const char *path);
+int hl_fs_unlink(const char *path);
 
 /// Rename a file or directory.
-int rename(const char *oldpath, const char *newpath);
+int hl_fs_rename(const char *oldpath, const char *newpath);
 
 // === Working Directory ===
 
 /// Get current working directory.
 /// Returns buf on success, NULL on error.
-char *getcwd(char *buf, size_t size);
+char *hl_fs_getcwd(char *buf, size_t size);
 
 /// Change current working directory.
-int chdir(const char *path);
+int hl_fs_chdir(const char *path);
 
 // === HyperlightFS Extensions ===
 
@@ -1172,30 +1220,50 @@ int chdir(const char *path);
 int hl_fs_initialized(void);
 
 /// Create a new FAT mount from guest memory.
-/// Returns 0 on success, -1 on error.
-int hl_fs_create_mount(const char *mount_point, size_t size_bytes);
+/// Returns 0 on success, negative error code on failure.
+int hl_fs_create_fat_mount(const char *mount_point, size_t size_bytes);
 
 /// Unmount a guest-created FAT filesystem.
-int hl_fs_unmount(const char *mount_point);
+int hl_fs_unmount_fat(const char *mount_point);
+
+/// Check if mount was created by guest.
+/// Returns 1 if guest-created, 0 otherwise.
+int hl_fs_is_guest_created_mount(const char *mount_point);
+
+// === File Descriptor Operations ===
+
+/// Duplicate a file descriptor.
+/// Returns new fd on success, negative error code on failure.
+int hl_fs_dup(int oldfd);
+
+/// Duplicate a file descriptor to a specific fd.
+/// If newfd is open, it is closed first.
+int hl_fs_dup2(int oldfd, int newfd);
+
+/// Check file accessibility.
+/// mode: F_OK (existence), R_OK (read), W_OK (write).
+/// X_OK always returns -1 (execute permission not supported).
+int hl_fs_access(const char *path, int mode);
 ```
 
 ### 6.4 Error Handling
 
-All C functions return negative values on error. The specific error is **not** set in a global `errno` variable (documented limitation). Instead, the following conventions apply:
+All C functions return negative values on error. The specific error is **not** set in a global `errno` variable (documented limitation). Instead, functions return specific error codes:
 
-| Return Value | Meaning |
-|--------------|---------|
-| `-1` | Generic error (ENOENT, EACCES, etc.) |
-| `-2` | Not implemented (ENOTSUP) |
-| `-3` | Read-only filesystem (EROFS) |
-| `-4` | No space left (ENOSPC) |
-| `-5` | File exists (EEXIST) |
-| `-6` | Not a directory (ENOTDIR) |
-| `-7` | Is a directory (EISDIR) |
-| `-8` | Directory not empty (ENOTEMPTY) |
-| `-9` | Invalid argument (EINVAL) |
-| `-10` | Too many open files (EMFILE) |
-| `-11` | Bad file descriptor (EBADF) |
+| Constant | Value | Meaning |
+|----------|-------|---------|
+| `HL_ENOENT` | `-1` | No such file or directory |
+| `HL_ENOTSUP` | `-2` | Operation not supported |
+| `HL_EROFS` | `-3` | Read-only filesystem |
+| `HL_ENOSPC` | `-4` | No space left on device |
+| `HL_EEXIST` | `-5` | File exists |
+| `HL_ENOTDIR` | `-6` | Not a directory |
+| `HL_EISDIR` | `-7` | Is a directory |
+| `HL_ENOTEMPTY` | `-8` | Directory not empty |
+| `HL_EINVAL` | `-9` | Invalid argument |
+| `HL_EMFILE` | `-10` | Too many open files |
+| `HL_EBADF` | `-11` | Bad file descriptor |
+| `HL_EACCES` | `-12` | Permission denied |
 
 **Future enhancement:** May add `hl_fs_errno()` function to retrieve last error code.
 
@@ -1210,7 +1278,6 @@ The following operations return `-2` (ENOTSUP):
 | chmod/chown | FAT has no Unix permissions |
 | mknod | No device files |
 | File locking (fcntl F_SETLK) | Not implemented |
-| dup() / dup2() | FAT file handles have mutable state (position, buffers) that cannot be shared across duplicated descriptors without reference counting |
 | openat() with real dirfd | Only `AT_FDCWD` is supported; passing an actual directory fd returns ENOTSUP |
 | mkdirat() with real dirfd | Only `AT_FDCWD` is supported |
 
@@ -1222,59 +1289,65 @@ HyperlightFS aims for POSIX-like semantics where practical. This section documen
 
 | Feature | Notes |
 |---------|-------|
-| O_RDONLY, O_WRONLY, O_RDWR | Standard access modes |
-| O_CREAT | Creates file if not exists |
-| O_EXCL | With O_CREAT, fails if file exists (atomic create-if-not-exists) |
-| O_TRUNC | Truncates file to zero length |
-| O_APPEND | Seeks to EOF before each write (POSIX-compliant) |
-| fcntl F_GETFL | Returns original open() flags including O_APPEND |
-| fcntl F_SETFL | Can modify O_APPEND flag (per POSIX, only O_APPEND/O_NONBLOCK/O_ASYNC are changeable) |
-| lseek SEEK_SET/CUR/END | All three modes supported |
-| write() error on RDONLY fd | Returns EBADF (fd not open for writing) |
+| open() | O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_EXCL, O_TRUNC, O_APPEND |
+| close() | Standard semantics |
+| read() | Returns bytes read, 0 at EOF |
+| write() | Returns bytes written |
+| lseek() | SEEK_SET, SEEK_CUR, SEEK_END all supported |
+| stat()/fstat() | Size and type; permissions faked |
+| mkdir()/rmdir() | Standard semantics (mode ignored) |
+| unlink() | Removes files |
+| rename() | Within same mount only |
+| opendir()/readdir()/closedir() | Standard directory iteration |
+| getcwd()/chdir() | Working directory support |
+| dup()/dup2() | File descriptor duplication with shared position |
+| access() | F_OK, R_OK, W_OK checks (X_OK always fails) |
+| fcntl() | F_DUPFD, F_GETFD, F_SETFD, F_GETFL supported; F_SETFL partial |
 
-#### 6.6.2 Limitations
+#### 6.6.2 Partially Compliant
 
-| Feature | Behavior | POSIX Spec | Rationale |
-|---------|----------|------------|-----------|
-| O_EXCL without O_CREAT | Returns EINVAL | Undefined | Catches guest bugs early |
-| O_NONBLOCK | Ignored | Non-blocking I/O | No async I/O in guest VM |
-| O_SYNC | Ignored | Synchronous writes | FAT buffers writes; host flushes on close |
-| fcntl F_SETFL O_NONBLOCK | Accepted, ignored | Enable non-blocking | No async I/O support |
-| Global errno | Not implemented | Per-thread error | Return negative error codes instead |
-| AT_FDCWD only | openat/mkdirat | Full dirfd support | Would require tracking directory paths per fd |
+| Feature | Behavior | POSIX Spec | Notes |
+|---------|----------|------------|-------|
+| O_APPEND | Seeks to EOF before each write | Atomic append | Correct behavior, non-atomic |
+| O_EXCL without O_CREAT | Returns EINVAL | Undefined | Catches bugs early |
+| O_NONBLOCK | Ignored | Non-blocking I/O | No async I/O in guest |
+| O_SYNC | Ignored | Sync writes | FAT buffers writes |
+| mode parameter | Ignored | Permission bits | FAT has no Unix permissions |
+| errno | Not set | Per-thread error | Return negative codes instead |
+| openat()/mkdirat() | AT_FDCWD only | Full dirfd | Only current dir supported |
 
-### 6.7 Missing APIs
+#### 6.6.3 Not Supported (Not Implemented)
 
-The following POSIX APIs are commonly used but not currently implemented. Future versions may add these.
+The following POSIX operations are **not provided** by HyperlightFS:
 
-#### 6.7.1 High Priority (Commonly Used)
+| Operation | Reason |
+|-----------|--------|
+| symlink()/readlink() | FAT has no symlinks - functions not implemented |
+| link() | FAT has no hard links - function not implemented |
+| chmod()/chown() | FAT has no permissions - functions not implemented |
+| mknod() | No device files - function not implemented |
+| fcntl() F_SETLK/F_GETLK | No file locking - returns HL_EINVAL |
 
-| API | Purpose | Implementation Difficulty |
-|-----|---------|--------------------------|
-| `ftruncate(fd, len)` | Truncate open file to specified length | Medium - fatfs has `truncate()` |
-| `truncate(path, len)` | Truncate file by path | Easy - open + ftruncate + close |
-| `fsync(fd)` | Flush file data to storage | Easy - fatfs has `flush()` |
-| `pread(fd, buf, n, off)` | Read at offset without seeking | Easy - save pos, seek, read, restore |
-| `pwrite(fd, buf, n, off)` | Write at offset without seeking | Easy - save pos, seek, write, restore |
+**Note:** Unlike §6.5 "Unsupported Operations" which lists operations that exist but return errors, the functions above simply don't exist in the C API. Attempting to use them will result in linker errors.
 
-#### 6.7.2 Medium Priority
+#### 6.6.4 Error Code Mapping
 
-| API | Purpose | Notes |
-|-----|---------|-------|
-| `rewinddir(dirp)` | Reset directory stream to beginning | Easy - reset index |
-| `seekdir(dirp, pos)` / `telldir(dirp)` | Position in directory stream | Easy - expose index |
-| `fchdir(fd)` | Change directory by fd | Medium - track directory paths |
+HyperlightFS uses negative return values instead of setting errno:
 
-#### 6.7.3 Low Priority (Unlikely to Add)
-
-| API | Purpose | Reason Not Implemented |
-|-----|---------|----------------------|
-| `link()` | Hard links | FAT doesn't support hard links |
-| `symlink()` / `readlink()` | Symbolic links | FAT doesn't support symlinks |
-| `chmod()` / `chown()` | Change permissions/owner | FAT has no Unix permissions |
-| `utime()` / `utimes()` | Set file timestamps | Low priority; fatfs supports timestamps |
-| `umask()` | Creation permission mask | No real permissions in FAT |
-| `flock()` / `lockf()` | File locking | Single-threaded guest makes this less critical |
+| Error | Value | POSIX Equivalent |
+|-------|-------|------------------|
+| HL_ENOENT | -1 | ENOENT (not found) |
+| HL_ENOTSUP | -2 | ENOTSUP (not supported) |
+| HL_EROFS | -3 | EROFS (read-only) |
+| HL_ENOSPC | -4 | ENOSPC (no space) |
+| HL_EEXIST | -5 | EEXIST (exists) |
+| HL_ENOTDIR | -6 | ENOTDIR |
+| HL_EISDIR | -7 | EISDIR |
+| HL_ENOTEMPTY | -8 | ENOTEMPTY |
+| HL_EINVAL | -9 | EINVAL |
+| HL_EMFILE | -10 | EMFILE (too many files) |
+| HL_EBADF | -11 | EBADF (bad fd) |
+| HL_EACCES | -12 | EACCES (permission denied) |
 
 ---
 
@@ -1363,12 +1436,11 @@ table Inode {
     path: string (required);
     parent: uint32;
     
-    // For File: address and size of mmap'd data
-    // For FatMount: address and size of FAT image data
+    // For File/FatMount: GVA/GPA where data is mapped (0 for directories)
     guest_address: uint64;
+    // For File/FatMount: size in bytes
     size: uint64;
-    
-    // For FatMount: identifies the mount for extraction
+    // For FatMount: unique mount identifier for host-side extraction
     mount_id: uint32;
 }
 
@@ -1393,51 +1465,127 @@ root_type HyperlightFS;
 
 ### 9.1 Guest Address Space
 
-```
-┌─────────────────────────────────────────────┐ High Address
-│                                             │
-│  Guest Heap (grows down)                    │
-│    └── Guest-created FAT images allocated   │
-│        here via guest allocator             │
-│                                             │
-├─────────────────────────────────────────────┤
-│                                             │
-│  HyperlightFS Region                        │
-│                                             │
-│  ┌─────────────────────────────────────┐    │
-│  │ Manifest (FlatBuffer, page-aligned) │    │
-│  │   - File metadata                   │    │
-│  │   - Mount metadata                  │    │
-│  │   - Guest addresses                 │    │
-│  └─────────────────────────────────────┘    │
-│                                             │
-│  ┌─────────────────────────────────────┐    │
-│  │ RO Files Region                     │    │
-│  │   - Memory-mapped from host files   │    │
-│  │   - Each file page-aligned          │    │
-│  │   - Demand-paged via page faults    │    │
-│  └─────────────────────────────────────┘    │
-│                                             │
-│  ┌─────────────────────────────────────┐    │
-│  │ FAT Image Regions (host-provided)   │    │
-│  │   - mmap'd from host with MAP_SHARED│    │
-│  │   - One region per mount            │    │
-│  │   - Page-aligned, RW access         │    │
-│  │   - Writes persist to host file     │    │
-│  └─────────────────────────────────────┘    │
-│                                             │
-├─────────────────────────────────────────────┤
-│                                             │
-│  Guest Stack                                │
-│                                             │
-├─────────────────────────────────────────────┤
-│                                             │
-│  Guest Code                                 │
-│                                             │
-└─────────────────────────────────────────────┘ Low Address
+```mermaid
+block-beta
+    columns 1
+    
+    block:heap:1
+        columns 1
+        H1["Guest Heap (grows down)"]
+        H2["└── Guest-created FAT images allocated here via guest allocator"]
+    end
+    
+    block:hlfs:1
+        columns 1
+        FS1["HyperlightFS Region"]
+        block:manifest
+            columns 1
+            MF1["Manifest (FlatBuffer, page-aligned)"]
+            MF2["- File metadata"]
+            MF3["- Mount metadata"]
+            MF4["- Guest addresses"]
+        end
+        block:rofiles
+            columns 1
+            RO1["RO Files Region"]
+            RO2["- Memory-mapped from host files"]
+            RO3["- Each file page-aligned"]
+            RO4["- Demand-paged via page faults"]
+        end
+        block:fatregion
+            columns 1
+            FAT1["FAT Image Regions (host-provided)"]
+            FAT2["- mmap'd from host with MAP_SHARED"]
+            FAT3["- One region per mount"]
+            FAT4["- Page-aligned, RW access"]
+            FAT5["- Writes persist to host file"]
+        end
+    end
+    
+    block:stack:1
+        ST["Guest Stack"]
+    end
+    
+    block:code:1
+        CD["Guest Code"]
+    end
+    
+    heap --> hlfs --> stack --> code
+    
+    style heap fill:#e1f5fe
+    style hlfs fill:#fff3e0
+    style stack fill:#f3e5f5
+    style code fill:#e8f5e9
 ```
 
-### 9.2 FAT Image Structure
+> **Address Layout**: High addresses at top, low addresses at bottom.
+
+### 9.2 Mapped Files Region Layout
+
+The mapped files region has a fixed layout:
+
+```mermaid
+block-beta
+    columns 1
+    
+    block:roblock:1
+        columns 1
+        RO["RO Files (page-aligned, contiguous) ← Base address"]
+        F1["├── File 1 (rounded to page boundary)"]
+        F2["├── File 2 (rounded to page boundary)"]
+        FN["└── ..."]
+    end
+    
+    block:fatblock:1
+        columns 1
+        FAT["FAT Mounts (page-aligned, contiguous) ← Base + RO region size"]
+        M1["├── FAT Mount 1 (rounded to page)"]
+        M2["├── FAT Mount 2 (rounded to page)"]
+        MN["└── ..."]
+    end
+    
+    roblock --> fatblock
+    
+    style roblock fill:#e3f2fd
+    style fatblock fill:#fff8e1
+```
+
+Total size = `round_up_to_page(RO files) + round_up_to_page(FAT mounts)`
+
+### 9.3 FAT Region Tracking for Page Faults
+
+The guest page fault handler must distinguish between RO and RW regions:
+
+```rust
+/// A FAT memory region (base address and size).
+#[derive(Clone, Copy)]
+struct FatRegion {
+    base: u64,
+    size: u64,
+}
+
+/// Global FAT region table for page fault handler queries.
+/// Uses UnsafeCell because guest is single-threaded.
+struct FatRegionCell(UnsafeCell<Vec<FatRegion>>);
+
+/// Check if an address is within a FAT (RW) region.
+#[inline]
+pub fn is_fat_region(addr: u64) -> bool;
+```
+
+**Page fault handling:**
+1. Guest accesses unmapped address → page fault
+2. Handler checks `is_fat_region(fault_addr)`
+3. If FAT region: map page with RW permissions
+4. If RO region: map page with RO permissions
+5. Resume execution
+
+**Important:** FAT regions are registered during `init()` BEFORE creating
+`GuestFat` instances. This ensures the page fault handler can correctly
+identify FAT pages even during initial FAT filesystem setup (e.g., when
+`GuestFat::from_memory()` parses the FAT boot sector).
+
+### 9.4 FAT Image Structure
 
 Each FAT image (host-provided or guest-created) follows standard FAT layout.
 The `fatfs` crate auto-selects the appropriate FAT variant based on volume size:
@@ -1451,60 +1599,56 @@ For the 1 MB minimum image size, FAT12 or FAT16 will be used.
 This is unlikely to be hit in typical Hyperlight usage but should be
 considered for workloads creating many files in the root directory.
 
-```
-┌────────────────────────────┐
-│ Boot Sector (512 bytes)    │
-├────────────────────────────┤
-│ FS Info Sector (512 bytes) │
-├────────────────────────────┤
-│ Reserved Sectors           │
-├────────────────────────────┤
-│ FAT #1                     │
-├────────────────────────────┤
-│ FAT #2 (backup)            │
-├────────────────────────────┤
-│ Data Region                │
-│   - Directory entries      │
-│   - File data clusters     │
-└────────────────────────────┘
-```
-
----
-
 ## 10. Permissions and Metadata
 
-### 10.1 Faked Unix Permissions
+### 10.1 Simplified Stat Structure
 
-Since FAT doesn't support Unix permissions, HyperlightFS fakes them:
+HyperlightFS uses a minimal stat structure for simplicity:
 
-| Entry Type | st_mode | Octal |
-|------------|---------|-------|
-| Regular file | `S_IFREG \| 0644` | 0100644 |
-| Directory | `S_IFDIR \| 0755` | 0040755 |
+```c
+typedef struct {
+    uint64_t size;       // File size in bytes (0 for directories)
+    int32_t  is_dir;     // 1 if directory, 0 if file
+    uint32_t _reserved[4]; // Reserved for future use
+} hl_Stat;
+```
 
-### 10.2 Ownership
+**Fields intentionally omitted** (compared to POSIX `struct stat`):
 
-All files appear owned by:
-- `st_uid = 0` (root)
-- `st_gid = 0` (root)
+| Field | Reason |
+|-------|--------|
+| `st_mode` | FAT has no Unix permissions - would always be faked |
+| `st_uid`/`st_gid` | Guest has no user/group concept |
+| `st_atime`/`st_mtime`/`st_ctime` | Guest has no RTC; timestamps would be meaningless |
+| `st_nlink` | No hard links in FAT |
+| `st_ino` | Synthetic inodes not useful |
+| `st_dev`/`st_rdev` | Single filesystem, no device files |
+| `st_blksize`/`st_blocks` | Block-level details not exposed |
 
-### 10.3 Timestamps
+### 10.2 Future Enhancement: Full Stat
 
-| Timestamp | RO Files | FAT Files |
-|-----------|----------|-----------|
-| st_atime | 0 (not tracked) | From FAT metadata |
-| st_mtime | 0 (not tracked) | From FAT metadata |
-| st_ctime | 0 (not tracked) | From FAT metadata |
+If POSIX-compatible stat information is needed in the future, the `_reserved` fields could be repurposed:
 
-**Guest timestamp source**: By default, Hyperlight guests have no real-time clock (RTC). Files created or modified by the guest use a fixed timestamp (FAT epoch: 1980-01-01 00:00:00). Pre-existing files in FAT images loaded via `add_fat_image()` retain their original timestamps.
+```c
+// Potential future extension (NOT YET IMPLEMENTED)
+typedef struct {
+    uint64_t size;
+    int32_t  is_dir;
+    uint32_t st_mode;     // S_IFREG | 0644, S_IFDIR | 0755 (faked)
+    uint32_t st_uid;      // Always 0
+    uint32_t st_gid;      // Always 0
+    uint32_t st_atime;    // From FAT metadata or 0
+} hl_Stat_v2;
+```
 
-**Future**: When paravirtualized clock support is enabled (see [PR #1173](https://github.com/hyperlight-dev/hyperlight/pull/1173)), guests will have access to wall-clock time and file timestamps will reflect actual creation/modification times. The `guest_time` feature provides `clock_gettime()` and related APIs that HyperlightFS can use for accurate FAT timestamps.
+If implemented, faked permissions would follow Linux FAT mount conventions:
+- Regular files: `S_IFREG | 0644` (0100644)
+- Directories: `S_IFDIR | 0755` (0040755)
+- All files owned by root (uid=0, gid=0)
 
-### 10.4 mode Parameter Handling
+### 10.3 mode Parameter Handling
 
-The `mode` parameter in `open(..., O_CREAT, mode)` and `mkdir(path, mode)` is **ignored**. Files are always created with the default permissions above.
-
-**Documented limitation**: This matches Linux behavior when mounting FAT with `umask=022`.
+The `mode` parameter in `mkdir(path, mode)` is **ignored**. FAT has no Unix permissions.
 
 ---
 
@@ -1515,42 +1659,46 @@ The `mode` parameter in `open(..., O_CREAT, mode)` and `mkdir(path, mode)` is **
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FsError {
-    /// Filesystem not initialized
-    NotInitialized,
-    /// Path not found
+    /// File or directory not found.
     NotFound,
-    /// Not a file (is a directory)
+    /// Path refers to a directory, not a file.
     NotAFile,
-    /// Not a directory (is a file)
+    /// Path refers to a file, not a directory.
     NotADirectory,
-    /// Path is read-only
-    ReadOnly,
-    /// File already exists
-    AlreadyExists,
-    /// Directory not empty
-    NotEmpty,
-    /// No space left
-    NoSpace,
-    /// Invalid path (null bytes, empty, etc.)
+    /// Invalid file descriptor.
+    InvalidFd,
+    /// Invalid path (empty, contains null bytes, etc.).
     InvalidPath,
-    /// Invalid seek position
+    /// Filesystem not initialized.
+    NotInitialized,
+    /// Seek to invalid position.
     InvalidSeek,
-    /// Too many open files
-    TooManyOpenFiles,
-    /// Bad file descriptor
-    BadFd,
-    /// Invalid manifest data
+    /// Manifest parsing failed.
     InvalidManifest,
-    /// Operation not supported
+    /// Path is read-only (cannot write to RO file/mount).
+    ReadOnly,
+    /// File or directory already exists.
+    AlreadyExists,
+    /// Directory is not empty.
+    NotEmpty,
+    /// No space left on device.
+    NoSpace,
+    /// Too many open files.
+    TooManyOpenFiles,
+    /// Operation not supported.
     NotSupported,
-    /// I/O error
+    /// Invalid argument.
+    InvalidArgument,
+    /// I/O error.
     IoError,
-    /// Insufficient memory
+    /// Out of memory.
     OutOfMemory,
-    /// File is locked by another process/sandbox
+    /// Resource is in use and cannot be freed (e.g., unmount with open files).
     FileLocked,
-    /// Platform does not support this operation (e.g., FAT RW on Windows)
+    /// Platform does not support this operation.
     PlatformNotSupported,
+    /// Permission denied (cannot perform operation on this resource).
+    PermissionDenied,
 }
 ```
 
@@ -1558,24 +1706,26 @@ pub enum FsError {
 
 | FsError | C Return | POSIX Equivalent |
 |---------|----------|------------------|
-| NotInitialized | -1 | ENXIO |
 | NotFound | -1 | ENOENT |
 | NotAFile | -7 | EISDIR |
 | NotADirectory | -6 | ENOTDIR |
+| InvalidFd | -11 | EBADF |
+| InvalidPath | -9 | EINVAL |
+| NotInitialized | -1 | ENXIO |
+| InvalidSeek | -9 | EINVAL |
+| InvalidManifest | -1 | EIO |
 | ReadOnly | -3 | EROFS |
 | AlreadyExists | -5 | EEXIST |
 | NotEmpty | -8 | ENOTEMPTY |
 | NoSpace | -4 | ENOSPC |
-| InvalidPath | -9 | EINVAL |
-| InvalidSeek | -9 | EINVAL |
 | TooManyOpenFiles | -10 | EMFILE |
-| BadFd | -11 | EBADF |
-| InvalidManifest | -1 | EIO |
 | NotSupported | -2 | ENOTSUP |
+| InvalidArgument | -9 | EINVAL |
 | IoError | -1 | EIO |
 | OutOfMemory | -1 | ENOMEM |
 | FileLocked | -1 | EAGAIN |
 | PlatformNotSupported | -2 | ENOTSUP |
+| PermissionDenied | -12 | EACCES |
 
 ### 11.3 fatfs Error Mapping (Guest Implementation)
 
@@ -1606,10 +1756,12 @@ The guest FAT backend uses the `fatfs` crate. Its errors map to `FsError` as fol
 |---------|------------|
 | Path traversal | All paths validated, no `..` allowed |
 | Symlink attacks | Symlinks rejected during mapping |
-| TOCTOU | Logical lock during sandbox execution |
-| File modification during mmap | Shared lock (`flock(LOCK_SH)`) blocks external writers |
+| TOCTOU | Best-effort; see note below |
+| File modification during mmap | **No protection** - see §13.5 for SIGBUS risk |
 | Arbitrary host file access | Only explicitly mapped files accessible |
-| Concurrent FAT access | Exclusive file lock prevents multi-sandbox corruption |
+| Concurrent FAT access | Exclusive file lock (`flock(LOCK_EX)`) prevents multi-sandbox corruption |
+
+**Note on TOCTOU**: There is a race window between `add_file()`/`add_dir()` validation and actual guest execution. Files may be modified between these points. This is a known limitation.
 
 ### 12.2 Guest-Side Security
 
@@ -1623,78 +1775,64 @@ The guest FAT backend uses the `fatfs` crate. Its errors map to `FsError` as fol
 ### 12.3 Isolation Properties
 
 - Guest cannot access unmapped host files
-- Guest cannot modify RO files
+- Guest cannot modify RO files (guest returns EROFS, but see §12.1 re: external modification)
 - Guest cannot see host file paths
 - Guest-created filesystems are isolated
-- FAT images are exclusively locked: one sandbox per backing file
+- FAT backing files are exclusively locked via `flock(LOCK_EX)`: one sandbox per file
 
-**Multi-sandbox sharing constraints:**
+**Typestate pattern for safe sharing:**
 
-When the same `HyperlightFSImage` is used by multiple sandboxes (via `Arc<HyperlightFSImage>`):
-- The image **must only contain RO file mappings** (no FAT mounts)
-- Attempting to evolve a sandbox with a shared image containing FAT mounts returns an error
-- Guest `create_fat_mount()` is **disabled** when using a shared image
-- This is enforced at `sandbox.evolve()` time by checking `Arc::strong_count() > 1`
+The builder uses a typestate pattern (`NoFat` / `WithFat`) to enforce sharing rules at compile time:
+
+- `HyperlightFSBuilder<NoFat>`: No FAT mounts, implements `Clone`, `build(&self)` borrows
+- `HyperlightFSBuilder<WithFat>`: Has FAT mounts, NOT `Clone`, `build(self)` consumes
+
+Adding a FAT mount transforms `NoFat` → `WithFat`. This ensures FAT mounts (which contain exclusive file locks) cannot be accidentally shared.
 
 ```rust
-// Valid: Shared RO-only image
-let fs = Arc::new(HyperlightFSBuilder::new()
+// RO-only builder can be cloned and reused
+let builder = HyperlightFSBuilder::new()
     .add_file("/etc/config.json", "/config")?
-    .add_dir("/opt/assets", "/assets")?.include("**/*").done()?
-    .build()?);
+    .add_dir("/opt/assets", "/assets")?.include("**/*").done()?;
 
-let sandbox1 = UninitializedSandbox::new(guest, None)?
-    .set_hyperlight_fs(Arc::clone(&fs))
-    .evolve(host_funcs)?;  // ✅ OK
+// Clone the builder for multiple sandboxes
+let fs1 = builder.build()?;  // build(&self) - borrows
+let fs2 = builder.build()?;  // Can call again - still have builder
 
-let sandbox2 = UninitializedSandbox::new(guest, None)?
-    .set_hyperlight_fs(Arc::clone(&fs))
-    .evolve(host_funcs)?;  // ✅ OK - RO sharing allowed
+// Or clone explicitly
+let builder2 = builder.clone();
+let fs3 = builder2.build()?;
 
-// Invalid: Shared image with FAT mount
-let fs = Arc::new(HyperlightFSBuilder::new()
+// Adding FAT transforms NoFat → WithFat (builder consumed)
+let fat_builder = HyperlightFSBuilder::new()
     .add_file("/etc/config.json", "/config")?
-    .add_empty_fat_mount("/tmp", 1024 * 1024)?  // FAT mount
-    .build()?);
+    .add_empty_fat_mount("/tmp", 1024 * 1024)?;  // Now WithFat
 
-let sandbox1 = UninitializedSandbox::new(guest, None)?
-    .set_hyperlight_fs(Arc::clone(&fs))
-    .evolve(host_funcs)?;  // ✅ OK - first use
-
-let sandbox2 = UninitializedSandbox::new(guest, None)?
-    .set_hyperlight_fs(Arc::clone(&fs))
-    .evolve(host_funcs)?;  // ❌ ERROR: Cannot share HyperlightFSImage with FAT mounts
+// fat_builder.clone();  // ❌ Compile error: WithFat doesn't impl Clone
+let fs = fat_builder.build()?;  // build(self) - consumes builder
+// fat_builder.build();  // ❌ Compile error: builder moved
 ```
 
 ### 12.4 File Locking Strategy
 
-All mapped files use advisory locks (`flock`) to prevent external interference:
-
-**RO Files - Shared Lock (`LOCK_SH`)**:
-- Acquired during `add_file()` / `add_dir()` when files are mmap'd
-- Multiple sandboxes can hold shared locks on the same file (concurrent reads OK)
-- Blocks external processes from acquiring exclusive locks (prevents writes)
-- Released when `HyperlightFSImage` is dropped
+**RO Files - No Locking**:
+- RO files are NOT locked - there is no `flock(LOCK_SH)` protection
+- External processes can modify files while mmap'd, risking SIGBUS (see §13.5)
+- Multiple sandboxes can share RO mappings by calling `builder.build()` multiple times
+- **Recommendation**: Ensure RO files are not modified during sandbox execution
 
 **FAT Images - Exclusive Lock (`LOCK_EX`)**:
 - Acquired during `add_fat_image()` / `add_empty_fat_mount_at()` / `add_empty_fat_mount()`
+- Uses `flock(LOCK_EX | LOCK_NB)` - non-blocking advisory lock
 - Only one sandbox can hold the lock (prevents concurrent RW access)
-- Blocks both shared and exclusive lock attempts by others
+- Blocks both shared and exclusive lock attempts by other `flock()` users
 - Released when `HyperlightFSImage` is dropped
 - Attempting to map an already-locked file returns `FsError::FileLocked`
 
-**Lock compatibility matrix**:
-
-| Existing Lock | New LOCK_SH | New LOCK_EX |
-|---------------|-------------|-------------|
-| None | ✅ Granted | ✅ Granted |
-| LOCK_SH | ✅ Granted | ❌ Blocked |
-| LOCK_EX | ❌ Blocked | ❌ Blocked |
-
-This ensures:
-- RO files cannot be modified externally while mmap'd
-- FAT backing files are used by at most one sandbox at a time
-- Multiple sandboxes can safely share RO file mappings
+**Advisory lock limitations** (FAT only):
+- Does NOT prevent external processes that don't use `flock()` from accessing the file
+- Only cooperating processes (other Hyperlight instances) will respect the lock
+- See [fat_image.rs](src/hyperlight_host/src/hyperlight_fs/fat_image.rs#L317-L326) for details
 
 ---
 
@@ -1726,7 +1864,7 @@ The `fatfs` crate auto-selects the appropriate FAT variant based on volume size:
 | Max filename | 255 chars (LFN) | Long names supported |
 | Max path | ~260 chars | Deep nesting limited |
 | Timestamps | 2-second resolution | Not precise; requires `guest_time` feature for real timestamps |
-| Permissions | None | Faked as 644/755 |
+| Permissions | None | stat() only returns size/is_dir; no mode field |
 | Symlinks | None | ENOTSUP |
 | Hard links | None | ENOTSUP |
 | Root dir entries (FAT12) | ~224 | Fixed limit for small volumes |
@@ -1744,28 +1882,25 @@ The `fatfs` crate auto-selects the appropriate FAT variant based on volume size:
 | Sparse files | Not supported | FAT doesn't support sparse files |
 | Extended attributes | Not supported | FAT doesn't support xattrs |
 | Multi-sandbox FAT sharing | Not supported | Exclusive lock per FAT image |
-| Read-only FAT mounts | Future enhancement | See §3.4 |
-| dup() / dup2() | Returns ENOTSUP | FAT handles have mutable state that can't be shared |
+| Read-only FAT mounts | Future enhancement | See §15.5 |
 | openat() with real dirfd | Returns ENOTSUP | Only AT_FDCWD is supported |
-| ftruncate() | Not implemented | Future enhancement (see §6.7.1) |
-| pread() / pwrite() | Not implemented | Future enhancement (see §6.7.1) |
+| ftruncate() | Not implemented | Future enhancement (see §15) |
+| pread() / pwrite() | Not implemented | Future enhancement (see §15) |
 | fsync() | Not implemented | Future enhancement; close() flushes |
 
 ### 13.4 Resource Limits
 
-HyperlightFS enforces limits on resources that consume guest memory or have fixed overhead. **Host-provided files and FAT images have no size limits** since they use zero-copy `MAP_SHARED` and don't consume guest memory.
+HyperlightFS enforces practical limits on resources. **Host-provided files and FAT images have no size limits** since they use zero-copy `MAP_SHARED` and don't consume guest memory.
 
-| Resource | Default Limit | Configurable | Reason |
-|----------|---------------|--------------|--------|
-| Max files in manifest | 100,000 | ✅ `FsLimits` | Manifest size (~100 bytes/entry) |
-| Max mount points | 64 | ✅ `FsLimits` | Mount table overhead |
-| Max path length | 4,096 bytes | ✅ `FsLimits` | Stack allocation in path resolution |
-| Max open file descriptors | 256 | ✅ `FsLimits` | FD table size |
-| Max single RO file size | **No limit** | N/A | Zero-copy, no guest memory used |
-| Max total RO file size | **No limit** | N/A | Zero-copy, shared via page cache |
-| Min FAT image size (host) | 1 MB | ❌ | Practical minimum; FAT12/16 for small sizes |
-| Max FAT image size (host) | 16 GB | ❌ | Practical mmap limit |
-| Max guest-created FAT size | Guest heap size | N/A | Allocated from guest heap |
+| Resource | Limit | Notes |
+|----------|-------|-------|
+| Max single RO file size | **No limit** | Zero-copy, no guest memory used |
+| Max total RO file size | **No limit** | Zero-copy, shared via page cache |
+| Min FAT image size (host) | 1 MB | Practical minimum; FAT12/16 for small sizes |
+| Max FAT image size (host) | 16 GB | Practical mmap limit |
+| Min guest-created FAT | 64 KB | Minimum for FAT12 |
+| Max guest-created FAT | 128 MB | Prevent excessive heap use |
+| Max open directory streams (C API) | 16 | `MAX_DIR_STREAMS` constant |
 
 ### 13.5 Known Issues
 
@@ -1837,12 +1972,143 @@ Write our own minimal FAT32 implementation.
 - **Pros**: Tailored to our needs, no external dependency
 - **Cons**: Significant effort (~2-4 weeks), potential for bugs
 
-### 14.5 Decision Record
+---
 
-| Date | Decision | Rationale |
-|------|----------|----------|
-| 2026-01-19 | Start with fatfs 0.3.6 | Published, stable API |
-| 2026-01-20 | Switch to fatfs git @ `4eccb50` | **Required for no_std guest**: v0.3.6 needs `core_io` (nightly only). Master works on stable. |
+## 15. Future Features
+
+This section documents features that were considered but not implemented in the initial release. They may be added in future versions based on user demand.
+
+### 15.1 Host Extraction APIs
+
+APIs to extract guest-created FAT filesystem data back to the host.
+
+```rust
+/// Information about a guest-created FAT mount.
+pub struct FatMountInfo {
+    pub mount_point: String,
+    pub size_bytes: u64,
+    pub used_bytes: u64,
+}
+
+impl Sandbox {
+    /// Get info about guest-created FAT mounts.
+    pub fn fs_fat_info(&self, mount_point: &str) -> Result<FatMountInfo>;
+    
+    /// Persist a guest-created FAT mount to a host file.
+    /// Security: Treats guest data as untrusted; validates FAT structure.
+    pub fn fs_persist_fat_mount(&self, mount_point: &str, host_path: &Path) -> Result<()>;
+}
+```
+
+**Status**: Parked pending security analysis. Guest memory is untrusted; extracting to host file requires careful validation.
+
+### 15.2 Resource Limits (FsLimits)
+
+Configurable limits for manifest size, mount count, and FD table size.
+
+```rust
+pub struct FsLimits {
+    pub max_file_count: usize,      // Default: 100,000
+    pub max_mount_count: usize,     // Default: 64
+    pub max_path_length: usize,     // Default: 4,096
+    pub max_open_files: usize,      // Default: 256
+}
+
+impl HyperlightFSBuilder {
+    pub fn with_limits(limits: FsLimits) -> Self;
+}
+```
+
+**Status**: Deferred (YAGNI). Current implicit limits are sufficient.
+
+### 15.3 Additional C API Functions
+
+| API | Purpose | Difficulty |
+|-----|---------|------------|
+| `ftruncate(fd, len)` | Truncate open file | Medium |
+| `truncate(path, len)` | Truncate by path | Easy |
+| `fsync(fd)` | Flush to storage | Easy |
+| `pread(fd, buf, n, off)` | Read at offset | Easy |
+| `pwrite(fd, buf, n, off)` | Write at offset | Easy |
+| `rewinddir(dirp)` | Reset dir stream | Easy |
+| `seekdir()`/`telldir()` | Dir stream position | Easy |
+
+### 15.4 Full POSIX stat Structure
+
+Expand `hl_stat_t` to include all standard fields:
+
+```c
+typedef struct {
+    uint64_t st_size;
+    uint32_t st_mode;     // S_IFREG, S_IFDIR, permissions (faked)
+    uint32_t st_nlink;    // Always 1
+    uint32_t st_uid;      // Always 0
+    uint32_t st_gid;      // Always 0
+    uint64_t st_atime;    // Access time
+    uint64_t st_mtime;    // Modification time
+    uint64_t st_ctime;    // Creation time
+} hl_stat_t;
+```
+
+**Status**: Deferred. Current simplified struct is sufficient for most use cases.
+
+### 15.5 Read-Only FAT Mounts
+
+Mount existing FAT images as read-only (no exclusive lock needed).
+
+```rust
+impl HyperlightFSBuilder {
+    pub fn add_fat_image_readonly<P: AsRef<Path>>(
+        self,
+        host_path: P,
+        mount_point: &str
+    ) -> Result<Self>;
+}
+```
+
+**Status**: Deferred. Can share with multiple sandboxes.
+
+### 15.6 Global errno Support
+
+Add `hl_fs_errno()` function to retrieve last error code:
+
+```c
+int hl_fs_errno(void);      // Returns last error code
+const char *hl_fs_strerror(int errnum);  // Error message
+```
+
+**Status**: Deferred. Negative return values work for most use cases.
+
+### 15.7 Non-Blocking msync (MS_ASYNC)
+
+Option to use `MS_ASYNC` instead of `MS_SYNC` on sandbox halt for latency-sensitive workloads.
+
+```rust
+impl SandboxBuilder {
+    /// Use non-blocking msync on halt (default: false = MS_SYNC)
+    pub fn fat_async_sync(self, enabled: bool) -> Self;
+}
+```
+
+**Trade-offs:**
+- `MS_SYNC` (default): Blocks until I/O complete. Data guaranteed on disk when `call()` returns.
+- `MS_ASYNC`: Returns immediately. Data may still be in page cache. Faster but weaker durability.
+
+**Status**: Deferred. Most users want strong durability guarantees. Can add opt-in if latency becomes an issue.
+
+### 15.8 Shared Locks for RO Files (LOCK_SH)
+
+Add `flock(LOCK_SH)` protection for read-only mapped files to prevent external modification during sandbox execution.
+
+**Benefits:**
+- Prevents SIGBUS from external file truncation/modification during sandbox execution
+- Cooperating processes (using `flock`) will be blocked from writing
+- Allows multiple sandboxes to share same RO files (shared locks are compatible)
+
+**Trade-offs:**
+- Additional syscall per file during `build()`
+- Advisory only - non-cooperating processes can still modify files
+- File handles must be kept open for lock lifetime (memory overhead)
 
 ---
 
@@ -1853,29 +2119,35 @@ Write our own minimal FAT32 implementation.
 
 # Read-only file mappings
 [[file]]
-host = "/etc/app/config.json"
+host_path = "/etc/app/config.json"
 guest = "/config.json"
 
 [[file]]
-host = "/var/data/model.bin"
+host_path = "/var/data/model.bin"
 guest = "/models/model.bin"
 
 # Read-only directory mapping with patterns
 [[directory]]
-host = "/opt/app/assets"
+host_path = "/opt/app/assets"
 guest = "/assets"
 include = ["**/*.json", "**/*.txt"]
-exclude = ["**/secret/*"]
+exclude = ["**/secret/*", "**/.git/**"]
 
 # FAT image from host file
 [[fat_image]]
-host = "/var/lib/app/data.fat"
-mount = "/data"
+host_path = "/var/lib/app/data.fat"
+mount_point = "/data"
 
-# Empty FAT filesystem
+# Empty FAT filesystem (temporary - deleted on drop)
 [[fat_mount]]
-mount = "/tmp"
-size = "10MB"  # Supports KB, MB, GB suffixes
+mount_point = "/tmp"
+size = "10MB"  # Supports KB, MB, GB, KiB, MiB, GiB suffixes
+
+# Empty FAT filesystem (persistent - at specific host path)
+[[fat_mount]]
+host_path = "/var/lib/app/logs.fat"
+mount_point = "/logs"
+size = "50MB"
 ```
 
 ---
@@ -1886,6 +2158,8 @@ size = "10MB"  # Supports KB, MB, GB suffixes
 
 ```rust
 use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+use hyperlight_host::sandbox::{UninitializedSandbox, MultiUseSandbox, SandboxConfiguration};
+use hyperlight_host::GuestBinary;
 
 // Build filesystem with RO files and FAT mount
 // Note: add_fat_image() acquires exclusive lock on the file
@@ -1896,14 +2170,17 @@ let fs_image = HyperlightFSBuilder::new()
     .add_empty_fat_mount_at("/var/out/output.fat", "/out", 2 * 1024 * 1024)?  // Persists
     .build()?;
 
-// Pre-populate FAT mount with files (via mmap)
-fs_image.write_file("/data/initial.txt", b"Hello from host")?;
-fs_image.create_dir("/data/subdir")?;
+// Create sandbox with HyperlightFS
+let mut sandbox: MultiUseSandbox = UninitializedSandbox::new(
+    GuestBinary::FilePath("guest.bin".into()),
+    None,
+)?
+    .with_hyperlight_fs(fs_image)
+    .evolve()?;
 
-// Create sandbox and execute
-let mut sandbox = UninitializedSandbox::new(guest, None)?;
-sandbox.set_hyperlight_fs(Arc::new(fs_image));
-let mut sandbox = sandbox.evolve(NoopHostFunctions)?;
+// Pre-populate FAT mount with files using sandbox APIs (while VM paused)
+sandbox.fs_write_file("/data/initial.txt", b"Hello from host")?;
+sandbox.fs_create_dir("/data/subdir")?;
 
 // Execute guest code - writes go directly to backing files via MAP_SHARED
 let result: Vec<u8> = sandbox.call("ProcessData", ())?;
@@ -1918,26 +2195,34 @@ let output = sandbox.fs_read_file("/data/output.txt")?;
 ### Guest (Rust): Unified File Access
 
 ```rust
-use hyperlight_guest::fs;
+use hyperlight_guest::fs::{self, OpenOptions, File};
 
-// Read RO file (mmap'd from host)
-let config = fs::open("/config.json", OpenMode::READ_ONLY)?;
+// Read RO file (mmap'd from host) - use fs::open() for read-only
+let mut config = fs::open("/config.json")?;
 let data = config.read_to_vec()?;
 
-// Write to FAT mount - writes persist to host file automatically
-let mut output = fs::create("/data/output.txt")?;
+// Write to FAT mount - use OpenOptions for write/create
+let mut output = OpenOptions::new()
+    .write(true)
+    .create(true)
+    .truncate(true)
+    .open("/data/output.txt")?;
 output.write_all(b"Results: ...")?;  // Goes directly to /var/data/storage.fat
 
 // Create guest filesystem (in guest heap, not persisted)
 fs::create_fat_mount("/workspace", 512 * 1024)?;  // 512KB
-let mut temp = fs::create("/workspace/temp.dat")?;
+let mut temp = OpenOptions::new()
+    .write(true)
+    .create(true)
+    .open("/workspace/temp.dat")?;
 temp.write_all(&processed_data)?;
 
-// Both use same API
+// List directory contents
 for entry in fs::read_dir("/")? {
-    println!("{}: {} bytes", entry.name, entry.size);
+    println!("{}: {} bytes, is_dir: {}", entry.name, entry.size, entry.is_dir);
 }
 ```
+
 
 ### Guest (C): POSIX-Style Access
 
@@ -1957,13 +2242,14 @@ void process_files(void) {
     close(fd);
     
     // Create temp filesystem (in guest memory, not persisted)
-    hl_fs_create_mount("/scratch", 256 * 1024);
+    hl_fs_create_fat_mount("/scratch", 256 * 1024);
     
-    // List directory
-    hl_DIR *dir = opendir("/data");
-    hl_dirent_t *entry;
+    // List directory using opendir/readdir
+    hl_hl_DIR *dir = opendir("/data");
+    hl_hl_dirent_t *entry;
     while ((entry = readdir(dir)) != NULL) {
-        printf("%s\n", entry->d_name);
+        // Use LOG macro to output to host 
+        LOG(Info, entry->d_name);
     }
     closedir(dir);
     
@@ -1976,24 +2262,3 @@ void process_files(void) {
 
 ---
 
-## Appendix C: Glossary
-
-| Term | Definition |
-|------|------------|
-| GPA | Guest Physical Address - address in the VM's physical address space |
-| HLT | x86 halt instruction; causes VM exit to hypervisor |
-| MAP_SHARED | mmap flag that shares pages with backing file; writes persist automatically |
-| RO | Read-only (memory-mapped files from host) |
-| RW | Read-write (FAT filesystem) |
-| VFS | Virtual File System - abstraction layer routing paths to backends |
-| Mount point | Directory path where a filesystem is attached (e.g., `/data`) |
-| flock | POSIX advisory file locking mechanism |
-| LOCK_SH | Shared lock - allows concurrent readers, blocks writers |
-| LOCK_EX | Exclusive lock - blocks all other lock attempts |
-| Page cache | Kernel's cache of file-backed memory pages |
-| Dirty page | Page modified in memory but not yet written to backing storage |
-| msync | System call to flush dirty pages to backing storage |
-
----
-
-*End of Specification*

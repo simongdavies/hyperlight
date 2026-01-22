@@ -14,6 +14,7 @@ after_includes = """
 #define O_WRONLY hl_HL_O_WRONLY
 #define O_RDWR   hl_HL_O_RDWR
 #define O_CREAT  hl_HL_O_CREAT
+#define O_EXCL   hl_HL_O_EXCL
 #define O_TRUNC  hl_HL_O_TRUNC
 #define O_APPEND hl_HL_O_APPEND
 

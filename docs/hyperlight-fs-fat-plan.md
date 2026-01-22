@@ -760,26 +760,28 @@ Wire FAT images into sandbox memory.
 
 ### Step 3.4: Guest-Created FAT Mounts
 
-**Status:** ⏸️ Deferred
+**Status:** ✅ Complete
 
 **Goal:** Allow guests to create new FAT filesystems dynamically (per spec §5.1).
 
-**Rationale:** Deferred to future work. Current implementation covers:
-- Host-created FAT mounts (empty or from existing images)
-- Guest can read/write to host-created mounts
-- Full CRUD operations within mounts
+**Implementation:**
+- `create_fat_mount()` allocates from guest heap and formats as FAT12/16/32
+- New mount registered in VFS with guest-created flag
+- `unmount()` removes guest-created mount and frees memory
+- `unmount()` fails with `PermissionDenied` for host-provided mounts
+- `is_guest_created_mount()` queries mount origin
+- `get_fat_mount_data()` returns (address, size) for host extraction
 
-Guest-created mounts would require dynamic memory allocation visible to the guest, which adds complexity. Not needed for primary use cases.
-
-**Files to modify (when implemented):**
-- `src/hyperlight_guest/src/fs/mod.rs`
-- `src/hyperlight_guest/src/fs/vfs.rs`
+**Files modified:**
+- `src/hyperlight_guest/src/fs/mod.rs` - Added public APIs
+- `src/hyperlight_guest/src/fs/vfs.rs` - VFS mount management
+- `src/hyperlight_guest/src/fs/fat.rs` - FAT formatting with fatfs
 
 **Acceptance criteria:**
-- [ ] `create_fat_mount()` allocates from heap and formats FAT
-- [ ] New mount appears in VFS
-- [ ] `unmount()` works for guest-created mounts
-- [ ] `unmount()` fails for host-provided mounts
+- [x] `create_fat_mount()` allocates from heap and formats FAT
+- [x] New mount appears in VFS
+- [x] `unmount()` works for guest-created mounts
+- [x] `unmount()` fails for host-provided mounts
 
 ---
 
@@ -1111,40 +1113,14 @@ impl UninitializedSandbox {
 
 ---
 
-## Appendix A: Implementation Risks (Resolved)
+## Deferred Items
 
-These risks were identified at project start and have been resolved:
+Items deferred from initial implementation:
 
-| Risk | Impact | Resolution |
-|------|--------|------------|
-| fatfs no_std compatibility | High | ✅ Resolved: Using fatfs git commit with no_std support |
-| fatfs `core_io` requires nightly | Medium | ✅ Resolved: v0.4.0 uses custom I/O traits, works on stable |
-| Snapshot/restore with RW regions | High | ✅ Resolved: FAT regions excluded from snapshot; restore works |
-
-For design limitations and constraints, see **Spec §13**.
-
----
-
-## Appendix B: Glossary
-
-| Term | Definition |
-|------|------------|
-| GPA | Guest Physical Address |
-| VFS | Virtual file system (abstraction layer in guest) |
-| HLT | x86 halt instruction; triggers VM exit |
-
-For complete glossary, see **Spec Appendix**.
-
----
-
-## Appendix C: Deferred Items
-
-Items intentionally deferred from initial implementation:
-
-| Item | Spec Reference | Reason Deferred |
-|------|----------------|-----------------|
-| Guest-created FAT mounts | §5.1 | Dynamic memory allocation complexity; not needed for primary use cases |
-| `FsLimits` struct | §13.4 | YAGNI - manifest sizes not a concern in practice |
-| Shared locks for RO files | §12 | Would prevent FAT exclusive lock conflicts; not needed yet |
+| Item | Spec Reference | Notes |
+|------|----------------|-------|
+| Host extraction APIs (`fs_fat_info`, `fs_persist_fat_mount`) | §4.5 (TBD) | Security analysis needed for guest-to-host data flow |
+| `FsLimits` struct | §13.4 | YAGNI |
+| Shared locks for RO files | §12 | Not needed yet |
 
 *End of Plan*
