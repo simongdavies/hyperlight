@@ -475,19 +475,19 @@ impl RoFile {
     /// Get the current position in the file.
     pub fn position(&self) -> Result<u64, FsError> {
         let entry = fd::get_ro_fd(self.fd)?;
-        Ok(entry.position)
+        Ok(entry.position())
     }
 
     /// Get the size of the file in bytes.
     pub fn size(&self) -> Result<u64, FsError> {
         let entry = fd::get_ro_fd(self.fd)?;
-        Ok(entry.size)
+        Ok(entry.size())
     }
 
     /// Get the remaining bytes from current position to end of file.
     pub fn remaining(&self) -> Result<u64, FsError> {
         let entry = fd::get_ro_fd(self.fd)?;
-        Ok(entry.size.saturating_sub(entry.position))
+        Ok(entry.size().saturating_sub(entry.position()))
     }
 }
 
@@ -511,7 +511,9 @@ impl Read for RoFile {
         let entry = fd::get_ro_fd(self.fd)?;
 
         // Calculate how many bytes we can read
-        let remaining = entry.size.saturating_sub(entry.position) as usize;
+        let position = entry.position();
+        let size = entry.size();
+        let remaining = size.saturating_sub(position) as usize;
         if remaining == 0 {
             return Ok(0); // EOF
         }
@@ -519,7 +521,7 @@ impl Read for RoFile {
         let to_read = buf.len().min(remaining);
 
         // Calculate the source address in guest memory
-        let src_addr = entry.guest_address + entry.position;
+        let src_addr = entry.guest_address() + position;
 
         // SAFETY: The host has mapped file data at guest_address.
         // We trust that the manifest contains valid addresses and sizes.
@@ -533,7 +535,7 @@ impl Read for RoFile {
         }
 
         // Update position
-        entry.position += to_read as u64;
+        entry.set_position(position + to_read as u64);
 
         Ok(to_read)
     }
@@ -543,10 +545,12 @@ impl Seek for RoFile {
     fn seek(&mut self, pos: SeekFrom) -> Result<u64, Self::Error> {
         let entry = fd::get_ro_fd(self.fd)?;
 
+        let position = entry.position();
+        let size = entry.size();
         let new_pos: i64 = match pos {
             SeekFrom::Start(n) => n as i64,
-            SeekFrom::End(n) => entry.size as i64 + n,
-            SeekFrom::Current(n) => entry.position as i64 + n,
+            SeekFrom::End(n) => size as i64 + n,
+            SeekFrom::Current(n) => position as i64 + n,
         };
 
         if new_pos < 0 {
@@ -554,8 +558,8 @@ impl Seek for RoFile {
         }
 
         // Clamp to file size (seeking past EOF is allowed but reads return 0)
-        let new_pos = (new_pos as u64).min(entry.size);
-        entry.position = new_pos;
+        let new_pos = (new_pos as u64).min(size);
+        entry.set_position(new_pos);
 
         Ok(new_pos)
     }
@@ -642,11 +646,7 @@ fn open_with_options(
 
             let (_idx, inode) = manifest::lookup_file(&full_path)?;
 
-            let open_file = OpenFile {
-                position: 0,
-                size: inode.size,
-                guest_address: inode.guest_address,
-            };
+            let open_file = OpenFile::new(inode.size, inode.guest_address);
 
             let fd = fd::alloc_ro_fd(open_file);
             Ok(File::ReadOnly(RoFile::from_fd(fd)))

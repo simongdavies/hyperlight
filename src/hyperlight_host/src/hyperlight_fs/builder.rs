@@ -782,11 +782,13 @@ impl HyperlightFSBuilder<NoFat> {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// use hyperlight_host::hyperlight_fs::{HyperlightFSBuilder, HyperlightFsConfig};
-    ///
+    /// ```no_run
+    /// # use hyperlight_host::hyperlight_fs::{HyperlightFSBuilder, HyperlightFsConfig};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let config = HyperlightFsConfig::from_toml_file("hyperlight-fs.toml")?;
     /// let fs = HyperlightFSBuilder::from_config(&config)?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn from_config(config: &super::config::HyperlightFsConfig) -> Result<HyperlightFSImage> {
         let mut files: Vec<MappedFile> = Vec::new();
@@ -925,9 +927,9 @@ impl HyperlightFSBuilder<NoFat> {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
-    ///
+    /// ```no_run
+    /// # use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    /// # fn main() -> hyperlight_host::Result<()> {
     /// let toml = r#"
     /// [[file]]
     /// host_path = "/etc/config.json"
@@ -935,6 +937,8 @@ impl HyperlightFSBuilder<NoFat> {
     /// "#;
     ///
     /// let fs = HyperlightFSBuilder::from_toml(toml)?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn from_toml(toml_content: &str) -> Result<HyperlightFSImage> {
         let config = super::config::HyperlightFsConfig::from_toml(toml_content)
@@ -959,10 +963,12 @@ impl HyperlightFSBuilder<NoFat> {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
-    ///
+    /// ```no_run
+    /// # use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    /// # fn main() -> hyperlight_host::Result<()> {
     /// let fs = HyperlightFSBuilder::from_toml_file("/path/to/hyperlight-fs.toml")?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn from_toml_file(path: &str) -> Result<HyperlightFSImage> {
         let config = super::config::HyperlightFsConfig::from_toml_file(path).map_err(|e| {
@@ -1009,12 +1015,14 @@ impl HyperlightFSBuilder<NoFat> {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
-    ///
+    /// ```no_run
+    /// # use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    /// # fn main() -> hyperlight_host::Result<()> {
     /// let fs = HyperlightFSBuilder::new()
     ///     .add_fat_image("/host/path/to/data.fat", "/data")?
     ///     .build()?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[cfg(unix)]
     pub fn add_fat_image<P: AsRef<Path>>(
@@ -1080,13 +1088,15 @@ impl HyperlightFSBuilder<NoFat> {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
-    ///
+    /// ```no_run
+    /// # use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    /// # fn main() -> hyperlight_host::Result<()> {
     /// // Create a 10MB scratch space for the guest
     /// let fs = HyperlightFSBuilder::new()
     ///     .add_empty_fat_mount("/scratch", 10 * 1024 * 1024)?
     ///     .build()?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[cfg(unix)]
     pub fn add_empty_fat_mount(
@@ -1154,14 +1164,16 @@ impl HyperlightFSBuilder<NoFat> {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
-    ///
+    /// ```no_run
+    /// # use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    /// # fn main() -> hyperlight_host::Result<()> {
     /// // Create a persistent 50MB data volume
     /// let fs = HyperlightFSBuilder::new()
     ///     .add_empty_fat_mount_at("/host/data.fat", "/data", 50 * 1024 * 1024)?
     ///     .build()?;
     /// // After drop, /host/data.fat still exists and can be inspected or reused
+    /// # Ok(())
+    /// # }
     /// ```
     #[cfg(unix)]
     pub fn add_empty_fat_mount_at<P: AsRef<Path>>(
@@ -1354,11 +1366,16 @@ impl<F> DirectoryBuilder<F> {
     ///
     /// # Examples
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    /// # fn main() -> hyperlight_host::Result<()> {
+    /// # let builder = HyperlightFSBuilder::new().add_dir("/host", "/guest")?;
     /// builder
     ///     .include("**/*.json")    // All JSON files
     ///     .include("config/*")     // Direct children of config/
-    ///     .include("data/**")      // Everything under data/
+    ///     .include("data/**");     // Everything under data/
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn include(mut self, pattern: &str) -> Self {
         match Pattern::new(pattern) {
@@ -1378,11 +1395,16 @@ impl<F> DirectoryBuilder<F> {
     ///
     /// # Examples
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+    /// # fn main() -> hyperlight_host::Result<()> {
+    /// # let builder = HyperlightFSBuilder::new().add_dir("/host", "/guest")?;
     /// builder
     ///     .include("**/*")
     ///     .exclude("**/secret/*")    // Exclude secret directories
-    ///     .exclude("**/*.tmp")       // Exclude temp files
+    ///     .exclude("**/*.tmp");      // Exclude temp files
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn exclude(mut self, pattern: &str) -> Self {
         match Pattern::new(pattern) {

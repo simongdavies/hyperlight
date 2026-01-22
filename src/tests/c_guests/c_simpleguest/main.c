@@ -765,27 +765,56 @@ int test_fcntl_flags(const char *path) {
     return flags;  // Return original flags
 }
 
-// Test dup (should return ENOTSUP for FAT files)
-// Returns true if dup correctly returns ENOTSUP, false otherwise.
+// Test dup - verify duplicated fd works and shares file position
+// Returns true if dup works correctly, false otherwise.
 bool test_dup(const char *path) {
     if (!hl_fs_initialized()) {
         return false;  // Can't test without FS
     }
 
+    // Open the file
     int fd = open(path, hl_HL_O_RDONLY);
     if (fd < 0) {
         return false;  // Can't open file to test
     }
 
-    int result = dup(fd);
-    close(fd);
+    // Duplicate the fd
+    int fd2 = dup(fd);
+    if (fd2 < 0) {
+        close(fd);
+        return false;  // dup() failed
+    }
 
-    // dup should return ENOTSUP for FAT files (until we implement Rc<RefCell<>>)
-    return result == hl_HL_ENOTSUP;
+    // fd2 should be a different fd number
+    if (fd == fd2) {
+        close(fd);
+        close(fd2);
+        return false;  // fd and fd2 should be different
+    }
+
+    // Read one byte from fd to advance position
+    char buf[2];
+    if (read(fd, buf, 1) != 1) {
+        close(fd);
+        close(fd2);
+        return false;  // Read failed
+    }
+
+    // Both RO and FAT files share position per POSIX
+    // Read from fd2 - position is shared so we continue from where fd left off
+    char buf2[2];
+    int64_t n = read(fd2, buf2, 1);
+    
+    // Close both fds
+    close(fd);
+    close(fd2);
+
+    // Both should have read successfully
+    return n >= 0;
 }
 
-// Test dup2 (should return ENOTSUP for FAT files)
-// Returns true if dup2 correctly returns ENOTSUP, false otherwise.
+// Test dup2 - verify dup2 to specific fd works
+// Returns true if dup2 works correctly, false otherwise.
 bool test_dup2(const char *path) {
     if (!hl_fs_initialized()) {
         return false;  // Can't test without FS
@@ -799,10 +828,66 @@ bool test_dup2(const char *path) {
     // Use fd 100 as target - arbitrary high value unlikely to conflict
     const int target_fd = 100;
     int result = dup2(fd, target_fd);
-    close(fd);
+    if (result != target_fd) {
+        close(fd);
+        return false;  // dup2() should return target_fd on success
+    }
 
-    // dup2 should return ENOTSUP for FAT files (until we implement Rc<RefCell<>>)
-    return result == hl_HL_ENOTSUP;
+    // Verify the duplicated fd can read
+    char buf[16];
+    int64_t n = read(target_fd, buf, sizeof(buf) - 1);
+    
+    // Close both fds
+    close(fd);
+    close(target_fd);
+
+    // Read should have succeeded (n >= 0) or hit EOF (n == 0)
+    return n >= 0;
+}
+
+// Test dup shared file position - POSIX semantics require dup'd fds to share position
+// Returns true if position is shared correctly, false otherwise.
+// Content should be "ABCDEFGH" (8 bytes)
+bool test_dup_shared_position(const char *path) {
+    if (!hl_fs_initialized()) {
+        return false;
+    }
+
+    // Open file for reading
+    int fd1 = open(path, hl_HL_O_RDONLY);
+    if (fd1 < 0) {
+        return false;
+    }
+
+    // Duplicate fd
+    int fd2 = dup(fd1);
+    if (fd2 < 0) {
+        close(fd1);
+        return false;
+    }
+
+    // Read 2 bytes from fd1: should get "AB", position now at 2
+    char buf1[3] = {0};
+    if (read(fd1, buf1, 2) != 2) {
+        close(fd1);
+        close(fd2);
+        return false;
+    }
+
+    // Read 2 bytes from fd2: position is shared, should get "CD" (pos 2-4)
+    char buf2[3] = {0};
+    if (read(fd2, buf2, 2) != 2) {
+        close(fd1);
+        close(fd2);
+        return false;
+    }
+
+    close(fd1);
+    close(fd2);
+
+    // Verify: fd1 read "AB", fd2 read "CD" (shared position)
+    return (buf1[0] == 'A' && buf1[1] == 'B' &&
+            buf2[0] == 'C' && buf2[1] == 'D');
 }
 
 // Test mkdirat with AT_FDCWD
@@ -836,6 +921,7 @@ HYPERLIGHT_WRAP_FUNCTION(test_openat_cwd, Int, 2, String, Int)
 HYPERLIGHT_WRAP_FUNCTION(test_fcntl_flags, Int, 1, String)
 HYPERLIGHT_WRAP_FUNCTION(test_dup, Bool, 1, String)
 HYPERLIGHT_WRAP_FUNCTION(test_dup2, Bool, 1, String)
+HYPERLIGHT_WRAP_FUNCTION(test_dup_shared_position, Bool, 1, String)
 HYPERLIGHT_WRAP_FUNCTION(test_mkdirat_cwd, Int, 1, String)
 
 // =============================================================================
@@ -1433,6 +1519,7 @@ void hyperlight_main(void)
     HYPERLIGHT_REGISTER_FUNCTION("TestFcntlFlags", test_fcntl_flags);
     HYPERLIGHT_REGISTER_FUNCTION("TestDup", test_dup);
     HYPERLIGHT_REGISTER_FUNCTION("TestDup2", test_dup2);
+    HYPERLIGHT_REGISTER_FUNCTION("TestDupSharedPosition", test_dup_shared_position);
     HYPERLIGHT_REGISTER_FUNCTION("TestMkdiratCwd", test_mkdirat_cwd);
     // Open flag tests
     HYPERLIGHT_REGISTER_FUNCTION("TestOTrunc", test_o_trunc);

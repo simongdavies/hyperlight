@@ -1535,57 +1535,90 @@ fn test_c_api_fcntl_flags() {
     );
 }
 
-/// Test: C API dup returns ENOTSUP for FAT files.
+/// Test: C API dup works for FAT files.
 ///
-/// This tests that dup() correctly returns ENOTSUP since FAT file handles
-/// don't support duplication (would need Rc<RefCell<>> internally).
+/// Tests that dup() correctly creates a duplicate file descriptor that
+/// can be used to read from the same file.
 #[test]
-fn test_c_api_dup_returns_enotsup() {
+fn test_c_api_dup_works() {
     if skip_c_only_tests() {
         return;
     }
     let (_temp_dir, mut sandbox) = create_c_guest_empty_fat_sandbox();
 
-    // Create a file
+    // Create a file with some content
     sandbox
-        .fs_write_file("/data/dup_test.txt", b"test")
+        .fs_write_file("/data/dup_test.txt", b"test content for dup")
         .unwrap();
 
-    // TestDup returns true if dup() correctly returns ENOTSUP
+    // TestDup returns true if dup() works correctly
     let result: bool = sandbox
         .call("TestDup", "/data/dup_test.txt".to_string())
         .unwrap();
 
     assert!(
         result,
-        "dup() should return ENOTSUP for FAT files (until Rc<RefCell<>> implemented)"
+        "dup() should work for FAT files (Rc<RefCell<>> implemented)"
     );
 }
 
-/// Test: C API dup2 returns ENOTSUP for FAT files.
+/// Test: C API dup2 works for FAT files.
 ///
-/// This tests that dup2() correctly returns ENOTSUP since FAT file handles
-/// don't support duplication (would need Rc<RefCell<>> internally).
+/// Tests that dup2() correctly creates a duplicate file descriptor at
+/// a specific fd number.
 #[test]
-fn test_c_api_dup2_returns_enotsup() {
+fn test_c_api_dup2_works() {
     if skip_c_only_tests() {
         return;
     }
     let (_temp_dir, mut sandbox) = create_c_guest_empty_fat_sandbox();
 
-    // Create a file
+    // Create a file with some content
     sandbox
-        .fs_write_file("/data/dup2_test.txt", b"test")
+        .fs_write_file("/data/dup2_test.txt", b"test content for dup2")
         .unwrap();
 
-    // TestDup2 returns true if dup2() correctly returns ENOTSUP
+    // TestDup2 returns true if dup2() works correctly
     let result: bool = sandbox
         .call("TestDup2", "/data/dup2_test.txt".to_string())
         .unwrap();
 
     assert!(
         result,
-        "dup2() should return ENOTSUP for FAT files (until Rc<RefCell<>> implemented)"
+        "dup2() should work for FAT files (Rc<RefCell<>> implemented)"
+    );
+}
+
+/// Test: C API dup creates fd that shares file position (POSIX semantics).
+///
+/// This tests the critical POSIX requirement that dup'd file descriptors
+/// share the file offset. When fd1 reads 2 bytes, fd2's position also
+/// advances, so the next read from fd2 continues where fd1 left off.
+#[test]
+fn test_c_api_dup_shared_position() {
+    if skip_c_only_tests() {
+        return;
+    }
+    let (_temp_dir, mut sandbox) = create_c_guest_empty_fat_sandbox();
+
+    // Create a file with specific content for position tracking
+    sandbox
+        .fs_write_file("/data/shared_pos.txt", b"ABCDEFGH")
+        .unwrap();
+
+    // TestDupSharedPosition:
+    // 1. Opens file, gets fd1
+    // 2. Dups to fd2
+    // 3. Reads 2 bytes from fd1 (should get "AB")
+    // 4. Reads 2 bytes from fd2 (should get "CD" if position shared, "AB" if not)
+    // Returns true if position is properly shared
+    let result: bool = sandbox
+        .call("TestDupSharedPosition", "/data/shared_pos.txt".to_string())
+        .unwrap();
+
+    assert!(
+        result,
+        "dup'd file descriptors should share file position (POSIX semantics)"
     );
 }
 

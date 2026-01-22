@@ -69,9 +69,9 @@ limitations under the License.
 //!
 //! # Usage
 //!
-//! ```ignore
-//! use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
-//!
+//! ```no_run
+//! # use hyperlight_host::hyperlight_fs::HyperlightFSBuilder;
+//! # fn main() -> hyperlight_host::Result<()> {
 //! // Create a builder (empty by default - explicit opt-in)
 //! let builder = HyperlightFSBuilder::new();
 //!
@@ -92,6 +92,8 @@ limitations under the License.
 //!
 //! // Build the image (creates mmaps)
 //! let image = builder.build()?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Platform Support

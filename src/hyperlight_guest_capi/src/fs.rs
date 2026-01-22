@@ -36,7 +36,7 @@ limitations under the License.
 use core::ffi::c_char;
 
 use hyperlight_guest::fs::{
-    self, FdEntry, FsError, OpenOptions, alloc_fat_fd, free_fd, get_fd_entry,
+    self, FdEntry, FsError, OpenOptions, alloc_fat_fd, dup_fd, dup_fd_to, free_fd, get_fd_entry,
 };
 
 // ============================================================================
@@ -300,7 +300,7 @@ pub extern "C" fn hl_fs_close(fd: i32) -> i32 {
 /// * Number of bytes read (0 at EOF)
 /// * Negative error code on failure
 #[unsafe(no_mangle)]
-pub extern "C" fn hl_fs_read(fd: i32, buf: *mut u8, count: u64) -> i64 {
+pub extern "C" fn hl_fs_read(fd: i32, buf: *mut core::ffi::c_void, count: u64) -> i64 {
     if fd < 0 {
         return HL_EBADF as i64;
     }
@@ -317,13 +317,15 @@ pub extern "C" fn hl_fs_read(fd: i32, buf: *mut u8, count: u64) -> i64 {
         Err(_) => return HL_EINVAL as i64,
     };
 
-    let slice = unsafe { core::slice::from_raw_parts_mut(buf, count_usize) };
+    let slice = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, count_usize) };
 
     match get_fd_entry(fd) {
         Ok(entry) => match entry {
             FdEntry::ReadOnly(ro_file) => {
                 // Read from memory-mapped file
-                let available = ro_file.size.saturating_sub(ro_file.position);
+                let position = ro_file.position();
+                let size = ro_file.size();
+                let available = size.saturating_sub(position);
                 let to_read = core::cmp::min(count, available) as usize;
 
                 if to_read == 0 {
@@ -331,14 +333,14 @@ pub extern "C" fn hl_fs_read(fd: i32, buf: *mut u8, count: u64) -> i64 {
                 }
 
                 // Copy data from guest memory with overflow protection
-                let offset = ro_file.position as usize;
-                let src_ptr = ro_file.guest_address as *const u8;
+                let offset = position as usize;
+                let src_ptr = ro_file.guest_address() as *const u8;
                 // SAFETY: guest_address and position are validated during file open.
                 // Using wrapping_add to avoid UB on overflow (would just read wrong data).
                 let src =
                     unsafe { core::slice::from_raw_parts(src_ptr.wrapping_add(offset), to_read) };
                 slice[..to_read].copy_from_slice(src);
-                ro_file.position += to_read as u64;
+                ro_file.set_position(position + to_read as u64);
 
                 to_read as i64
             }
@@ -347,7 +349,7 @@ pub extern "C" fn hl_fs_read(fd: i32, buf: *mut u8, count: u64) -> i64 {
                 let mut total_read = 0usize;
                 let mut remaining = slice;
                 while !remaining.is_empty() {
-                    match fat_entry.file.read(remaining) {
+                    match fat_entry.borrow_mut().file.read(remaining) {
                         Ok(0) => {
                             // EOF reached
                             break;
@@ -389,7 +391,7 @@ pub extern "C" fn hl_fs_read(fd: i32, buf: *mut u8, count: u64) -> i64 {
 /// before each write, as required by POSIX. This ensures writes always append
 /// even if lseek() was called in between.
 #[unsafe(no_mangle)]
-pub extern "C" fn hl_fs_write(fd: i32, buf: *const u8, count: u64) -> i64 {
+pub extern "C" fn hl_fs_write(fd: i32, buf: *const core::ffi::c_void, count: u64) -> i64 {
     if fd < 0 {
         return HL_EBADF as i64;
     }
@@ -406,7 +408,7 @@ pub extern "C" fn hl_fs_write(fd: i32, buf: *const u8, count: u64) -> i64 {
         Err(_) => return HL_EINVAL as i64,
     };
 
-    let slice = unsafe { core::slice::from_raw_parts(buf, count_usize) };
+    let slice = unsafe { core::slice::from_raw_parts(buf as *const u8, count_usize) };
 
     match get_fd_entry(fd) {
         Ok(entry) => match entry {
@@ -416,7 +418,7 @@ pub extern "C" fn hl_fs_write(fd: i32, buf: *const u8, count: u64) -> i64 {
                 HL_EBADF as i64
             }
             FdEntry::Fat(fat_entry) => {
-                if !fat_entry.file.can_write() {
+                if !fat_entry.borrow().file.can_write() {
                     return HL_EBADF as i64; // File not opened for writing
                 }
 
@@ -425,14 +427,14 @@ pub extern "C" fn hl_fs_write(fd: i32, buf: *const u8, count: u64) -> i64 {
                 // not just on open, to handle lseek() calls in between.
                 if fat_entry.is_append() {
                     // Seek to end; ignore errors (best effort)
-                    let _ = fat_entry.file.seek_raw(2, 0); // SEEK_END, offset 0
+                    let _ = fat_entry.borrow_mut().file.seek_raw(2, 0); // SEEK_END, offset 0
                 }
 
                 // Write all bytes, handling partial writes
                 let mut total_written = 0usize;
                 let mut remaining = slice;
                 while !remaining.is_empty() {
-                    match fat_entry.file.write(remaining) {
+                    match fat_entry.borrow_mut().file.write(remaining) {
                         Ok(0) => {
                             // No progress - probably out of space
                             if total_written > 0 {
@@ -479,10 +481,12 @@ pub extern "C" fn hl_fs_lseek(fd: i32, offset: i64, whence: i32) -> i64 {
         Ok(entry) => match entry {
             FdEntry::ReadOnly(ro_file) => {
                 // Calculate new position for read-only files
+                let position = ro_file.position();
+                let size = ro_file.size();
                 let new_pos = match whence {
                     HL_SEEK_SET => offset,
-                    HL_SEEK_CUR => ro_file.position as i64 + offset,
-                    HL_SEEK_END => ro_file.size as i64 + offset,
+                    HL_SEEK_CUR => position as i64 + offset,
+                    HL_SEEK_END => size as i64 + offset,
                     _ => return HL_EINVAL as i64,
                 };
 
@@ -490,12 +494,12 @@ pub extern "C" fn hl_fs_lseek(fd: i32, offset: i64, whence: i32) -> i64 {
                     return HL_EINVAL as i64;
                 }
 
-                ro_file.position = new_pos as u64;
+                ro_file.set_position(new_pos as u64);
                 new_pos
             }
             FdEntry::Fat(fat_entry) => {
                 // Use seek_raw which accepts whence/offset directly
-                match fat_entry.file.seek_raw(whence, offset) {
+                match fat_entry.borrow_mut().file.seek_raw(whence, offset) {
                     Ok(pos) => pos as i64,
                     Err(e) => fs_error_to_code(e) as i64,
                 }
@@ -526,9 +530,9 @@ pub extern "C" fn hl_fs_fstat(fd: i32, stat: *mut Stat) -> i32 {
     match get_fd_entry(fd) {
         Ok(entry) => {
             let (size, is_dir) = match entry {
-                FdEntry::ReadOnly(ro_file) => (ro_file.size, false),
+                FdEntry::ReadOnly(ro_file) => (ro_file.size(), false),
                 FdEntry::Fat(fat_entry) => {
-                    match fat_entry.file.len() {
+                    match fat_entry.borrow_mut().file.len() {
                         Ok(len) => (len, false), // Open files are always files, not directories
                         Err(e) => return fs_error_to_code(e),
                     }
@@ -1120,8 +1124,14 @@ pub extern "C" fn hl_fs_fcntl(fd: i32, cmd: i32, arg: i32) -> i32 {
 
     match cmd {
         HL_F_DUPFD => {
-            // Duplicate fd to lowest available >= arg
-            hl_fs_dup_to(fd, arg)
+            // Duplicate fd to lowest available >= arg (POSIX F_DUPFD semantics)
+            if arg < 0 {
+                return HL_EINVAL;
+            }
+            match dup_fd_to(fd, None, Some(arg)) {
+                Ok(newfd) => newfd,
+                Err(e) => fs_error_to_code(e),
+            }
         }
         HL_F_GETFD => {
             // Get fd flags (we don't support close-on-exec, return 0)
@@ -1135,7 +1145,7 @@ pub extern "C" fn hl_fs_fcntl(fd: i32, cmd: i32, arg: i32) -> i32 {
             // Get file status flags - return the original open() flags
             match entry {
                 FdEntry::ReadOnly(_) => HL_O_RDONLY,
-                FdEntry::Fat(fat_entry) => fat_entry.flags,
+                FdEntry::Fat(fat_entry) => fat_entry.flags(),
             }
         }
         HL_F_SETFL => {
@@ -1165,22 +1175,35 @@ pub extern "C" fn hl_fs_fcntl(fd: i32, cmd: i32, arg: i32) -> i32 {
 
 /// Duplicate a file descriptor.
 ///
+/// Creates a new file descriptor that refers to the same open file.
+/// Both RO and FAT files share the same file position (POSIX semantics).
+///
 /// # Arguments
 /// * `oldfd` - File descriptor to duplicate
 ///
 /// # Returns
-/// * New fd on success
+/// * New fd on success (lowest available fd >= 3)
 /// * Negative error code on failure
 #[unsafe(no_mangle)]
 pub extern "C" fn hl_fs_dup(oldfd: i32) -> i32 {
-    hl_fs_dup_to(oldfd, 0)
+    if oldfd < 0 {
+        return HL_EBADF;
+    }
+
+    match dup_fd(oldfd) {
+        Ok(newfd) => newfd,
+        Err(e) => fs_error_to_code(e),
+    }
 }
 
 /// Duplicate a file descriptor to a specific fd.
 ///
+/// If newfd is already open, it is closed first (atomically).
+/// Both RO and FAT files share the same file position (POSIX semantics).
+///
 /// # Arguments
 /// * `oldfd` - File descriptor to duplicate
-/// * `newfd` - Target file descriptor
+/// * `newfd` - Target file descriptor (must be >= 3)
 ///
 /// # Returns
 /// * newfd on success
@@ -1191,43 +1214,18 @@ pub extern "C" fn hl_fs_dup2(oldfd: i32, newfd: i32) -> i32 {
         return HL_EBADF;
     }
 
+    // POSIX: if oldfd == newfd, just validate oldfd and return
     if oldfd == newfd {
-        // Check if oldfd is valid
         if get_fd_entry(oldfd).is_err() {
             return HL_EBADF;
         }
         return newfd;
     }
 
-    // Validate oldfd exists before doing anything
-    if get_fd_entry(oldfd).is_err() {
-        return HL_EBADF;
+    match dup_fd_to(oldfd, Some(newfd), None) {
+        Ok(fd) => fd,
+        Err(e) => fs_error_to_code(e),
     }
-
-    // Not implemented: FAT file handles have mutable state (position, buffers)
-    // that cannot be shared across duplicated descriptors without Rc<RefCell<>>.
-    // We intentionally do NOT close newfd here - returning ENOTSUP means
-    // "operation not supported", not "operation partially completed".
-    HL_ENOTSUP
-}
-
-/// Internal helper for dup operations.
-///
-/// Currently returns ENOTSUP because FAT file handles have mutable state
-/// that cannot be trivially duplicated. Would need Rc<RefCell<>> or similar
-/// to support shared file position across duplicated descriptors.
-fn hl_fs_dup_to(oldfd: i32, _min_fd: i32) -> i32 {
-    if oldfd < 0 {
-        return HL_EBADF;
-    }
-
-    // Validate oldfd exists before returning ENOTSUP
-    if get_fd_entry(oldfd).is_err() {
-        return HL_EBADF;
-    }
-
-    // Not implemented: FAT handles have mutable state that can't be shared
-    HL_ENOTSUP
 }
 
 // ============================================================================

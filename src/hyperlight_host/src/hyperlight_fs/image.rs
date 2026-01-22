@@ -301,7 +301,7 @@ impl HyperlightFSImage {
     /// # Example
     ///
     /// ```ignore
-    /// // With mount point "/mnt/fat"
+    /// // With mount point "/mnt/fat" (internal API)
     /// let result = image.find_fat_mount("/mnt/fat/subdir/file.txt");
     /// // Returns Some((0, "/subdir/file.txt"))
     ///

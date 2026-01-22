@@ -37,15 +37,12 @@ limitations under the License.
 //!
 //! # Example
 //!
-//! ```ignore
-//! use hyperlight_host::hyperlight_fs::FatImage;
-//! use std::io::{Read, Write};
-//!
+//! ```no_run
+//! # use hyperlight_host::hyperlight_fs::FatImage;
+//! # use std::io::{Read, Write};
+//! # fn main() -> hyperlight_host::Result<()> {
 //! // Create a new temporary FAT image (1MB)
 //! let mut image = FatImage::create_temp(1024 * 1024)?;
-//!
-//! // Or open an existing image (acquires exclusive lock)
-//! let mut image = FatImage::open("/path/to/existing.fat")?;
 //!
 //! // Get the mmap'd region for guest memory setup
 //! let ptr = image.as_ptr();
@@ -58,6 +55,8 @@ limitations under the License.
 //! let mut reader = image.open_file("/hello.txt")?;
 //! let mut contents = Vec::new();
 //! reader.read_to_end(&mut contents)?;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::fs::{File, OpenOptions};
@@ -98,14 +97,18 @@ type FatFile<'a> = fatfs::File<'a, FatIo, fatfs::DefaultTimeProvider, fatfs::Los
 ///
 /// # Example
 ///
-/// ```ignore
-/// use std::io::{BufRead, BufReader};
-///
+/// ```no_run
+/// # use hyperlight_host::hyperlight_fs::FatImage;
+/// # use std::io::{BufRead, BufReader};
+/// # fn main() -> hyperlight_host::Result<()> {
+/// # let mut image = FatImage::create_temp(1024 * 1024)?;
 /// let reader = image.open_file("/config.txt")?;
 /// let buf_reader = BufReader::new(reader);
 /// for line in buf_reader.lines() {
 ///     println!("{}", line?);
 /// }
+/// # Ok(())
+/// # }
 /// ```
 pub struct FatFileReader<'a> {
     file: FatFile<'a>,
@@ -153,13 +156,17 @@ impl std::fmt::Debug for FatFileReader<'_> {
 ///
 /// # Example
 ///
-/// ```ignore
-/// use std::io::Write;
-///
+/// ```no_run
+/// # use hyperlight_host::hyperlight_fs::FatImage;
+/// # use std::io::Write;
+/// # fn main() -> hyperlight_host::Result<()> {
+/// # let mut image = FatImage::create_temp(1024 * 1024)?;
 /// let mut writer = image.create_file("/output.bin")?;
 /// writer.write_all(b"Hello, world!")?;
 /// writer.flush()?; // Explicit flush for error handling
 /// drop(writer);    // Or let it drop, which also flushes
+/// # Ok(())
+/// # }
 /// ```
 #[must_use = "writer must be used to write data; dropping immediately writes nothing"]
 pub struct FatFileWriter<'a> {
@@ -214,7 +221,10 @@ impl std::fmt::Debug for FatFileWriter<'_> {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # use hyperlight_host::hyperlight_fs::FatImage;
+/// # fn main() -> hyperlight_host::Result<()> {
+/// # let mut image = FatImage::create_temp(1024 * 1024)?;
 /// let entries = image.read_dir("/")?;
 /// for entry in entries {
 ///     if entry.stat.is_dir {
@@ -223,6 +233,8 @@ impl std::fmt::Debug for FatFileWriter<'_> {
 ///         println!("File: {} ({} bytes)", entry.name, entry.stat.size);
 ///     }
 /// }
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct FatEntry {
@@ -629,7 +641,10 @@ impl FatImage {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use hyperlight_host::hyperlight_fs::FatImage;
+    /// # fn main() -> hyperlight_host::Result<()> {
+    /// # let mut image = FatImage::create_temp(1024 * 1024)?;
     /// let entries = image.read_dir("/")?;
     /// for entry in &entries {
     ///     if entry.stat.is_dir {
@@ -638,6 +653,8 @@ impl FatImage {
     ///         println!("File: {} ({} bytes)", entry.name, entry.stat.size);
     ///     }
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// # Errors
@@ -674,24 +691,19 @@ impl FatImage {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// use std::io::{BufRead, BufReader, Read};
+    /// ```no_run
+    /// # use hyperlight_host::hyperlight_fs::FatImage;
+    /// use std::io::{BufRead, BufReader, Read, Write};
+    /// # fn main() -> hyperlight_host::Result<()> {
+    /// # let mut image = FatImage::create_temp(1024 * 1024)?;
+    /// # image.create_file("/small.txt")?.write_all(b"test")?;
     ///
     /// // Read entire small file
     /// let mut reader = image.open_file("/small.txt")?;
     /// let mut contents = String::new();
     /// reader.read_to_string(&mut contents)?;
-    ///
-    /// // Stream large file line by line
-    /// let reader = image.open_file("/big.log")?;
-    /// for line in BufReader::new(reader).lines() {
-    ///     println!("{}", line?);
-    /// }
-    ///
-    /// // Read first 100 bytes only
-    /// let mut reader = image.open_file("/huge.bin")?;
-    /// let mut buf = [0u8; 100];
-    /// reader.read_exact(&mut buf)?;
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// # Errors
@@ -737,23 +749,18 @@ impl FatImage {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use hyperlight_host::hyperlight_fs::FatImage;
     /// use std::io::Write;
+    /// # fn main() -> hyperlight_host::Result<()> {
+    /// # let mut image = FatImage::create_temp(1024 * 1024)?;
     ///
     /// // Simple write
     /// let mut writer = image.create_file("/hello.txt")?;
     /// writer.write_all(b"Hello, world!")?;
     /// writer.flush()?; // Explicit flush for error handling
-    ///
-    /// // Stream from another reader
-    /// let mut writer = image.create_file("/copy.bin")?;
-    /// std::io::copy(&mut source_reader, &mut writer)?;
-    ///
-    /// // Write in chunks
-    /// let mut writer = image.create_file("/chunked.bin")?;
-    /// for chunk in data.chunks(4096) {
-    ///     writer.write_all(chunk)?;
-    /// }
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// # Errors
@@ -795,13 +802,18 @@ impl FatImage {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use hyperlight_host::hyperlight_fs::FatImage;
+    /// # fn main() -> hyperlight_host::Result<()> {
+    /// # let mut image = FatImage::create_temp(1024 * 1024)?;
     /// // Create a single directory
     /// image.create_dir("/data")?;
     ///
     /// // Create nested directories (parents must exist first)
     /// image.create_dir("/data/logs")?;
     /// image.create_dir("/data/logs/2025")?;
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// # Errors
@@ -900,15 +912,19 @@ impl FatImage {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use hyperlight_host::hyperlight_fs::FatImage;
+    /// # fn main() -> hyperlight_host::Result<()> {
+    /// # let mut image = FatImage::create_temp(1024 * 1024)?;
+    /// # image.create_file("/old_name.txt")?;
+    /// # image.create_dir("/subdir")?;
     /// // Rename a file
     /// image.rename("/old_name.txt", "/new_name.txt")?;
     ///
     /// // Move a file to a subdirectory
-    /// image.rename("/file.txt", "/subdir/file.txt")?;
-    ///
-    /// // Rename a directory
-    /// image.rename("/old_dir", "/new_dir")?;
+    /// image.rename("/new_name.txt", "/subdir/file.txt")?;
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// # Errors

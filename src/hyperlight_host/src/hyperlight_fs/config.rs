@@ -59,19 +59,21 @@ limitations under the License.
 //!
 //! ## From a TOML file on disk
 //!
-//! ```ignore
-//! use hyperlight_host::hyperlight_fs::{HyperlightFSBuilder, HyperlightFsConfig};
-//!
+//! ```no_run
+//! # use hyperlight_host::hyperlight_fs::{HyperlightFSBuilder, HyperlightFsConfig};
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // Load config from a file
 //! let config = HyperlightFsConfig::from_toml_file("/path/to/hyperlight-fs.toml")?;
-//! let fs = HyperlightFSBuilder::from_config(&config)?.build()?;
+//! let fs = HyperlightFSBuilder::from_config(&config)?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## From a TOML string
 //!
-//! ```ignore
-//! use hyperlight_host::hyperlight_fs::{HyperlightFSBuilder, HyperlightFsConfig};
-//!
+//! ```no_run
+//! # use hyperlight_host::hyperlight_fs::{HyperlightFSBuilder, HyperlightFsConfig};
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let toml_content = r#"
 //! [[file]]
 //! host_path = "/etc/app/config.json"
@@ -79,7 +81,9 @@ limitations under the License.
 //! "#;
 //!
 //! let config = HyperlightFsConfig::from_toml(toml_content)?;
-//! let fs = HyperlightFSBuilder::from_config(&config)?.build()?;
+//! let fs = HyperlightFSBuilder::from_config(&config)?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Size Values
@@ -361,10 +365,12 @@ impl HyperlightFsConfig {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// use hyperlight_host::hyperlight_fs::HyperlightFsConfig;
-    ///
+    /// ```no_run
+    /// # use hyperlight_host::hyperlight_fs::HyperlightFsConfig;
+    /// # fn main() -> Result<(), hyperlight_host::hyperlight_fs::ConfigError> {
     /// let config = HyperlightFsConfig::from_toml_file("/path/to/hyperlight-fs.toml")?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn from_toml_file(path: &str) -> Result<Self, ConfigError> {
         let content = std::fs::read_to_string(path).map_err(|e| ConfigError::IoError {

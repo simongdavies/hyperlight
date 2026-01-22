@@ -91,8 +91,8 @@ pub mod vfs;
 pub use error::FsError;
 pub use fat::GuestFatFile;
 pub use fd::{
-    FatFdEntry, FdEntry, OpenFile, alloc_fat_fd, alloc_ro_fd, free_fd, get_fat_fd, get_fd_entry,
-    get_ro_fd,
+    FatFdEntry, FdEntry, OpenFile, SharedRoFile, alloc_fat_fd, alloc_ro_fd, dup_fd, dup_fd_to,
+    free_fd, get_fat_fd, get_fd_entry, get_ro_fd,
 };
 pub use file::{
     DirEntry, File, OpenOptions, Stat, chdir, cwd, mkdir, open, read_dir, rename, rmdir, stat,
