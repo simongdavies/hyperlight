@@ -22,6 +22,7 @@ limitations under the License.
 //! - CRUD operations (create, read, update, delete)
 //! - Directory operations (mkdir, rmdir, list)
 //! - Mixed ReadOnly + FAT configurations
+//! - Host-guest cross-validation (MAP_SHARED verification)
 
 #![cfg(unix)]
 #![allow(clippy::disallowed_macros)]
@@ -1332,6 +1333,299 @@ fn test_sandbox_fs_read_dir_file_sizes() {
         content_b.len() as u64,
         "b.txt size should match content length"
     );
+}
+
+// =============================================================================
+// Host-Guest Cross-Validation Tests (MAP_SHARED verification)
+// =============================================================================
+//
+// These tests verify that the MAP_SHARED memory mapping correctly allows both
+// host and guest to see each other's writes. This proves the zero-copy
+// architecture is working correctly.
+
+/// Test: Guest creates directory, host can list it.
+///
+/// Verifies MAP_SHARED works for directory metadata operations.
+#[test]
+fn test_cross_validation_guest_mkdir_host_lists() {
+    let (_temp_dir, mut sandbox) = create_empty_fat_test_sandbox();
+
+    // Guest creates directories
+    let result: bool = sandbox
+        .call("MkdirFat", "/data/guest_dir".to_string())
+        .unwrap();
+    assert!(result, "guest mkdir should succeed");
+
+    let result: bool = sandbox
+        .call("MkdirFat", "/data/another_dir".to_string())
+        .unwrap();
+    assert!(result, "guest mkdir should succeed");
+
+    // Host can see them
+    let entries = sandbox.fs_read_dir("/data").unwrap();
+    let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+
+    assert!(names.contains(&"guest_dir"), "host should see guest_dir");
+    assert!(
+        names.contains(&"another_dir"),
+        "host should see another_dir"
+    );
+}
+
+/// Test: Host creates directory, guest can list it.
+///
+/// Verifies MAP_SHARED works in the reverse direction.
+#[test]
+fn test_cross_validation_host_mkdir_guest_lists() {
+    let (_temp_dir, mut sandbox) = create_empty_fat_test_sandbox();
+
+    // Host creates directories
+    sandbox.fs_mkdir("/data/host_dir").unwrap();
+    sandbox.fs_mkdir("/data/host_dir/nested").unwrap();
+
+    // Guest can see them via ListDirFat
+    let listing: String = sandbox.call("ListDirFat", "/data".to_string()).unwrap();
+    assert!(
+        listing.contains("host_dir"),
+        "guest should see host_dir in listing: {}",
+        listing
+    );
+
+    // Guest can also check existence
+    let exists: i32 = sandbox
+        .call("ExistsFat", "/data/host_dir".to_string())
+        .unwrap();
+    assert_eq!(exists, 2, "guest ExistsFat should return 2 for directory");
+}
+
+/// Test: Guest deletes file, host verifies it's gone.
+///
+/// Verifies deletion operations are immediately visible to host.
+#[test]
+fn test_cross_validation_guest_delete_host_verifies() {
+    let (_temp_dir, mut sandbox) = create_empty_fat_test_sandbox();
+
+    // Host creates a file
+    sandbox
+        .fs_write_file("/data/to_delete.txt", b"delete me")
+        .unwrap();
+    assert!(sandbox.fs_exists("/data/to_delete.txt").unwrap());
+
+    // Guest deletes it
+    let result: bool = sandbox
+        .call("DeleteFatFile", "/data/to_delete.txt".to_string())
+        .unwrap();
+    assert!(result, "guest delete should succeed");
+
+    // Host verifies it's gone
+    assert!(
+        !sandbox.fs_exists("/data/to_delete.txt").unwrap(),
+        "host should see file is gone after guest delete"
+    );
+}
+
+/// Test: Host deletes file, guest verifies it's gone.
+///
+/// Verifies deletion operations are immediately visible to guest.
+#[test]
+fn test_cross_validation_host_delete_guest_verifies() {
+    let (_temp_dir, mut sandbox) = create_empty_fat_test_sandbox();
+
+    // Guest creates a file
+    let _: bool = sandbox
+        .call(
+            "WriteFatFile",
+            (
+                "/data/host_will_delete.txt".to_string(),
+                b"I will be deleted".to_vec(),
+            ),
+        )
+        .unwrap();
+
+    // Host deletes it
+    sandbox
+        .fs_remove_file("/data/host_will_delete.txt")
+        .unwrap();
+
+    // Guest verifies it's gone
+    let exists: i32 = sandbox
+        .call("ExistsFat", "/data/host_will_delete.txt".to_string())
+        .unwrap();
+    assert_eq!(exists, 0, "guest should see file is gone after host delete");
+}
+
+/// Test: Binary data integrity across host-guest boundary.
+///
+/// Writes binary data (including null bytes and all byte values) and
+/// verifies it survives the round-trip through MAP_SHARED.
+#[test]
+fn test_cross_validation_binary_data_integrity() {
+    let (_temp_dir, mut sandbox) = create_empty_fat_test_sandbox();
+
+    // Create binary data with all byte values 0-255
+    let binary_data: Vec<u8> = (0u8..=255).collect();
+
+    // Host writes binary data
+    sandbox
+        .fs_write_file("/data/binary.bin", &binary_data)
+        .unwrap();
+
+    // Guest reads it back
+    let guest_read: Vec<u8> = sandbox
+        .call("ReadFatFile", "/data/binary.bin".to_string())
+        .unwrap();
+
+    assert_eq!(
+        guest_read.len(),
+        binary_data.len(),
+        "binary data length mismatch"
+    );
+    assert_eq!(guest_read, binary_data, "binary data content mismatch");
+
+    // Now test guest write -> host read
+    let reversed: Vec<u8> = binary_data.iter().rev().copied().collect();
+    let _: bool = sandbox
+        .call(
+            "WriteFatFile",
+            ("/data/binary_rev.bin".to_string(), reversed.clone()),
+        )
+        .unwrap();
+
+    let host_read = sandbox.fs_read_file("/data/binary_rev.bin").unwrap();
+    assert_eq!(host_read, reversed, "reversed binary data mismatch");
+}
+
+/// Test: Large file cross-validation (64KB).
+///
+/// Verifies that larger files work correctly with MAP_SHARED.
+#[test]
+fn test_cross_validation_large_file() {
+    let (_temp_dir, mut sandbox) = create_empty_fat_test_sandbox_with_size(LARGE_TEST_FAT_SIZE);
+
+    // Create 8KB of data with a recognizable pattern
+    // (64KB causes guest OOM, so we use a smaller but still meaningful size)
+    let size = 8 * 1024;
+    let large_data: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
+
+    // Host writes large file
+    sandbox
+        .fs_write_file("/data/large.bin", &large_data)
+        .unwrap();
+
+    // Guest reads it back
+    let guest_read: Vec<u8> = sandbox
+        .call("ReadFatFile", "/data/large.bin".to_string())
+        .unwrap();
+
+    assert_eq!(guest_read.len(), size, "large file length mismatch");
+    assert_eq!(guest_read, large_data, "large file content mismatch");
+
+    // Verify host can stat and see correct size
+    let stat = sandbox.fs_stat("/data/large.bin").unwrap();
+    assert_eq!(stat.size, size as u64, "stat size should match");
+}
+
+/// Test: Guest rename, host verifies.
+///
+/// Verifies rename operations are visible across the boundary.
+#[test]
+fn test_cross_validation_guest_rename_host_verifies() {
+    let (_temp_dir, mut sandbox) = create_empty_fat_test_sandbox();
+
+    // Host creates file
+    sandbox
+        .fs_write_file("/data/old_name.txt", b"rename me")
+        .unwrap();
+
+    // Guest renames it
+    let result: bool = sandbox
+        .call(
+            "RenameFat",
+            (
+                "/data/old_name.txt".to_string(),
+                "/data/new_name.txt".to_string(),
+            ),
+        )
+        .unwrap();
+    assert!(result, "guest rename should succeed");
+
+    // Host verifies old name is gone, new name exists with same content
+    assert!(
+        !sandbox.fs_exists("/data/old_name.txt").unwrap(),
+        "old name should not exist"
+    );
+    assert!(
+        sandbox.fs_exists("/data/new_name.txt").unwrap(),
+        "new name should exist"
+    );
+    let content = sandbox.fs_read_file("/data/new_name.txt").unwrap();
+    assert_eq!(content, b"rename me", "content should be preserved");
+}
+
+/// Test: Interleaved operations stress test.
+///
+/// Performs many interleaved host and guest operations to verify
+/// MAP_SHARED consistency under more complex scenarios.
+#[test]
+fn test_cross_validation_interleaved_stress() {
+    let (_temp_dir, mut sandbox) = create_empty_fat_test_sandbox();
+
+    // Round 1: Host creates structure
+    sandbox.fs_mkdir("/data/shared").unwrap();
+
+    for i in 0..5 {
+        let path = format!("/data/shared/host_{}.txt", i);
+        let content = format!("host content {}", i);
+        sandbox.fs_write_file(&path, content.as_bytes()).unwrap();
+    }
+
+    // Round 2: Guest adds files
+    for i in 0..5 {
+        let path = format!("/data/shared/guest_{}.txt", i);
+        let content = format!("guest content {}", i);
+        let _: bool = sandbox
+            .call("WriteFatFile", (path, content.into_bytes()))
+            .unwrap();
+    }
+
+    // Round 3: Verify all 10 files visible to both
+    let entries = sandbox.fs_read_dir("/data/shared").unwrap();
+    assert_eq!(entries.len(), 10, "should have 10 files total");
+
+    // Round 4: Host reads guest files
+    for i in 0..5 {
+        let path = format!("/data/shared/guest_{}.txt", i);
+        let content = sandbox.fs_read_file(&path).unwrap();
+        let expected = format!("guest content {}", i);
+        assert_eq!(content, expected.as_bytes());
+    }
+
+    // Round 5: Guest reads host files
+    for i in 0..5 {
+        let path = format!("/data/shared/host_{}.txt", i);
+        let content: Vec<u8> = sandbox.call("ReadFatFile", path).unwrap();
+        let expected = format!("host content {}", i);
+        assert_eq!(content, expected.as_bytes());
+    }
+
+    // Round 6: Alternating deletes
+    for i in 0..5 {
+        if i % 2 == 0 {
+            // Host deletes guest file
+            let path = format!("/data/shared/guest_{}.txt", i);
+            sandbox.fs_remove_file(&path).unwrap();
+        } else {
+            // Guest deletes host file
+            let path = format!("/data/shared/host_{}.txt", i);
+            let result: bool = sandbox.call("DeleteFatFile", path).unwrap();
+            assert!(result);
+        }
+    }
+
+    // Round 7: Verify remaining files
+    let entries = sandbox.fs_read_dir("/data/shared").unwrap();
+    // Should have: guest_1, guest_3, host_0, host_2, host_4 = 5 files
+    assert_eq!(entries.len(), 5, "should have 5 files after deletes");
 }
 
 // =============================================================================

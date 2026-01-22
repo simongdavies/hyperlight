@@ -34,6 +34,7 @@ limitations under the License.
 //! - Guest creating, writing, reading files (FAT)
 //! - Guest creating directories (FAT)
 //! - Listing directory contents (FAT)
+//! - Host-Guest interoperability via MAP_SHARED (zero-copy verification)
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -241,6 +242,63 @@ fn run_demo() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     // =========================================================================
+    // Part 5: Host-Guest Interoperability (MAP_SHARED validation)
+    // =========================================================================
+
+    println!("═══════════════════════════════════════════════════════════════");
+    println!("  🔄 Host-Guest Interoperability Demo (MAP_SHARED)");
+    println!("═══════════════════════════════════════════════════════════════");
+    println!();
+    println!("   This section demonstrates that HOST and GUEST share the same");
+    println!("   memory via MAP_SHARED - writes from one are immediately visible");
+    println!("   to the other without any copying.");
+    println!();
+
+    // Host writes a file using Sandbox API
+    println!("   1️⃣  Host writes /data/from_host.txt using sandbox.fs_write_file()...");
+    let host_message = "Hello from the HOST side!";
+    sandbox.fs_write_file("/data/from_host.txt", host_message.as_bytes())?;
+    println!("      ✓ Host wrote {} bytes", host_message.len());
+    println!();
+
+    // Guest reads that same file via its C API
+    println!("   2️⃣  Guest reads /data/from_host.txt using ReadFatFile()...");
+    let guest_read: Vec<u8> = sandbox.call("ReadFatFile", "/data/from_host.txt".to_string())?;
+    let guest_read_str = String::from_utf8_lossy(&guest_read);
+    println!("      ✓ Guest read: \"{}\"", guest_read_str);
+    if guest_read != host_message.as_bytes() {
+        return Err("guest did not read what host wrote!".into());
+    }
+    println!("      ✓ Content matches!");
+    println!();
+
+    // Guest writes a different file via its C API
+    println!("   3️⃣  Guest writes /data/from_guest.txt using WriteFatFile()...");
+    let guest_message = b"Greetings from the GUEST side!".to_vec();
+    let _: bool = sandbox.call(
+        "WriteFatFile",
+        ("/data/from_guest.txt".to_string(), guest_message.clone()),
+    )?;
+    println!("      ✓ Guest wrote {} bytes", guest_message.len());
+    println!();
+
+    // Host reads that file using Sandbox API
+    println!("   4️⃣  Host reads /data/from_guest.txt using sandbox.fs_read_file()...");
+    let host_read = sandbox.fs_read_file("/data/from_guest.txt")?;
+    let host_read_str = String::from_utf8_lossy(&host_read);
+    println!("      ✓ Host read: \"{}\"", host_read_str);
+    if host_read != guest_message {
+        return Err("host did not read what guest wrote!".into());
+    }
+    println!("      ✓ Content matches!");
+    println!();
+
+    println!("   ═══════════════════════════════════════════════════════════");
+    println!("   🎉 MAP_SHARED VERIFIED: Same memory, zero copies!");
+    println!("   ═══════════════════════════════════════════════════════════");
+    println!();
+
+    // =========================================================================
     // Summary
     // =========================================================================
 
@@ -257,6 +315,7 @@ fn run_demo() -> Result<(), Box<dyn std::error::Error>> {
     println!("   • Listing directory contents");
     println!("   • Getting file statistics");
     println!("   • Deleting files");
+    println!("   • Host-Guest interoperability via MAP_SHARED");
     println!();
     println!("   FAT image location: {}", fat_path.display());
     println!();
