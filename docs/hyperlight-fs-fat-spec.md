@@ -797,15 +797,35 @@ pub fn is_guest_created_mount(mount_point: &str) -> bool;
 ### 5.2 File Handle
 
 ```rust
+/// A raw file descriptor (matches std::os::fd::RawFd).
+pub type RawFd = i32;
+
 pub struct File {
     // ... internal fields
 }
 
 impl File {
-    /// Get file descriptor number (for C interop).
+    /// Get the file descriptor number (borrow, doesn't transfer ownership).
     /// 
-    /// Returns `Some(fd)` for read-only memory-mapped files, `None` for FAT files.
-    pub fn fd(&self) -> Option<i32>;
+    /// Both read-only and FAT files have file descriptors.
+    /// The descriptor is valid until the File is dropped.
+    pub fn fd(&self) -> RawFd;
+    
+    /// Consume the File and return the raw file descriptor.
+    ///
+    /// This transfers ownership of the file descriptor to the caller.
+    /// The caller becomes responsible for closing it (e.g., via C API `close()`).
+    /// The `Drop` implementation will NOT be called.
+    pub fn into_raw_fd(self) -> RawFd;
+    
+    /// Create a File from a raw file descriptor.
+    ///
+    /// # Safety
+    ///
+    /// The fd must be a valid file descriptor previously obtained from
+    /// `into_raw_fd()` or `fd()`. The caller transfers ownership
+    /// to the returned File, which will close the fd on drop.
+    pub unsafe fn from_raw_fd(fd: RawFd) -> Self;
     
     /// Returns true if this file is read-only.
     pub fn is_readonly(&self) -> bool;
@@ -983,21 +1003,48 @@ pub struct RawMemoryStorage {
 
 #### 5.5.3 File Handle Abstraction
 
+Both read-only and FAT files use a unified file descriptor model. Each open file is assigned
+a file descriptor from an internal fd table. The wrapper structs (`RoFile`, `FatFile`) hold
+only the fd number; all operations go through the fd table lookup.
+
 ```rust
 /// An open file handle (unified type for all backends).
 pub enum File {
     /// Read-only memory-mapped file from the manifest.
     ReadOnly(RoFile),
     /// Read-write file on a FAT filesystem.
-    /// The 'static lifetime is valid because the FAT filesystem backing
-    /// memory is mapped by the host and lives for the guest's entire execution.
-    Fat(GuestFatFile<'static>),
+    Fat(FatFile),
 }
 
 /// Read-only file handle with file descriptor.
+/// 
+/// Operations lookup the actual file state in the fd table.
+/// Implements `Drop` to automatically close the fd.
 pub struct RoFile {
-    /// File descriptor index (into internal fd table).
-    fd: i32,
+    fd: RawFd,
+}
+
+/// FAT file handle with file descriptor.
+/// 
+/// The underlying `GuestFatFile` is stored in the fd table, not here.
+/// This provides consistent ownership semantics with RoFile:
+/// - `fd()` borrows the descriptor
+/// - `into_raw_fd()` transfers ownership (caller must close)
+/// - `from_raw_fd()` takes ownership (Drop will close)
+pub struct FatFile {
+    fd: RawFd,
+}
+
+impl RoFile {
+    fn fd(&self) -> RawFd;
+    fn into_raw_fd(self) -> RawFd;  // Consumes self, skips Drop
+    unsafe fn from_raw_fd(fd: RawFd) -> Self;
+}
+
+impl FatFile {
+    fn fd(&self) -> RawFd;
+    fn into_raw_fd(self) -> RawFd;  // Consumes self, skips Drop
+    unsafe fn from_raw_fd(fd: RawFd) -> Self;
 }
 ```
 

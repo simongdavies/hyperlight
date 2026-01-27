@@ -875,6 +875,39 @@ int test_openat_cwd(const char *path, int flags) {
     return fd;  // Error code
 }
 
+// ============================================================================
+// FD LIFETIME REGRESSION TEST
+// ============================================================================
+// This test catches a bug where the Rust File object would drop (and close
+// the fd) when hl_fs_open() returned, because File owns the fd via Drop.
+// The fix was to use into_raw_fd() to transfer ownership to the caller.
+
+// Helper: open a file and return the fd (simulates real-world usage)
+static int open_and_return_fd(const char *path) {
+    return open(path, O_RDONLY);
+}
+
+// Test that fd survives being returned from a function
+// Returns: 1 = success, -1 = open failed, -2 = read failed after return
+int test_fd_lifetime_across_function_return(const char *path) {
+    if (!hl_fs_initialized()) {
+        return -99;
+    }
+
+    // Get fd from helper function (fd must survive the return!)
+    int fd = open_and_return_fd(path);
+    if (fd < 0) {
+        return -1;  // Open failed
+    }
+
+    // Try to use the fd - this would fail if fd was closed on return
+    char buf[16];
+    int64_t n = read(fd, buf, sizeof(buf));
+    close(fd);
+
+    return (n >= 0) ? 1 : -2;  // 1 = success, -2 = read failed
+}
+
 // Test fcntl F_GETFL/F_SETFL
 int test_fcntl_flags(const char *path) {
     if (!hl_fs_initialized()) {
@@ -1059,6 +1092,7 @@ HYPERLIGHT_WRAP_FUNCTION(test_opendir_list, String, 1, String)
 HYPERLIGHT_WRAP_FUNCTION(test_access, Int, 2, String, Int)
 HYPERLIGHT_WRAP_FUNCTION(test_openat_cwd, Int, 2, String, Int)
 HYPERLIGHT_WRAP_FUNCTION(test_fcntl_flags, Int, 1, String)
+HYPERLIGHT_WRAP_FUNCTION(test_fd_lifetime_across_function_return, Int, 1, String)
 HYPERLIGHT_WRAP_FUNCTION(test_dup, Bool, 1, String)
 HYPERLIGHT_WRAP_FUNCTION(test_dup2, Bool, 1, String)
 HYPERLIGHT_WRAP_FUNCTION(test_dup_shared_position, Bool, 1, String)
@@ -1670,6 +1704,7 @@ void hyperlight_main(void)
     HYPERLIGHT_REGISTER_FUNCTION("TestAccess", test_access);
     HYPERLIGHT_REGISTER_FUNCTION("TestOpenatCwd", test_openat_cwd);
     HYPERLIGHT_REGISTER_FUNCTION("TestFcntlFlags", test_fcntl_flags);
+    HYPERLIGHT_REGISTER_FUNCTION("TestFdLifetimeAcrossFunctionReturn", test_fd_lifetime_across_function_return);
     HYPERLIGHT_REGISTER_FUNCTION("TestDup", test_dup);
     HYPERLIGHT_REGISTER_FUNCTION("TestDup2", test_dup2);
     HYPERLIGHT_REGISTER_FUNCTION("TestDupSharedPosition", test_dup_shared_position);

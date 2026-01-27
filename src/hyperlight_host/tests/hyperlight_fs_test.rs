@@ -1838,6 +1838,45 @@ fn test_c_api_fcntl_flags() {
     );
 }
 
+/// Test: File descriptors survive being returned from functions.
+///
+/// REGRESSION TEST for the fd lifetime bug where the Rust `File` object
+/// would drop (and close the fd) when `hl_fs_open()` returned, because
+/// `File` owns the fd via its `Drop` impl.
+///
+/// The fix was to use `into_raw_fd()` to transfer ownership to the C caller.
+/// This test catches that bug by opening a file in a helper function and
+/// returning the fd to be used by the caller.
+#[test]
+fn test_c_api_fd_lifetime_across_function_return() {
+    if skip_c_only_tests() {
+        return;
+    }
+    let (_temp_dir, mut sandbox) = create_c_guest_empty_fat_sandbox();
+
+    // Create a file with some content
+    sandbox
+        .fs_write_file("/data/fd_lifetime.txt", b"content to read after return")
+        .unwrap();
+
+    // TestFdLifetimeAcrossFunctionReturn:
+    // 1. Calls a helper function that opens and returns the fd
+    // 2. Tries to read from the returned fd
+    // Returns: 1 = success, -1 = open failed, -2 = read failed (fd was closed!)
+    let result: i32 = sandbox
+        .call(
+            "TestFdLifetimeAcrossFunctionReturn",
+            "/data/fd_lifetime.txt".to_string(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        result, 1,
+        "fd should survive being returned from function (got {}; -2 means fd was closed)",
+        result
+    );
+}
+
 /// Test: C API dup works for FAT files.
 ///
 /// Tests that dup() correctly creates a duplicate file descriptor that

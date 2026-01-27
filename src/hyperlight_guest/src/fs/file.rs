@@ -47,15 +47,23 @@ limitations under the License.
 //! [`embedded_io::Write`]. Write operations return [`FsError::ReadOnly`]
 //! for read-only files.
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use embedded_io::{ErrorType, Read, Seek, SeekFrom, Write};
 
 use super::error::FsError;
-use super::fat::GuestFatFile;
 use super::fd::{self, OpenFile};
 use super::manifest;
+
+// ============================================================================
+// Raw File Descriptor Type
+// ============================================================================
+
+/// Raw file descriptor type, matching [`std::os::fd::RawFd`].
+///
+/// This is an alias for `i32` to match POSIX conventions.
+pub type RawFd = i32;
 
 /// Builder for opening files with specific access options.
 ///
@@ -277,9 +285,9 @@ pub enum File {
     ReadOnly(RoFile),
     /// Read-write file on a FAT filesystem.
     ///
-    /// The `'static` lifetime is valid because the FAT filesystem backing
-    /// memory is mapped by the host and lives for the guest's entire execution.
-    Fat(GuestFatFile<'static>),
+    /// Like [`RoFile`], this holds just a file descriptor. The actual
+    /// [`GuestFatFile`](super::fat::GuestFatFile) lives in the fd table.
+    Fat(FatFile),
 }
 
 impl core::fmt::Debug for File {
@@ -301,49 +309,64 @@ impl File {
     pub fn is_writable(&self) -> bool {
         match self {
             File::ReadOnly(_) => false,
-            File::Fat(f) => f.can_write(),
+            File::Fat(f) => f.can_write().unwrap_or(false),
         }
     }
 
-    /// Get the file descriptor for read-only files.
+    /// Get the file descriptor number (borrow, doesn't transfer ownership).
     ///
-    /// Returns `Some(fd)` for read-only memory-mapped files, `None` for FAT files.
-    /// FAT files use a different internal representation and don't have fds.
-    pub fn fd(&self) -> Option<i32> {
+    /// Both read-only and FAT files now have file descriptors.
+    pub fn fd(&self) -> RawFd {
         match self {
-            File::ReadOnly(f) => Some(f.fd()),
-            File::Fat(_) => None,
+            File::ReadOnly(f) => f.fd(),
+            File::Fat(f) => f.fd(),
         }
     }
 
-    /// Create a read-only File from a file descriptor.
+    /// Consume the File and return the raw file descriptor.
     ///
-    /// This is only valid for read-only memory-mapped files. The fd must have
-    /// been obtained from a previous call to `File::fd()` on a read-only file.
+    /// This transfers ownership of the file descriptor to the caller.
+    /// The caller becomes responsible for closing it via [`free_fd()`](super::fd::free_fd).
+    /// The `Drop` implementation will NOT be called.
     ///
-    /// # Warning
+    /// # Returns
     ///
-    /// This creates a read-only file wrapper. Do NOT use this with file descriptors
-    /// that weren't obtained from `File::fd()` on a read-only file. FAT files
-    /// cannot be reconstructed from file descriptors.
+    /// The raw file descriptor number.
+    pub fn into_raw_fd(self) -> RawFd {
+        match self {
+            File::ReadOnly(f) => f.into_raw_fd(),
+            File::Fat(f) => f.into_raw_fd(),
+        }
+    }
+
+    /// Create a File from a raw file descriptor.
     ///
-    /// Note: This does not validate that the fd is valid. Using an invalid fd
-    /// will cause errors on subsequent operations.
+    /// # Safety
     ///
-    /// # Intended Use
+    /// The fd must be a valid file descriptor previously obtained from
+    /// [`File::into_raw_fd()`]. The fd type (RO or FAT) must match.
+    /// The caller transfers ownership to the returned `File`, which will
+    /// close the fd on drop.
     ///
-    /// This is primarily for the C API (`hyperlight_guest_capi`) which needs to
-    /// reconstruct File handles from integer descriptors passed by C code.
-    /// Rust code should prefer holding onto the `File` directly.
-    pub fn from_fd(fd: i32) -> Self {
-        File::ReadOnly(RoFile::from_fd(fd))
+    /// # Arguments
+    ///
+    /// * `fd` - The raw file descriptor
+    /// * `is_fat` - If true, creates a FAT file; if false, creates an RO file
+    pub unsafe fn from_raw_fd(fd: RawFd, is_fat: bool) -> Self {
+        if is_fat {
+            // SAFETY: Caller guarantees fd is valid FAT fd
+            File::Fat(unsafe { FatFile::from_raw_fd(fd) })
+        } else {
+            // SAFETY: Caller guarantees fd is valid RO fd
+            File::ReadOnly(unsafe { RoFile::from_raw_fd(fd) })
+        }
     }
 
     /// Get the current position in the file.
     pub fn position(&mut self) -> Result<u64, FsError> {
         match self {
             File::ReadOnly(f) => f.position(),
-            File::Fat(f) => f.seek(fatfs::SeekFrom::Current(0)),
+            File::Fat(f) => f.position(),
         }
     }
 
@@ -351,7 +374,7 @@ impl File {
     pub fn size(&mut self) -> Result<u64, FsError> {
         match self {
             File::ReadOnly(f) => f.size(),
-            File::Fat(f) => f.len(),
+            File::Fat(f) => f.size(),
         }
     }
 
@@ -359,11 +382,7 @@ impl File {
     pub fn remaining(&mut self) -> Result<u64, FsError> {
         match self {
             File::ReadOnly(f) => f.remaining(),
-            File::Fat(f) => {
-                let pos = f.seek(fatfs::SeekFrom::Current(0))?;
-                let size = f.len()?;
-                Ok(size.saturating_sub(pos))
-            }
+            File::Fat(f) => f.remaining(),
         }
     }
 
@@ -418,15 +437,7 @@ impl Seek for File {
     fn seek(&mut self, pos: SeekFrom) -> Result<u64, Self::Error> {
         match self {
             File::ReadOnly(f) => f.seek(pos),
-            File::Fat(f) => {
-                // Convert embedded_io::SeekFrom to fatfs::SeekFrom
-                let fatfs_pos = match pos {
-                    SeekFrom::Start(n) => fatfs::SeekFrom::Start(n),
-                    SeekFrom::End(n) => fatfs::SeekFrom::End(n),
-                    SeekFrom::Current(n) => fatfs::SeekFrom::Current(n),
-                };
-                f.seek(fatfs_pos)
-            }
+            File::Fat(f) => f.seek(pos),
         }
     }
 }
@@ -458,18 +469,44 @@ impl Write for File {
 #[derive(Debug, PartialEq, Eq)]
 pub struct RoFile {
     /// File descriptor index.
-    fd: i32,
+    fd: RawFd,
 }
 
 impl RoFile {
     /// Create a new RoFile from a file descriptor.
-    pub(crate) fn from_fd(fd: i32) -> Self {
+    pub(crate) fn from_fd(fd: RawFd) -> Self {
         Self { fd }
     }
 
-    /// Get the file descriptor number.
-    pub fn fd(&self) -> i32 {
+    /// Get the file descriptor number (borrow, doesn't transfer ownership).
+    pub fn fd(&self) -> RawFd {
         self.fd
+    }
+
+    /// Consume the RoFile and return the raw file descriptor.
+    ///
+    /// This transfers ownership of the file descriptor to the caller.
+    /// The caller becomes responsible for closing it via [`free_fd()`](super::fd::free_fd).
+    /// The `Drop` implementation will NOT be called.
+    ///
+    /// # Returns
+    ///
+    /// The raw file descriptor number.
+    pub fn into_raw_fd(self) -> RawFd {
+        let fd = self.fd;
+        core::mem::forget(self); // Skip Drop
+        fd
+    }
+
+    /// Create an RoFile from a raw file descriptor.
+    ///
+    /// # Safety
+    ///
+    /// The fd must be a valid file descriptor previously obtained from
+    /// [`RoFile::into_raw_fd()`] or [`RoFile::fd()`]. The caller transfers ownership
+    /// to the returned `RoFile`, which will close the fd on drop.
+    pub unsafe fn from_raw_fd(fd: RawFd) -> Self {
+        Self { fd }
     }
 
     /// Get the current position in the file.
@@ -562,6 +599,142 @@ impl Seek for RoFile {
         entry.set_position(new_pos);
 
         Ok(new_pos)
+    }
+}
+
+// ============================================================================
+// FAT File Handle
+// ============================================================================
+
+/// A FAT filesystem file handle.
+///
+/// This type is exposed through the [`File::Fat`] variant. Like [`RoFile`],
+/// it holds just a file descriptor - the actual file state lives in the
+/// fd table.
+///
+/// This type must be `pub` because it appears in a public enum variant.
+#[derive(Debug, PartialEq, Eq)]
+pub struct FatFile {
+    /// File descriptor index.
+    fd: RawFd,
+}
+
+impl FatFile {
+    /// Create a new FatFile from a file descriptor.
+    pub(crate) fn from_fd(fd: RawFd) -> Self {
+        Self { fd }
+    }
+
+    /// Get the file descriptor number (borrow, doesn't transfer ownership).
+    pub fn fd(&self) -> RawFd {
+        self.fd
+    }
+
+    /// Consume the FatFile and return the raw file descriptor.
+    ///
+    /// This transfers ownership of the file descriptor to the caller.
+    /// The caller becomes responsible for closing it via [`free_fd()`](super::fd::free_fd).
+    /// The `Drop` implementation will NOT be called.
+    ///
+    /// # Returns
+    ///
+    /// The raw file descriptor number.
+    pub fn into_raw_fd(self) -> RawFd {
+        let fd = self.fd;
+        core::mem::forget(self); // Skip Drop
+        fd
+    }
+
+    /// Create a FatFile from a raw file descriptor.
+    ///
+    /// # Safety
+    ///
+    /// The fd must be a valid FAT file descriptor previously obtained from
+    /// [`FatFile::into_raw_fd()`] or [`FatFile::fd()`]. The caller transfers ownership
+    /// to the returned `FatFile`, which will close the fd on drop.
+    pub unsafe fn from_raw_fd(fd: RawFd) -> Self {
+        Self { fd }
+    }
+
+    /// Returns true if this file is open for writing.
+    pub fn can_write(&self) -> Result<bool, FsError> {
+        let entry = fd::get_fat_fd(self.fd)?;
+        Ok(entry.borrow().file.can_write())
+    }
+
+    /// Get the current position in the file.
+    pub fn position(&mut self) -> Result<u64, FsError> {
+        let entry = fd::get_fat_fd(self.fd)?;
+        entry.borrow_mut().file.seek(fatfs::SeekFrom::Current(0))
+    }
+
+    /// Get the size of the file in bytes.
+    pub fn size(&mut self) -> Result<u64, FsError> {
+        let entry = fd::get_fat_fd(self.fd)?;
+        entry.borrow_mut().file.len()
+    }
+
+    /// Get the remaining bytes from current position to end of file.
+    pub fn remaining(&mut self) -> Result<u64, FsError> {
+        let entry = fd::get_fat_fd(self.fd)?;
+        let mut inner = entry.borrow_mut();
+        let pos = inner.file.seek(fatfs::SeekFrom::Current(0))?;
+        let size = inner.file.len()?;
+        Ok(size.saturating_sub(pos))
+    }
+
+    /// Flush any buffered data to the underlying storage.
+    pub fn flush(&mut self) -> Result<(), FsError> {
+        let entry = fd::get_fat_fd(self.fd)?;
+        entry.borrow_mut().file.flush()
+    }
+}
+
+impl Drop for FatFile {
+    fn drop(&mut self) {
+        // Ignore errors on close - nothing we can do about them
+        let _ = fd::free_fd(self.fd);
+    }
+}
+
+impl ErrorType for FatFile {
+    type Error = FsError;
+}
+
+impl Read for FatFile {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
+        let entry = fd::get_fat_fd(self.fd)?;
+        entry.borrow_mut().file.read(buf)
+    }
+}
+
+impl Seek for FatFile {
+    fn seek(&mut self, pos: SeekFrom) -> Result<u64, Self::Error> {
+        let entry = fd::get_fat_fd(self.fd)?;
+
+        // Convert embedded_io::SeekFrom to fatfs::SeekFrom
+        let fatfs_pos = match pos {
+            SeekFrom::Start(n) => fatfs::SeekFrom::Start(n),
+            SeekFrom::End(n) => fatfs::SeekFrom::End(n),
+            SeekFrom::Current(n) => fatfs::SeekFrom::Current(n),
+        };
+
+        entry.borrow_mut().file.seek(fatfs_pos)
+    }
+}
+
+impl Write for FatFile {
+    fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+        let entry = fd::get_fat_fd(self.fd)?;
+        entry.borrow_mut().file.write(buf)
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        FatFile::flush(self)
     }
 }
 
@@ -660,6 +833,9 @@ fn open_with_options(
             let vfs = unsafe { manifest::vfs_mut()? };
             let mount = vfs.get_mount_mut(mount_idx).ok_or(FsError::NotFound)?;
 
+            // Get mount path for tracking (before we borrow_mut the backend)
+            let mount_path = mount.path().to_string();
+
             if let MountBackend::Fat(fat) = mount.backend_mut() {
                 // Handle create_new (O_EXCL) - must fail if file exists
                 // NOTE: In single-threaded guest, this check-then-create is atomic.
@@ -669,7 +845,12 @@ fn open_with_options(
                 } else {
                     fat.open(&relative_path, read, write, create, truncate)?
                 };
-                Ok(File::Fat(fat_file))
+
+                // Allocate fd - this moves the GuestFatFile into the fd table
+                // Default flags (read-only if !write, read-write if write)
+                let flags = if write { 2 } else { 0 }; // O_RDWR or O_RDONLY
+                let fd = fd::alloc_fat_fd(fat_file, flags, mount_path);
+                Ok(File::Fat(FatFile::from_fd(fd)))
             } else {
                 // Should never happen - resolve_path already confirmed it's Fat
                 Err(FsError::IoError)

@@ -36,8 +36,8 @@ limitations under the License.
 use core::ffi::c_char;
 
 use hyperlight_guest::fs::{
-    self, FdEntry, FsError, OpenOptions, alloc_fat_fd, create_fat_mount, dup_fd, dup_fd_to,
-    free_fd, get_fd_entry, is_guest_created_mount, unmount, vfs,
+    self, FdEntry, FsError, OpenOptions, create_fat_mount, dup_fd, dup_fd_to, free_fd, get_fat_fd,
+    get_fd_entry, is_guest_created_mount, unmount,
 };
 
 // ============================================================================
@@ -242,34 +242,21 @@ pub extern "C" fn hl_fs_open(path: *const c_char, flags: i32) -> i32 {
 
     match opts.open(path_str) {
         Ok(file) => {
-            // Allocate FD based on file type
-            match file {
-                fs::File::ReadOnly(ro_file) => {
-                    // Get the internal fd from the RoFile
-                    let fd = ro_file.fd();
-                    // Don't drop - we've already allocated in the FD table via RoFile::open
-                    core::mem::forget(ro_file);
-                    fd
-                }
-                fs::File::Fat(mut fat_file) => {
-                    // For O_APPEND, seek to end before allocating fd
-                    // This ensures initial writes start at end of file.
-                    // Note: O_APPEND also requires seeking before EVERY write,
-                    // which is handled in hl_fs_write() by checking stored flags.
-                    if append {
-                        // Ignore seek errors - best effort for append mode
-                        // Use seek_raw(SEEK_END, 0) to seek to end
-                        let _ = fat_file.seek_raw(2, 0);
-                    }
-                    // Get the mount path for this file (for unmount tracking)
-                    let mount_path = vfs()
-                        .map(|v| v.get_mount_path(path_str).unwrap_or_default())
-                        .unwrap_or_default();
-                    // Allocate a new FD for the FAT file, storing the original flags
-                    // so fcntl F_GETFL can return them and write() can honor O_APPEND
-                    alloc_fat_fd(fat_file, flags, mount_path)
+            // Both RO and FAT files now have fds allocated during open.
+            // For O_APPEND on FAT files, we need to seek to end.
+            // We do this via the fd table since File now just wraps an fd.
+            let fd = file.fd();
+            let is_fat = !file.is_readonly();
+
+            if is_fat && append {
+                // Seek to end for append mode - best effort
+                if let Ok(entry) = get_fat_fd(fd) {
+                    let _ = entry.borrow_mut().file.seek_raw(2, 0);
                 }
             }
+
+            // Transfer ownership to caller - no drop, they must close
+            file.into_raw_fd()
         }
         Err(e) => fs_error_to_code(e),
     }

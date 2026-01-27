@@ -484,3 +484,168 @@ fn test_read_to_vec() {
     let contents = file.read_to_vec().expect("read_to_vec failed");
     assert_eq!(contents.as_slice(), file_content);
 }
+
+// ============================================================================
+// File Descriptor Ownership API Tests
+// ============================================================================
+
+#[test]
+fn test_rofile_into_raw_fd_skips_drop() {
+    reset_fs();
+
+    let file_content = b"test data";
+    TEST_FILE_DATA.write(file_content);
+
+    let guest_address = TEST_FILE_DATA.as_ptr();
+
+    let manifest = create_manifest(vec![
+        InodeData::directory("/".to_string(), 0),
+        InodeData::file(
+            "/test.txt".to_string(),
+            0,
+            guest_address,
+            file_content.len() as u64,
+        ),
+    ]);
+
+    unsafe {
+        init_test_fs(&manifest);
+    }
+
+    // Open file and extract fd
+    let raw_fd = {
+        let file = open("/test.txt").expect("open failed");
+        assert_eq!(fd::open_count(), 1);
+
+        // Extract RoFile and call into_raw_fd
+        match file {
+            File::ReadOnly(ro) => ro.into_raw_fd(),
+            _ => panic!("Expected ReadOnly file"),
+        }
+    };
+
+    // Drop happened but into_raw_fd skipped closing - fd should still be valid
+    assert_eq!(fd::open_count(), 1);
+
+    // Manual cleanup
+    let _ = fd::free_fd(raw_fd);
+    assert_eq!(fd::open_count(), 0);
+}
+
+#[test]
+fn test_rofile_from_raw_fd_owns_fd() {
+    reset_fs();
+
+    let file_content = b"test data";
+    TEST_FILE_DATA.write(file_content);
+
+    let guest_address = TEST_FILE_DATA.as_ptr();
+
+    let manifest = create_manifest(vec![
+        InodeData::directory("/".to_string(), 0),
+        InodeData::file(
+            "/test.txt".to_string(),
+            0,
+            guest_address,
+            file_content.len() as u64,
+        ),
+    ]);
+
+    unsafe {
+        init_test_fs(&manifest);
+    }
+
+    // Open file, transfer out, then transfer back in
+    let raw_fd = {
+        let file = open("/test.txt").expect("open failed");
+        match file {
+            File::ReadOnly(ro) => ro.into_raw_fd(),
+            _ => panic!("Expected ReadOnly file"),
+        }
+    };
+
+    assert_eq!(fd::open_count(), 1);
+
+    // Reconstruct RoFile from raw fd
+    {
+        // SAFETY: We know this is a valid RO fd we just extracted
+        let _ro = unsafe { RoFile::from_raw_fd(raw_fd) };
+        assert_eq!(fd::open_count(), 1);
+        // RoFile drops here
+    }
+
+    // from_raw_fd took ownership, Drop closed it
+    assert_eq!(fd::open_count(), 0);
+}
+
+#[test]
+fn test_file_into_raw_fd_preserves_fd() {
+    reset_fs();
+
+    let file_content = b"test data";
+    TEST_FILE_DATA.write(file_content);
+
+    let guest_address = TEST_FILE_DATA.as_ptr();
+
+    let manifest = create_manifest(vec![
+        InodeData::directory("/".to_string(), 0),
+        InodeData::file(
+            "/test.txt".to_string(),
+            0,
+            guest_address,
+            file_content.len() as u64,
+        ),
+    ]);
+
+    unsafe {
+        init_test_fs(&manifest);
+    }
+
+    let raw_fd = {
+        let file = open("/test.txt").expect("open failed");
+        // Use File::into_raw_fd (not extracting inner type)
+        file.into_raw_fd()
+    };
+
+    // Fd not closed by drop
+    assert_eq!(fd::open_count(), 1);
+
+    // Clean up
+    let _ = fd::free_fd(raw_fd);
+    assert_eq!(fd::open_count(), 0);
+}
+
+#[test]
+fn test_file_fd_returns_correct_value() {
+    reset_fs();
+
+    let file_content = b"test data";
+    TEST_FILE_DATA.write(file_content);
+
+    let guest_address = TEST_FILE_DATA.as_ptr();
+
+    let manifest = create_manifest(vec![
+        InodeData::directory("/".to_string(), 0),
+        InodeData::file(
+            "/test.txt".to_string(),
+            0,
+            guest_address,
+            file_content.len() as u64,
+        ),
+    ]);
+
+    unsafe {
+        init_test_fs(&manifest);
+    }
+
+    let file = open("/test.txt").expect("open failed");
+
+    // fd() should return a valid non-negative fd
+    let fd = file.fd();
+    assert!(fd >= 0, "fd should be non-negative");
+
+    // Opening another file should give a different fd
+    let file2 = open("/test.txt").expect("second open failed");
+    let fd2 = file2.fd();
+    assert_ne!(fd, fd2, "Different opens should give different fds");
+}
