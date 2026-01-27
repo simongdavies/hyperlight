@@ -17,7 +17,10 @@
 12. [Security Considerations](#security-considerations)
 13. [Limitations](#limitations)
 14. [Dependencies and Risks](#dependencies-and-risks)
-15. [Future Features](#future-features)
+15. [FAT Overlay Filesystem](#fat-overlay-filesystem)
+16. [Host Extraction APIs](#host-extraction-apis)
+17. [Implementation Phases](#implementation-phases)
+18. [Future Features (Deferred)](#future-features-deferred)
 
 ---
 
@@ -2021,35 +2024,657 @@ Write our own minimal FAT32 implementation.
 
 ---
 
-## 15. Future Features
+## 15. FAT Overlay Filesystem
 
-This section documents features that were considered but not implemented in the initial release. They may be added in future versions based on user demand.
+This section specifies the overlay filesystem feature, which enables copy-on-write (COW) semantics for FAT mounts. A read-only base FAT image can be "overlaid" with a writable layer that captures all modifications, allowing:
 
-### 15.1 Host Extraction APIs
+- Non-destructive experimentation on base images
+- Efficient storage of changes (only modified blocks stored)
+- Extraction of changes as diffs
+- Merging changes to produce new FAT images
 
-APIs to extract guest-created FAT filesystem data back to the host.
+### 15.1 Overview
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Guest VFS View                        │
+│                      /data/*                             │
+│  (reads see merged view, writes go to overlay)          │
+└─────────────────────────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────┐
+│                   Overlay Layer                          │
+│  ┌─────────────┐  ┌──────────────┐  ┌────────────────┐ │
+│  │ COW Blocks  │  │  New Files   │  │   Whiteouts    │ │
+│  │ (modified)  │  │  (created)   │  │   (deleted)    │ │
+│  └─────────────┘  └──────────────┘  └────────────────┘ │
+└─────────────────────────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────┐
+│                 Base FAT Image (Read-Only)               │
+│                    /host/base.fat                        │
+│              (never modified, locked exclusive)          │
+└─────────────────────────────────────────────────────────┘
+```
+
+### 15.2 Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Base layer | FAT images only | RO mmap overlay deferred (complexity) |
+| COW granularity | Block-level (4KB) | Matches page size, efficient for large files |
+| Overlay storage | Memory-backed (Phase 1) | Simpler; host-backed file deferred |
+| Deletion tracking | Whiteout files | Docker convention, well understood |
+| API style | Wrapper (`.with_overlay()`) | Composable, can overlay any FAT mount |
+| Merge behavior | Produces new file (v2) | Base (v1) never modified |
+| Nested overlays | Not supported | Complexity vs. benefit |
+| Guest API | Transparent | Same `open`/`write`/`close` |
+
+### 15.3 Host API
+
+#### 15.3.1 Overlay Configuration
 
 ```rust
-/// Information about a guest-created FAT mount.
-pub struct FatMountInfo {
-    pub mount_point: String,
-    pub size_bytes: u64,
-    pub used_bytes: u64,
+/// Configuration for overlay layer
+pub struct OverlayConfig {
+    /// Maximum size of overlay storage in bytes
+    pub max_size: u64,
+    // Future: persist_path: Option<PathBuf> for host-backed overlay
 }
 
-impl Sandbox {
-    /// Get info about guest-created FAT mounts.
-    pub fn fs_fat_info(&self, mount_point: &str) -> Result<FatMountInfo>;
-    
-    /// Persist a guest-created FAT mount to a host file.
-    /// Security: Treats guest data as untrusted; validates FAT structure.
-    pub fn fs_persist_fat_mount(&self, mount_point: &str, host_path: &Path) -> Result<()>;
+impl OverlayConfig {
+    /// Create memory-only overlay with given size limit
+    pub fn memory_only(max_size: u64) -> Self {
+        Self { max_size }
+    }
 }
 ```
 
-**Status**: Parked pending security analysis. Guest memory is untrusted; extracting to host file requires careful validation.
+#### 15.3.2 Builder API
 
-### 15.2 Resource Limits (FsLimits)
+```rust
+impl HyperlightFSBuilder {
+    /// Add overlay to an existing FAT mount.
+    /// 
+    /// The base FAT becomes read-only (still exclusively locked).
+    /// All writes go to the overlay layer.
+    /// 
+    /// # Arguments
+    /// * `mount_point` - Must reference a previously added FAT mount
+    /// * `config` - Overlay configuration
+    /// 
+    /// # Errors
+    /// * `mount_point` does not exist
+    /// * `mount_point` is not a FAT mount
+    /// * `mount_point` already has an overlay
+    pub fn with_overlay(self, mount_point: &str, config: OverlayConfig) -> Result<Self>;
+}
+```
+
+#### 15.3.3 Usage Example
+
+```rust
+use hyperlight_host::hyperlight_fs::{HyperlightFSBuilder, OverlayConfig};
+
+// Mount base FAT with 4MB overlay
+let fs = HyperlightFSBuilder::new()
+    .add_fat_image("/data/base.fat", "/data")?
+    .with_overlay("/data", OverlayConfig::memory_only(4 * 1024 * 1024))?
+    .build()?;
+
+let mut sandbox = UninitializedSandbox::new(guest, None)?
+    .with_hyperlight_fs(fs)
+    .evolve()?;
+
+// Guest executes, modifies files in /data
+// Base image is unchanged, modifications in overlay
+sandbox.call::<(), ()>("process_data", ())?;
+
+// Extract changes
+let diff = sandbox.fs_extract_overlay_diff("/data")?;
+println!("Added: {}, Modified: {}, Deleted: {}", 
+    diff.added.len(), diff.modified.len(), diff.deleted.len());
+
+// Merge to create v2 (base.fat unchanged)
+sandbox.fs_merge_overlay("/data", Path::new("/data/v2.fat"))?;
+```
+
+### 15.4 Block-Level Copy-on-Write
+
+#### 15.4.1 Block Store Structure
+
+```rust
+/// Block-level copy-on-write tracker
+pub(crate) struct CowBlockStore {
+    /// Block size in bytes (fixed at 4096)
+    block_size: usize,
+    
+    /// Size of base image in bytes
+    base_size: u64,
+    
+    /// Bitmap indicating modified blocks
+    /// Index i = 1 means block i has been modified
+    modified_bitmap: BitVec,
+    
+    /// Modified block data, stored contiguously
+    /// To find block N's data: count set bits before N in bitmap,
+    /// multiply by block_size
+    modified_blocks: Vec<u8>,
+    
+    /// Maximum overlay size (enforced)
+    max_overlay_size: u64,
+    
+    /// Whiteout entries (paths marked as deleted)
+    whiteouts: HashSet<PathBuf>,
+}
+```
+
+#### 15.4.2 Block Operations
+
+```rust
+impl CowBlockStore {
+    /// Create new COW store for given base
+    pub fn new(base_size: u64, max_overlay_size: u64) -> Self;
+    
+    /// Read a block. Returns Some(data) if modified, None if should use base.
+    pub fn read_block(&self, block_num: u64) -> Option<&[u8]>;
+    
+    /// Write a block. Copies to overlay, marks as modified.
+    /// Returns error if overlay size limit exceeded.
+    pub fn write_block(&mut self, block_num: u64, data: &[u8]) -> Result<(), OverlayFullError>;
+    
+    /// Check if block has been modified
+    pub fn is_block_modified(&self, block_num: u64) -> bool;
+    
+    /// Mark a path as deleted (whiteout)
+    pub fn add_whiteout(&mut self, path: &Path);
+    
+    /// Remove a whiteout (file recreated)
+    pub fn remove_whiteout(&mut self, path: &Path);
+    
+    /// Check if path is whited out
+    pub fn is_whiteout(&self, path: &Path) -> bool;
+    
+    /// Get overlay statistics
+    pub fn stats(&self) -> CowStats;
+}
+
+pub struct CowStats {
+    pub blocks_modified: usize,
+    pub bytes_in_overlay: u64,
+    pub whiteout_count: usize,
+    pub max_overlay_size: u64,
+    pub overlay_utilization: f64,  // bytes_in_overlay / max_overlay_size
+}
+
+#[derive(Debug)]
+pub struct OverlayFullError {
+    pub requested_bytes: u64,
+    pub available_bytes: u64,
+}
+```
+
+#### 15.4.3 Read/Write Flow
+
+**Read Operation:**
+```
+read(block_num) →
+    if cow_store.is_block_modified(block_num):
+        return cow_store.read_block(block_num)
+    else:
+        return base_image.read_block(block_num)
+```
+
+**Write Operation:**
+```
+write(block_num, data) →
+    if not cow_store.is_block_modified(block_num):
+        // First write to this block - check space
+        if cow_store.would_exceed_limit(BLOCK_SIZE):
+            return Err(OverlayFullError)
+    cow_store.write_block(block_num, data)
+```
+
+### 15.5 Whiteout Handling
+
+Whiteouts track file deletions. When a guest deletes a file that exists in the base image:
+
+1. The file is NOT removed from base (base is read-only)
+2. A whiteout entry is added: `whiteouts.insert(path)`
+3. Subsequent reads for that path return "file not found"
+4. If the guest recreates the file, the whiteout is removed
+
+#### 15.5.1 Whiteout Semantics
+
+| Operation | Base has file? | Whiteout exists? | Result |
+|-----------|----------------|------------------|--------|
+| `open("/foo")` | Yes | No | Read from base (or overlay if modified) |
+| `open("/foo")` | Yes | Yes | ENOENT |
+| `open("/foo")` | No | N/A | Check overlay, then ENOENT |
+| `unlink("/foo")` | Yes | No | Add whiteout |
+| `unlink("/foo")` | Yes | Yes | Already deleted (ENOENT or success?) |
+| `unlink("/foo")` | No | N/A | Remove from overlay or ENOENT |
+| `create("/foo")` | Yes | Yes | Remove whiteout, write to overlay |
+| `create("/foo")` | Yes | No | Write to overlay (shadows base) |
+| `create("/foo")` | No | N/A | Write to overlay |
+
+### 15.6 Manifest Changes
+
+```flatbuffers
+table Mount {
+    mount_point: string (required);
+    mount_type: MountType;
+    
+    // ... existing fields ...
+    
+    // Overlay configuration (only for FAT mounts with overlay)
+    has_overlay: bool = false;
+    overlay_max_size: uint64 = 0;
+}
+```
+
+---
+
+## 16. Host Extraction APIs
+
+APIs to extract filesystem data from the sandbox back to the host. This includes:
+- Guest-created FAT mounts (via `create_fat_mount`)
+- Host-provided FAT mounts (to read guest modifications)
+- Overlay diffs and merged images
+
+### 16.1 ⚠️ SECURITY WARNING
+
+```
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                        ⚠️  SECURITY WARNING  ⚠️                               ║
+║                                                                              ║
+║  ALL DATA EXTRACTED FROM GUEST FILESYSTEMS MUST BE TREATED AS UNTRUSTED.    ║
+║                                                                              ║
+║  The guest has FULL CONTROL over:                                            ║
+║    • File names (may contain path traversal attempts: "../../../etc/passwd") ║
+║    • File contents (may be malicious executables, malware, exploits)         ║
+║    • FAT structures (may be malformed to exploit parsing bugs)               ║
+║    • Symbolic links (if supported - may point outside extraction directory)  ║
+║                                                                              ║
+║  MITIGATIONS APPLIED BY HYPERLIGHT:                                          ║
+║    ✓ FAT structure validation before extraction                              ║
+║    ✓ Path sanitization (reject "..", absolute paths, control characters)     ║
+║    ✓ Size limits enforced                                                    ║
+║    ✓ Output FAT validation (fs_extract_fat_to_file)                         ║
+║                                                                              ║
+║  NOT MITIGATED (YOUR RESPONSIBILITY):                                        ║
+║    ✗ Content scanning (malware, viruses, exploits)                          ║
+║    ✗ Application-level validation (schemas, formats)                         ║
+║    ✗ Trust decisions                                                         ║
+║                                                                              ║
+║  RECOMMENDATIONS:                                                            ║
+║    1. Extract to isolated temporary directory with restricted permissions    ║
+║    2. Scan extracted content with antivirus before any further use           ║
+║    3. Validate content matches expected schema/format                        ║
+║    4. NEVER execute extracted content without additional sandboxing          ║
+║    5. Consider extracted data as having same trust level as network input    ║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+```
+
+### 16.2 Mount Enumeration
+
+```rust
+/// Information about a mounted filesystem
+pub struct MountInfo {
+    /// Mount point path (e.g., "/data", "/tmp")
+    pub mount_point: String,
+    
+    /// Type of mount
+    pub mount_type: MountType,
+    
+    /// Total size in bytes
+    pub size_bytes: u64,
+    
+    /// Used space in bytes (for FAT mounts)
+    pub used_bytes: Option<u64>,
+    
+    /// Whether this mount was created by the guest
+    pub is_guest_created: bool,
+    
+    /// Whether this mount has an overlay
+    pub has_overlay: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MountType {
+    /// Read-only memory-mapped file
+    RoFile,
+    /// Read-only memory-mapped directory
+    RoDirectory,
+    /// Read-write FAT filesystem
+    Fat,
+    /// FAT filesystem with overlay
+    FatOverlay,
+}
+
+impl Sandbox {
+    /// List all mounted filesystems.
+    /// 
+    /// Returns mounts from both host configuration and guest creation.
+    /// Only available when sandbox is paused.
+    pub fn fs_list_mounts(&self) -> Result<Vec<MountInfo>>;
+}
+```
+
+### 16.3 FAT Extraction
+
+```rust
+impl Sandbox {
+    /// Extract a FAT mount as raw image bytes.
+    /// 
+    /// For overlaid mounts, returns the merged view (base + overlay).
+    /// 
+    /// # Security
+    /// Validates FAT structure. Content is UNTRUSTED - see security warning.
+    pub fn fs_extract_fat(&self, mount_point: &str) -> Result<Vec<u8>>;
+    
+    /// Extract a FAT mount to a file.
+    /// 
+    /// Validates that the output is a valid FAT filesystem.
+    /// 
+    /// # Arguments
+    /// * `mount_point` - Path to the FAT mount
+    /// * `path` - Host path to write the FAT image
+    /// 
+    /// # Security
+    /// Validates FAT structure before and after write.
+    pub fn fs_extract_fat_to_file(&self, mount_point: &str, path: &Path) -> Result<()>;
+    
+    /// Extract a FAT mount as a directory tree on the host.
+    /// 
+    /// Creates directories and files mirroring the FAT contents.
+    /// 
+    /// # Security
+    /// - Validates FAT structure
+    /// - Sanitizes all file names (rejects path traversal)
+    /// - Content is UNTRUSTED - scan before use
+    pub fn fs_extract_to_dir(
+        &self, 
+        mount_point: &str, 
+        host_dir: &Path
+    ) -> Result<ExtractionReport>;
+}
+
+/// Report from directory extraction
+pub struct ExtractionReport {
+    /// Number of files extracted
+    pub files_extracted: usize,
+    
+    /// Number of directories created
+    pub directories_created: usize,
+    
+    /// Total bytes written
+    pub total_bytes: u64,
+    
+    /// Warnings (e.g., "skipped file with invalid name: ...")
+    pub warnings: Vec<String>,
+    
+    /// Files skipped due to security checks
+    pub skipped_count: usize,
+}
+```
+
+### 16.4 Overlay Diff Extraction
+
+```rust
+/// Structured representation of overlay changes
+pub struct OverlayDiff {
+    /// Files added (not present in base)
+    pub added: Vec<DiffFileEntry>,
+    
+    /// Files modified (present in base, changed in overlay)
+    pub modified: Vec<DiffFileEntry>,
+    
+    /// Files deleted (present in base, whited out in overlay)
+    pub deleted: Vec<PathBuf>,
+}
+
+/// A file entry in the diff
+pub struct DiffFileEntry {
+    /// Relative path within the mount
+    pub path: PathBuf,
+    
+    /// File content (full content, not delta)
+    pub content: Vec<u8>,
+    
+    /// True if this is a directory
+    pub is_directory: bool,
+}
+
+impl Sandbox {
+    /// Extract overlay changes as a structured diff.
+    /// 
+    /// Only available for mounts created with `.with_overlay()`.
+    /// 
+    /// # Returns
+    /// Structured diff containing added, modified, and deleted entries.
+    pub fn fs_extract_overlay_diff(&self, mount_point: &str) -> Result<OverlayDiff>;
+}
+```
+
+### 16.5 Overlay Merge
+
+```rust
+impl Sandbox {
+    /// Merge overlay changes onto base, producing a new FAT image.
+    /// 
+    /// The base image is NOT modified. A new file is created at `output_path`.
+    /// 
+    /// # Arguments
+    /// * `mount_point` - Path to the overlaid FAT mount
+    /// * `output_path` - Host path for the merged FAT image (v2)
+    /// 
+    /// # Example
+    /// ```rust
+    /// // base.fat (v1) + overlay → v2.fat
+    /// sandbox.fs_merge_overlay("/data", Path::new("/data/v2.fat"))?;
+    /// // Now: base.fat is unchanged, v2.fat contains merged result
+    /// ```
+    pub fn fs_merge_overlay(
+        &self, 
+        mount_point: &str, 
+        output_path: &Path
+    ) -> Result<MergeReport>;
+    
+    /// Merge overlay and return bytes instead of writing to file.
+    pub fn fs_merge_overlay_to_bytes(&self, mount_point: &str) -> Result<Vec<u8>>;
+}
+
+/// Report from merge operation
+pub struct MergeReport {
+    /// Path to original base image
+    pub base_path: PathBuf,
+    
+    /// Path to merged output
+    pub output_path: PathBuf,
+    
+    /// Number of files added
+    pub files_added: usize,
+    
+    /// Number of files modified
+    pub files_modified: usize,
+    
+    /// Number of files deleted (not in output)
+    pub files_deleted: usize,
+    
+    /// Size of output image
+    pub output_size: u64,
+}
+```
+
+---
+
+## 17. Implementation Phases
+
+This section documents the phased implementation plan for overlay and extraction features.
+
+### 17.1 Phase 1: Guest FAT Extraction (Foundation)
+
+**Goal**: Extract guest-created FAT mounts back to host.
+
+**Scope**:
+- `fs_list_mounts()` - enumerate all mounts including guest-created
+- `fs_extract_fat()` - extract as raw FAT bytes
+- `fs_extract_fat_to_file()` - extract with validation
+- `fs_extract_to_dir()` - extract as directory tree
+- Security warnings in documentation
+
+**Implementation Notes**:
+- Guest-to-host communication for mount enumeration (mechanism TBD)
+- FAT parsing on host side for directory tree extraction
+- Path sanitization for security
+
+**Estimated Size**: 400-600 lines | **Risk**: Low 🟢
+
+### 17.2 Phase 2: COW Block Store Infrastructure
+
+**Goal**: Internal copy-on-write tracking structure.
+
+**Scope**:
+- `CowBlockStore` implementation
+- Block read/write operations
+- Whiteout tracking
+- Statistics API
+- Unit tests
+
+**Implementation Notes**:
+- Pure data structure, no VFS integration yet
+- 4KB block size (matches page size)
+- Bitmap + contiguous block storage
+
+**Estimated Size**: 300-400 lines | **Risk**: Low 🟢
+
+### 17.3 Phase 3: FAT Overlay Mount
+
+**Goal**: Mount FAT with overlay, transparent to guest.
+
+**Scope**:
+- `OverlayConfig` struct
+- `with_overlay()` builder API
+- FAT backend integration with COW layer
+- FlatBuffer manifest changes
+- Integration tests
+
+**Implementation Notes**:
+- Base FAT becomes read-only (still exclusively locked)
+- All writes route through COW layer
+- Whiteouts checked on all file operations
+
+**Estimated Size**: 500-700 lines | **Risk**: Medium 🟡
+
+**Dependencies**: Phase 2
+
+### 17.4 Phase 4: Overlay Diff Extraction
+
+**Goal**: Extract just the overlay changes.
+
+**Scope**:
+- `OverlayDiff` struct
+- `fs_extract_overlay_diff()` implementation
+- Diff computation (compare overlay to base)
+- Unit tests
+
+**Implementation Notes**:
+- Walk overlay blocks to find modified files
+- Collect whiteouts as deleted entries
+- New files = in overlay, not in base
+
+**Estimated Size**: 300-400 lines | **Risk**: Low 🟢
+
+**Dependencies**: Phase 3
+
+### 17.5 Phase 5: Merge to New FAT Image
+
+**Goal**: Apply overlay to base, produce new FAT image.
+
+**Scope**:
+- `fs_merge_overlay()` implementation
+- `fs_merge_overlay_to_bytes()` implementation
+- `MergeReport` struct
+- Output validation
+- Integration tests
+
+**Implementation Notes**:
+- Create new FAT image with base size (or larger if needed)
+- Copy base, apply overlay blocks
+- Skip whited-out files
+- Validate output is valid FAT
+
+**Estimated Size**: 400-500 lines | **Risk**: Medium 🟡
+
+**Dependencies**: Phase 3, Phase 4
+
+### 17.6 Summary
+
+| Phase | Feature | Lines | Risk | Dependencies |
+|-------|---------|-------|------|--------------|
+| 1 | Guest FAT Extraction | 400-600 | 🟢 Low | None |
+| 2 | COW Block Store | 300-400 | 🟢 Low | None |
+| 3 | FAT Overlay Mount | 500-700 | 🟡 Medium | Phase 2 |
+| 4 | Overlay Diff Extract | 300-400 | 🟢 Low | Phase 3 |
+| 5 | Merge to New FAT | 400-500 | 🟡 Medium | Phase 3, 4 |
+
+**Total Estimated**: 1900-2600 lines across 5 reviewable PRs
+
+---
+
+## 18. Future Features (Deferred)
+
+This section documents features considered but deferred to future releases.
+
+### 18.1 Read-Only Mmap Overlay
+
+Overlay on top of RO mmap'd files (not FAT). Deferred due to complexity:
+- RO files are not FAT format
+- Would require "virtual FAT" conversion or hybrid VFS
+- Different overlay format than FAT-on-FAT
+
+**Status**: Deferred pending demand and design work.
+
+### 18.2 Host-Backed Persistent Overlay
+
+Store overlay in a host file instead of memory:
+
+```rust
+impl OverlayConfig {
+    pub fn persistent(max_size: u64, path: &Path) -> Self;
+}
+```
+
+**Benefits**: Overlay survives sandbox restart, can be larger than memory.
+
+**Status**: Deferred. Memory-backed sufficient for initial use cases.
+
+### 18.3 Antivirus Integration
+
+Hook for content scanning during extraction:
+
+```rust
+pub trait ContentScanner: Send + Sync {
+    fn scan(&self, path: &Path, content: &[u8]) -> Result<(), ScanError>;
+}
+
+impl Sandbox {
+    pub fn fs_extract_to_dir_with_scanner(
+        &self, 
+        mount_point: &str, 
+        host_dir: &Path,
+        scanner: &dyn ContentScanner
+    ) -> Result<ExtractionReport>;
+}
+```
+
+**Status**: Deferred. Users should scan extracted content with their own tools.
+
+### 18.4 Resource Limits (FsLimits)
 
 Configurable limits for manifest size, mount count, and FD table size.
 
@@ -2068,7 +2693,7 @@ impl HyperlightFSBuilder {
 
 **Status**: Deferred (YAGNI). Current implicit limits are sufficient.
 
-### 15.3 Additional C API Functions
+### 18.5 Additional C API Functions
 
 | API | Purpose | Difficulty |
 |-----|---------|------------|
@@ -2080,7 +2705,7 @@ impl HyperlightFSBuilder {
 | `rewinddir(dirp)` | Reset dir stream | Easy |
 | `seekdir()`/`telldir()` | Dir stream position | Easy |
 
-### 15.4 Full POSIX stat Structure
+### 18.6 Full POSIX stat Structure
 
 Expand `hl_stat_t` to include all standard fields:
 
@@ -2099,7 +2724,7 @@ typedef struct {
 
 **Status**: Deferred. Current simplified struct is sufficient for most use cases.
 
-### 15.5 Read-Only FAT Mounts
+### 18.7 Read-Only FAT Mounts
 
 Mount existing FAT images as read-only (no exclusive lock needed).
 
@@ -2115,7 +2740,7 @@ impl HyperlightFSBuilder {
 
 **Status**: Deferred. Can share with multiple sandboxes.
 
-### 15.6 Global errno Support
+### 18.8 Global errno Support
 
 Add `hl_fs_errno()` function to retrieve last error code:
 
@@ -2126,7 +2751,7 @@ const char *hl_fs_strerror(int errnum);  // Error message
 
 **Status**: Deferred. Negative return values work for most use cases.
 
-### 15.7 Non-Blocking msync (MS_ASYNC)
+### 18.9 Non-Blocking msync (MS_ASYNC)
 
 Option to use `MS_ASYNC` instead of `MS_SYNC` on sandbox halt for latency-sensitive workloads.
 
@@ -2143,7 +2768,7 @@ impl SandboxBuilder {
 
 **Status**: Deferred. Most users want strong durability guarantees. Can add opt-in if latency becomes an issue.
 
-### 15.8 Shared Locks for RO Files (LOCK_SH)
+### 18.10 Shared Locks for RO Files (LOCK_SH)
 
 Add `flock(LOCK_SH)` protection for read-only mapped files to prevent external modification during sandbox execution.
 
