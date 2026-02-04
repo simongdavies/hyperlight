@@ -204,6 +204,23 @@ fn incorrect_parameter_num() {
 }
 
 #[test]
+fn small_scratch_sandbox() {
+    let mut cfg = SandboxConfiguration::default();
+    cfg.set_scratch_size(0x48000);
+    cfg.set_input_data_size(0x24000);
+    cfg.set_output_data_size(0x24000);
+    let a = UninitializedSandbox::new(
+        GuestBinary::FilePath(simple_guest_as_string().unwrap()),
+        Some(cfg),
+    );
+
+    assert!(matches!(
+        a.unwrap_err(),
+        HyperlightError::MemoryRequestTooSmall(..)
+    ));
+}
+
+#[test]
 fn iostack_is_working() {
     with_all_sandboxes(|mut sandbox| {
         let res: i32 = sandbox
