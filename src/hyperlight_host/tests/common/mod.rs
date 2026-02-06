@@ -110,17 +110,24 @@ where
 // =============================================================================
 
 /// Runs a test with both Rust and C guest MultiUseSandboxes.
-pub fn with_all_sandboxes<F>(f: F)
+pub fn with_all_sandboxes_cfg<F>(cfg: Option<SandboxConfiguration>, f: F)
 where
     F: Fn(MultiUseSandbox),
 {
     for path in [rust_guest_path(), c_guest_path()] {
-        let sandbox = UninitializedSandbox::new(GuestBinary::FilePath(path), None)
+        let sandbox = UninitializedSandbox::new(GuestBinary::FilePath(path), cfg)
             .unwrap()
             .evolve()
             .unwrap();
         f(sandbox);
     }
+}
+/// Runs a test with both Rust and C guest MultiUseSandboxes.
+pub fn with_all_sandboxes<F>(f: F)
+where
+    F: Fn(MultiUseSandbox),
+{
+    with_all_sandboxes_cfg(None, f);
 }
 
 /// Runs a test with both Rust and C guest UninitializedSandboxes.

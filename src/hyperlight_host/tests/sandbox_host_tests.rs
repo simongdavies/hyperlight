@@ -18,11 +18,15 @@ use core::f64;
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
 
-use hyperlight_host::{HyperlightError, MultiUseSandbox, Result, new_error};
+use hyperlight_host::sandbox::SandboxConfiguration;
+use hyperlight_host::{
+    GuestBinary, HyperlightError, MultiUseSandbox, Result, UninitializedSandbox, new_error,
+};
+use hyperlight_testing::simple_guest_as_string;
 
 pub mod common; // pub to disable dead_code warning
 use crate::common::{
-    with_all_sandboxes, with_all_sandboxes_with_writer, with_all_uninit_sandboxes,
+    with_all_sandboxes, with_all_sandboxes_cfg, with_all_sandboxes_with_writer, with_all_uninit_sandboxes,
 };
 
 #[test]
@@ -118,7 +122,9 @@ fn invalid_guest_function_name() {
 
 #[test]
 fn set_static() {
-    with_all_sandboxes(|mut sandbox| {
+    let mut cfg: SandboxConfiguration = Default::default();
+    cfg.set_scratch_size(0x100A000);
+    with_all_sandboxes_cfg(Some(cfg), |mut sandbox| {
         let fn_name = "SetStatic";
         let res = sandbox.call::<i32>(fn_name, ());
         assert!(res.is_ok());
