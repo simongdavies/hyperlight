@@ -20,8 +20,8 @@ extern crate alloc;
 
 use core::fmt::Write;
 
+use arch::dispatch::dispatch_function;
 use buddy_system_allocator::LockedHeap;
-use guest_function::call::dispatch_function;
 use guest_function::register::GuestFunctionRegister;
 use guest_logger::init_logger;
 use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
@@ -234,6 +234,11 @@ pub(crate) extern "C" fn generic_init(
     unsafe {
         hyperlight_main();
     }
+
+    // Ensure that any tracing output from the initialisation phase is
+    // flushed to the host, if necessary.
+    #[cfg(all(feature = "trace_guest", target_arch = "x86_64"))]
+    hyperlight_guest_tracing::flush();
 
     dispatch_function as usize as u64
 }

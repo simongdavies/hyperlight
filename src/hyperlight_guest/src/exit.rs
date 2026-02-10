@@ -18,27 +18,6 @@ use core::arch::asm;
 use core::ffi::{CStr, c_char};
 
 use hyperlight_common::outb::OutBAction;
-use tracing::instrument;
-
-/// Halt the execution of the guest and returns control to the host.
-/// Halt is generally called for a successful completion of the guest's work,
-/// this means we can instrument it as a trace point because the trace state
-/// shall not be locked at this point (we are not in an exception context).
-#[inline(never)]
-#[instrument(skip_all, level = "Trace")]
-pub fn halt() {
-    #[cfg(all(feature = "trace_guest", target_arch = "x86_64"))]
-    {
-        // Send data before halting
-        // If there is no data, this doesn't do anything
-        // The reason we do this here instead of in `hlt` asm function
-        // is to avoid allocating before halting, which leaks memory
-        // because the guest is not expected to resume execution after halting.
-        hyperlight_guest_tracing::flush();
-    }
-
-    unsafe { asm!("hlt", options(nostack)) };
-}
 
 /// Exits the VM with an Abort OUT action and code 0.
 #[unsafe(no_mangle)]
