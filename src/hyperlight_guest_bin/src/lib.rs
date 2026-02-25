@@ -226,6 +226,12 @@ pub(crate) extern "C" fn generic_init(
         hyperlight_guest_tracing::init_guest_tracing(guest_start_tsc);
     }
 
+    // Open a span to partly capture the initialization of the guest.
+    // This is done here because the tracing subscriber is initialized and the guest is in a
+    // well-known state
+    #[cfg(all(feature = "trace_guest", target_arch = "x86_64"))]
+    let _entered = tracing::span!(tracing::Level::INFO, "generic_init").entered();
+
     #[cfg(feature = "macros")]
     for registration in __private::GUEST_FUNCTION_INIT {
         registration();
@@ -235,10 +241,20 @@ pub(crate) extern "C" fn generic_init(
         hyperlight_main();
     }
 
-    // Ensure that any tracing output from the initialisation phase is
-    // flushed to the host, if necessary.
+    // All this tracing logic shall be done right before the call to `hlt` which is done after this
+    // function returns
     #[cfg(all(feature = "trace_guest", target_arch = "x86_64"))]
-    hyperlight_guest_tracing::flush();
+    {
+        // NOTE: This is necessary to avoid closing the span twice. Flush closes all the open
+        // spans, when preparing to close a guest function call context.
+        // It is not mandatory, though, but avoids a warning on the host that alerts a spans
+        // that has not been opened but is being closed.
+        _entered.exit();
+
+        // Ensure that any tracing output from the initialisation phase is
+        // flushed to the host, if necessary.
+        hyperlight_guest_tracing::flush();
+    }
 
     dispatch_function as usize as u64
 }

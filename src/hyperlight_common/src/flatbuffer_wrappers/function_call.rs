@@ -41,7 +41,7 @@ pub enum FunctionCallType {
 }
 
 /// `Functioncall` represents a call to a function in the guest or host.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct FunctionCall {
     /// The function name
     pub function_name: String,

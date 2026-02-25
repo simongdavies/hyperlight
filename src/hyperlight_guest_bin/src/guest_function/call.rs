@@ -75,22 +75,24 @@ pub(crate) fn call_guest_function(function_call: FunctionCall) -> Result<Vec<u8>
 pub(crate) fn internal_dispatch_function() {
     // Read the current TSC to report it to the host with the spans/events
     // This helps calculating the timestamps relative to the guest call
-    #[cfg(feature = "trace_guest")]
-    {
+    #[cfg(all(feature = "trace_guest", target_arch = "x86_64"))]
+    let _entered = {
         let guest_start_tsc = hyperlight_guest_tracing::invariant_tsc::read_tsc();
         // Reset the trace state for the new guest function call with the new start TSC
         // This clears any existing spans/events from previous calls ensuring a clean state
         hyperlight_guest_tracing::new_call(guest_start_tsc);
-    }
+
+        tracing::span!(tracing::Level::INFO, "internal_dispatch_function").entered()
+    };
 
     let handle = unsafe { GUEST_HANDLE };
-
-    #[cfg(debug_assertions)]
-    log::trace!("internal_dispatch_function");
 
     let function_call = handle
         .try_pop_shared_input_data_into::<FunctionCall>()
         .expect("Function call deserialization failed");
+
+    #[cfg(debug_assertions)]
+    tracing::trace!("{:?}", function_call);
 
     let res = call_guest_function(function_call);
 
@@ -111,8 +113,20 @@ pub(crate) fn internal_dispatch_function() {
         }
     }
 
-    // Ensure that any tracing output during the call is flushed to
-    // the host, if necessary.
+    // All this tracing logic shall be done right before the call to `hlt` which is done after this
+    // function returns
     #[cfg(all(feature = "trace_guest", target_arch = "x86_64"))]
-    hyperlight_guest_tracing::flush();
+    {
+        // This span captures the internal dispatch function only, without tracing internals.
+        // Close the span before flushing to ensure that the `flush` call is not included in the span
+        // NOTE: This is necessary to avoid closing the span twice. Flush closes all the open
+        // spans, when preparing to close a guest function call context.
+        // It is not mandatory, though, but avoids a warning on the host that alerts a spans
+        // that has not been opened but is being closed.
+        _entered.exit();
+
+        // Ensure that any tracing output during the call is flushed to
+        // the host, if necessary.
+        hyperlight_guest_tracing::flush();
+    }
 }
