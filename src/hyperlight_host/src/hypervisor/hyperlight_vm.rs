@@ -191,6 +191,8 @@ pub enum RunVmError {
     DebugHandler(#[from] HandleDebugError),
     #[error("Execution was cancelled by the host")]
     ExecutionCancelledByHost,
+    #[error("Failed to access page: {0}")]
+    PageTableAccess(AccessPageTableError),
     #[cfg(feature = "trace_guest")]
     #[error("Failed to get registers: {0}")]
     GetRegs(RegisterError),
@@ -754,10 +756,18 @@ impl HyperlightVm {
                     tc.end_host_trace();
                     // Handle the guest trace data if any
                     let regs = self.vm.regs().map_err(RunVmError::GetRegs)?;
-                    if let Err(e) = tc.handle_trace(&regs, mem_mgr) {
-                        // If no trace data is available, we just log a message and continue
-                        // Is this the right thing to do?
-                        log::debug!("Error handling guest trace: {:?}", e);
+
+                    // Only parse the trace if it has reported
+                    if tc.has_trace_data(&regs) {
+                        let root_pt = self.get_root_pt().map_err(RunVmError::PageTableAccess)?;
+
+                        // If something goes wrong with parsing the trace data, we log the error and
+                        // continue execution instead of returning an error since this is not critical
+                        // to correct execution of the guest
+                        tc.handle_trace(&regs, mem_mgr, root_pt)
+                            .unwrap_or_else(|e| {
+                                tracing::error!("Cannot handle trace data: {}", e);
+                            });
                     }
                 }
                 result

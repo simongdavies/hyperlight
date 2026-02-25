@@ -222,8 +222,8 @@ pub struct Mapping {
 ///   are being remapped, TLB invalidation may need to be performed
 ///   afterwards.
 pub use arch::map;
-/// This function is not presently used for anything, but is useful
-/// for debugging
+/// This function is presently used for reading the tracing data, also
+/// it is useful for debugging
 ///
 /// # Safety
 /// This function traverses page table data structures, and should not

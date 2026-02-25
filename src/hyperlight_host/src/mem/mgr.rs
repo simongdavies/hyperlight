@@ -411,6 +411,117 @@ impl SandboxMemoryManager<HostSharedMemory> {
 
         Ok(())
     }
+
+    /// Read guest memory at a Guest Virtual Address (GVA) by walking the
+    /// page tables to translate GVA → GPA, then reading from the correct
+    /// backing memory (shared_mem or scratch_mem).
+    ///
+    /// This is necessary because with Copy-on-Write (CoW) the guest's
+    /// virtual pages are backed by physical pages in the scratch
+    /// region rather than being identity-mapped.
+    ///
+    /// # Arguments
+    /// * `gva` - The Guest Virtual Address to read from
+    /// * `len` - The number of bytes to read
+    /// * `root_pt` - The root page table physical address (CR3)
+    #[cfg(feature = "trace_guest")]
+    pub(crate) fn read_guest_memory_by_gva(
+        &mut self,
+        gva: u64,
+        len: usize,
+        root_pt: u64,
+    ) -> Result<Vec<u8>> {
+        use hyperlight_common::vmem::PAGE_SIZE;
+
+        use crate::sandbox::snapshot::{SharedMemoryPageTableBuffer, access_gpa};
+
+        let scratch_size = self.scratch_mem.mem_size();
+
+        self.shared_mem.with_exclusivity(|snap| {
+            self.scratch_mem.with_exclusivity(|scratch| {
+                let pt_buf = SharedMemoryPageTableBuffer::new(snap, scratch, scratch_size, root_pt);
+
+                // Walk page tables to get all mappings that cover the GVA range
+                let mappings: Vec<_> = unsafe {
+                    hyperlight_common::vmem::virt_to_phys(&pt_buf, gva, len as u64)
+                }
+                .collect();
+
+                if mappings.is_empty() {
+                    return Err(new_error!(
+                        "No page table mappings found for GVA {:#x} (len {})",
+                        gva,
+                        len,
+                    ));
+                }
+
+                // Resulting vector of bytes to return
+                let mut result = Vec::with_capacity(len);
+                let mut current_gva = gva;
+
+                for mapping in &mappings {
+                    // The page table walker should only return valid mappings
+                    // that cover our current read position.
+                    if mapping.virt_base > current_gva {
+                        return Err(new_error!(
+                            "Page table walker returned mapping with virt_base {:#x} > current read position {:#x}",
+                            mapping.virt_base,
+                            current_gva,
+                        ));
+                    }
+
+                    // Calculate the offset within this page where to start copying
+                    let page_offset = (current_gva - mapping.virt_base) as usize;
+
+                    let bytes_remaining = len - result.len();
+                    let available_in_page = PAGE_SIZE - page_offset;
+                    let bytes_to_copy = bytes_remaining.min(available_in_page);
+
+                    // Translate the GPA to host memory
+                    let gpa = mapping.phys_base + page_offset as u64;
+                    let (mem, offset) = access_gpa(snap, scratch, scratch_size, gpa)
+                        .ok_or_else(|| {
+                            new_error!(
+                                "Failed to resolve GPA {:#x} to host memory (GVA {:#x})",
+                                gpa,
+                                gva
+                            )
+                        })?;
+
+                    let slice = mem
+                        .as_slice()
+                        .get(offset..offset + bytes_to_copy)
+                        .ok_or_else(|| {
+                            new_error!(
+                                "GPA {:#x} resolved to out-of-bounds host offset {} (need {} bytes)",
+                                gpa,
+                                offset,
+                                bytes_to_copy
+                            )
+                        })?;
+
+                    result.extend_from_slice(slice);
+                    current_gva += bytes_to_copy as u64;
+                }
+
+                if result.len() != len {
+                    tracing::error!(
+                        "Page table walker returned mappings that don't cover the full requested length: got {}, expected {}",
+                        result.len(),
+                        len,
+                    );
+                    return Err(new_error!(
+                        "Could not read full GVA range: got {} of {} bytes {:?}",
+                        result.len(),
+                        len,
+                        mappings
+                    ));
+                }
+
+                Ok(result)
+            })
+        })??
+    }
 }
 
 #[cfg(test)]
