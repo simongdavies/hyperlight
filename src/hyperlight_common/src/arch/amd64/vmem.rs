@@ -537,9 +537,13 @@ pub unsafe fn virt_to_phys<'a, Op: TableReadOps + 'a>(
     address: u64,
     len: u64,
 ) -> impl Iterator<Item = Mapping> + 'a {
-    // Undo sign-extension, and mask off any sub-page bits
-    let vmin = (address & ((1u64 << VA_BITS) - 1)) & !(PAGE_SIZE as u64 - 1);
-    let vmax = core::cmp::min(vmin + len, 1u64 << VA_BITS);
+    // Undo sign-extension
+    let addr = address & ((1u64 << VA_BITS) - 1);
+    // Mask off any sub-page bits
+    let vmin = addr & !(PAGE_SIZE as u64 - 1);
+    // Calculate the maximum virtual address we need to look at based on the starting
+    // address and length ensuring we don't go past the end of the address space
+    let vmax = core::cmp::min(addr + len, 1u64 << VA_BITS);
     modify_ptes::<47, 39, Op, _>(MapRequest {
         table_base: op.as_ref().root_table(),
         vmin,
@@ -918,6 +922,52 @@ mod tests {
         assert!(result.is_some(), "Should find mapped address");
         let mapping = result.unwrap();
         assert_eq!(mapping.phys_base, 0x1000);
+    }
+
+    #[test]
+    fn test_virt_to_phys_unaligned_virt_and_across_pages_len() {
+        let ops = MockTableOps::new();
+        let mapping = Mapping {
+            phys_base: 0x1000,
+            virt_base: 0x1000,
+            len: 2 * PAGE_SIZE as u64, // 2 page
+            kind: MappingKind::Basic(BasicMapping {
+                readable: true,
+                writable: true,
+                executable: false,
+            }),
+        };
+
+        unsafe { map(&ops, mapping) };
+
+        let mappings = unsafe { virt_to_phys(&ops, 0x1F00, 0x300).collect::<Vec<_>>() };
+        assert_eq!(mappings.len(), 2, "Should return 2 mappings for 2 pages");
+        assert_eq!(mappings[0].phys_base, 0x1000);
+        assert_eq!(mappings[1].phys_base, 0x2000);
+    }
+
+    #[test]
+    fn test_virt_to_phys_unaligned_virt_and_multiple_page_len() {
+        let ops = MockTableOps::new();
+        let mapping = Mapping {
+            phys_base: 0x1000,
+            virt_base: 0x1000,
+            len: PAGE_SIZE as u64 * 2 + 0x200, // 2 page + 512 bytes
+            kind: MappingKind::Basic(BasicMapping {
+                readable: true,
+                writable: true,
+                executable: false,
+            }),
+        };
+
+        unsafe { map(&ops, mapping) };
+
+        let mappings =
+            unsafe { virt_to_phys(&ops, 0x1234, PAGE_SIZE as u64 * 2 + 0x10).collect::<Vec<_>>() };
+        assert_eq!(mappings.len(), 3, "Should return 3 mappings for 3 pages");
+        assert_eq!(mappings[0].phys_base, 0x1000);
+        assert_eq!(mappings[1].phys_base, 0x2000);
+        assert_eq!(mappings[2].phys_base, 0x3000);
     }
 
     #[test]
