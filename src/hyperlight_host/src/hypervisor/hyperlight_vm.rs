@@ -621,7 +621,9 @@ impl HyperlightVm {
     /// Get the current base page table physical address
     pub(crate) fn get_root_pt(&mut self) -> Result<u64, AccessPageTableError> {
         let sregs = self.vm.sregs()?;
-        Ok(sregs.cr3)
+
+        // Mask off the flags bits
+        Ok(sregs.cr3 & !0xfff_u64)
     }
 
     /// Get the special registers that need to be stored in a snapshot.
