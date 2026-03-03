@@ -91,9 +91,6 @@ pub(crate) fn internal_dispatch_function() {
         .try_pop_shared_input_data_into::<FunctionCall>()
         .expect("Function call deserialization failed");
 
-    #[cfg(debug_assertions)]
-    tracing::trace!("{:?}", function_call);
-
     let res = call_guest_function(function_call);
 
     match res {
