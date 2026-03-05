@@ -30,6 +30,10 @@ use hyperlight_common::flatbuffer_wrappers::function_types::{
 };
 use hyperlight_common::flatbuffer_wrappers::util::estimate_flatbuffer_capacity;
 use tracing::{Span, instrument};
+#[cfg(target_os = "windows")]
+use windows::Win32::Foundation::CloseHandle;
+#[cfg(target_os = "windows")]
+use windows::Win32::System::Memory::{MEMORY_MAPPED_VIEW_ADDRESS, UnmapViewOfFile};
 
 use super::Callable;
 use super::host_funcs::FunctionRegistry;
@@ -38,6 +42,8 @@ use crate::HyperlightError::{self, SnapshotSandboxMismatch};
 use crate::func::{ParameterTuple, SupportedReturnType};
 use crate::hypervisor::InterruptHandle;
 use crate::hypervisor::hyperlight_vm::{HyperlightVm, HyperlightVmError};
+#[cfg(target_os = "windows")]
+use crate::hypervisor::wrappers::HandleWrapper;
 use crate::mem::memory_region::MemoryRegion;
 #[cfg(unix)]
 use crate::mem::memory_region::{MemoryRegionFlags, MemoryRegionType};
@@ -47,6 +53,53 @@ use crate::metrics::{
     METRIC_GUEST_ERROR, METRIC_GUEST_ERROR_LABEL_CODE, maybe_time_and_emit_guest_call,
 };
 use crate::{Result, log_then_return};
+
+/// Tracks a host-side file mapping created by [`MultiUseSandbox::map_file_cow`]
+/// on Windows, providing RAII cleanup of the underlying Windows handles.
+///
+/// When dropped, releases both the `MapViewOfFile` view and the
+/// `CreateFileMappingW` handle, preventing resource leaks.
+#[cfg(target_os = "windows")]
+#[allow(dead_code)] // Used in Step 4 (map_file_cow) and Step 5 (restore cleanup)
+struct OwnedFileMapping {
+    /// Guest base address used to identify which region this mapping
+    /// belongs to (for cleanup during [`MultiUseSandbox::restore`]).
+    guest_base: usize,
+    /// Host-side base pointer returned by `MapViewOfFile`.
+    view_base: *mut core::ffi::c_void,
+    /// File mapping handle returned by `CreateFileMappingW`.
+    mapping_handle: HandleWrapper,
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for OwnedFileMapping {
+    fn drop(&mut self) {
+        // Unmap the view first, then close the file mapping handle.
+        // Order matters: the view holds a reference to the mapping.
+        unsafe {
+            if let Err(e) = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS {
+                Value: self.view_base,
+            }) {
+                tracing::error!("Failed to unmap file view at {:?}: {:?}", self.view_base, e);
+            }
+            if let Err(e) = CloseHandle(self.mapping_handle.into()) {
+                tracing::error!(
+                    "Failed to close file mapping handle {:?}: {:?}",
+                    self.mapping_handle,
+                    e
+                );
+            }
+        }
+    }
+}
+
+// SAFETY: The raw pointer `view_base` is only accessed during `Drop`
+// (to call `UnmapViewOfFile`), which happens on the owning thread.
+// The `HandleWrapper` is already `Send + Sync`.
+#[cfg(target_os = "windows")]
+unsafe impl Send for OwnedFileMapping {}
+#[cfg(target_os = "windows")]
+unsafe impl Sync for OwnedFileMapping {}
 
 /// A fully initialized sandbox that can execute guest functions multiple times.
 ///
@@ -99,6 +152,12 @@ pub struct MultiUseSandbox {
     /// If the current state of the sandbox has been captured in a snapshot,
     /// that snapshot is stored here.
     snapshot: Option<Arc<Snapshot>>,
+    /// Tracks host-side file mappings created by [`Self::map_file_cow`] for
+    /// RAII cleanup. Declared **after** `vm` so that Rust's field drop order
+    /// releases hypervisor mappings before closing host-side file handles.
+    #[cfg(target_os = "windows")]
+    #[allow(dead_code)] // Used in Step 4 (map_file_cow) and Step 5 (restore cleanup)
+    file_mappings: Vec<OwnedFileMapping>,
 }
 
 impl MultiUseSandbox {
@@ -123,6 +182,8 @@ impl MultiUseSandbox {
             #[cfg(gdb)]
             dbg_mem_access_fn,
             snapshot: None,
+            #[cfg(target_os = "windows")]
+            file_mappings: Vec::new(),
         }
     }
 
@@ -1538,5 +1599,76 @@ mod tests {
         // Start 100 bytes before the first page boundary, read across it.
         let start = code_gva + 4096 - 100;
         assert_gva_read_matches(&mut sbox, start, 200);
+    }
+
+    /// Tests that [`OwnedFileMapping`] properly releases Windows handles on drop.
+    ///
+    /// Creates a temp file, opens a `CreateFileMappingW` + `MapViewOfFile`,
+    /// wraps in `OwnedFileMapping`, drops it, and verifies the file can be
+    /// deleted (no leaked handles holding it open).
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn owned_file_mapping_drop_releases_handles() {
+        use std::io::Write;
+        use std::os::windows::io::AsRawHandle;
+
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::System::Memory::{
+            CreateFileMappingW, FILE_MAP_READ, MapViewOfFile, PAGE_READONLY,
+        };
+
+        use super::OwnedFileMapping;
+        use crate::hypervisor::wrappers::HandleWrapper;
+
+        // Create a temp file with some content
+        let temp_dir = std::env::temp_dir();
+        let temp_path = temp_dir.join("hyperlight_test_owned_file_mapping.bin");
+        // Clean up from any previous failed run
+        let _ = std::fs::remove_file(&temp_path);
+
+        let mapping_handle;
+        let view_base;
+
+        {
+            // Create and write to the file, then keep it open for mapping
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&temp_path)
+                .unwrap();
+            file.set_len(4096).unwrap();
+            (&file).write_all(&[0xAA; 4096]).unwrap();
+
+            let file_handle = HANDLE(file.as_raw_handle());
+
+            mapping_handle = unsafe {
+                CreateFileMappingW(file_handle, None, PAGE_READONLY, 0, 0, None)
+                    .expect("CreateFileMappingW failed")
+            };
+
+            // File is dropped here (fd closed), but the mapping keeps the file open
+        }
+
+        {
+            let view = unsafe { MapViewOfFile(mapping_handle, FILE_MAP_READ, 0, 0, 0) };
+            assert!(
+                !view.Value.is_null(),
+                "MapViewOfFile should return a non-null pointer"
+            );
+            view_base = view.Value;
+
+            let _owned = OwnedFileMapping {
+                guest_base: 0x1000,
+                view_base,
+                mapping_handle: HandleWrapper::from(mapping_handle),
+            };
+            // _owned is dropped here — should call UnmapViewOfFile + CloseHandle
+        }
+
+        // After drop, the file should no longer be held open by our handles
+        std::fs::remove_file(&temp_path)
+            .expect("File should be deletable after OwnedFileMapping is dropped");
     }
 }
