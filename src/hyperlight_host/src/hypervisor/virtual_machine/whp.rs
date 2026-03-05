@@ -144,6 +144,7 @@ impl VirtualMachine for WhpVm {
                 region.host_region.start.from_handle,
                 region.host_region.start.handle_base,
                 region.host_region.start.handle_size,
+                &region.host_region.start.surrogate_mapping,
             )
             .map_err(|e| MapMemoryError::SurrogateProcess(e.to_string()))?;
         let surrogate_addr = surrogate_base.wrapping_add(region.host_region.start.offset);

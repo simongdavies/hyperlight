@@ -23,13 +23,14 @@ use tracing::{Span, instrument};
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::Memory::{
     MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFileNuma2, PAGE_NOACCESS, PAGE_PROTECTION_FLAGS,
-    PAGE_READWRITE, UNMAP_VIEW_OF_FILE_FLAGS, UnmapViewOfFile2, VirtualProtectEx,
+    PAGE_READONLY, PAGE_READWRITE, UNMAP_VIEW_OF_FILE_FLAGS, UnmapViewOfFile2, VirtualProtectEx,
 };
 use windows::Win32::System::SystemServices::NUMA_NO_PREFERRED_NODE;
 
 use super::surrogate_process_manager::get_surrogate_process_manager;
 use super::wrappers::HandleWrapper;
 use crate::HyperlightError::WindowsAPIError;
+use crate::mem::memory_region::SurrogateMapping;
 use crate::{Result, log_then_return};
 
 #[derive(Debug)]
@@ -57,11 +58,24 @@ impl SurrogateProcess {
         }
     }
 
+    /// Maps a file mapping handle into the surrogate process.
+    ///
+    /// The `mapping` parameter controls the page protection and guard page
+    /// behaviour:
+    /// - [`SurrogateMapping::SandboxMemory`]: uses `PAGE_READWRITE` and sets
+    ///   guard pages (`PAGE_NOACCESS`) on the first and last pages.
+    /// - [`SurrogateMapping::ReadOnlyFile`]: uses `PAGE_READONLY` with no
+    ///   guard pages.
+    ///
+    /// If `host_base` was already mapped, the existing mapping is reused
+    /// and the reference count is incremented (the `mapping` parameter is
+    /// ignored in that case).
     pub(super) fn map(
         &mut self,
         handle: HandleWrapper,
         host_base: usize,
         host_size: usize,
+        mapping: &SurrogateMapping,
     ) -> Result<*mut c_void> {
         match self.mappings.entry(host_base) {
             Entry::Occupied(mut oe) => {
@@ -69,6 +83,12 @@ impl SurrogateProcess {
                 Ok(oe.get().surrogate_base)
             }
             Entry::Vacant(ve) => {
+                // Derive the page protection from the mapping type
+                let page_protection = match mapping {
+                    SurrogateMapping::SandboxMemory => PAGE_READWRITE,
+                    SurrogateMapping::ReadOnlyFile => PAGE_READONLY,
+                };
+
                 // Use MapViewOfFile2 to map memory into the surrogate process, the MapViewOfFile2 API is implemented in as an inline function in a windows header file
                 // (see https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-mapviewoffile2#remarks) so we use the same API it uses in the header file here instead of
                 // MapViewOfFile2 which does not exist in the rust crate (see https://github.com/microsoft/windows-rs/issues/2595)
@@ -80,40 +100,47 @@ impl SurrogateProcess {
                         None,
                         host_size,
                         0,
-                        PAGE_READWRITE.0,
+                        page_protection.0,
                         NUMA_NO_PREFERRED_NODE,
                     )
                 };
-                let mut unused_out_old_prot_flags = PAGE_PROTECTION_FLAGS(0);
 
-                // the first page of the raw_size is the guard page
-                let first_guard_page_start = surrogate_base.Value;
-                if let Err(e) = unsafe {
-                    VirtualProtectEx(
-                        self.process_handle.into(),
-                        first_guard_page_start,
-                        PAGE_SIZE_USIZE,
-                        PAGE_NOACCESS,
-                        &mut unused_out_old_prot_flags,
-                    )
-                } {
-                    log_then_return!(WindowsAPIError(e.clone()));
+                // Only set guard pages for SandboxMemory mappings.
+                // File-backed read-only mappings do not need guard pages
+                // because the host does not write to them.
+                if *mapping == SurrogateMapping::SandboxMemory {
+                    let mut unused_out_old_prot_flags = PAGE_PROTECTION_FLAGS(0);
+
+                    // the first page of the raw_size is the guard page
+                    let first_guard_page_start = surrogate_base.Value;
+                    if let Err(e) = unsafe {
+                        VirtualProtectEx(
+                            self.process_handle.into(),
+                            first_guard_page_start,
+                            PAGE_SIZE_USIZE,
+                            PAGE_NOACCESS,
+                            &mut unused_out_old_prot_flags,
+                        )
+                    } {
+                        log_then_return!(WindowsAPIError(e.clone()));
+                    }
+
+                    // the last page of the raw_size is the guard page
+                    let last_guard_page_start =
+                        unsafe { first_guard_page_start.add(host_size - PAGE_SIZE_USIZE) };
+                    if let Err(e) = unsafe {
+                        VirtualProtectEx(
+                            self.process_handle.into(),
+                            last_guard_page_start,
+                            PAGE_SIZE_USIZE,
+                            PAGE_NOACCESS,
+                            &mut unused_out_old_prot_flags,
+                        )
+                    } {
+                        log_then_return!(WindowsAPIError(e.clone()));
+                    }
                 }
 
-                // the last page of the raw_size is the guard page
-                let last_guard_page_start =
-                    unsafe { first_guard_page_start.add(host_size - PAGE_SIZE_USIZE) };
-                if let Err(e) = unsafe {
-                    VirtualProtectEx(
-                        self.process_handle.into(),
-                        last_guard_page_start,
-                        PAGE_SIZE_USIZE,
-                        PAGE_NOACCESS,
-                        &mut unused_out_old_prot_flags,
-                    )
-                } {
-                    log_then_return!(WindowsAPIError(e.clone()));
-                }
                 ve.insert(HandleMapping {
                     use_count: 1,
                     surrogate_base: surrogate_base.Value,
