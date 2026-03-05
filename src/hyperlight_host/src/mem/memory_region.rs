@@ -162,6 +162,22 @@ impl MemoryRegionKind for HostGuestMemoryRegion {
         base + size
     }
 }
+/// Describes how a memory region should be mapped through the surrogate process
+/// pipeline on Windows (WHP).
+///
+/// Different mapping types require different page protections and guard page
+/// behaviour when projected into the surrogate process via `MapViewOfFileNuma2`.
+#[cfg(target_os = "windows")]
+#[derive(Debug, PartialEq, Eq, Copy, Clone, Hash)]
+pub enum SurrogateMapping {
+    /// Standard sandbox shared memory: mapped with `PAGE_READWRITE` protection
+    /// and guard pages (`PAGE_NOACCESS`) set on the first and last pages.
+    SandboxMemory,
+    /// File-backed read-only mapping: mapped with `PAGE_READONLY` protection
+    /// and **no** guard pages.
+    ReadOnlyFile,
+}
+
 /// A [`HostRegionBase`] keeps track of not just a pointer, but also a
 /// file mapping into which it is pointing.  This is used on WHP,
 /// where mapping the actual pointer into the VM actually involves
@@ -178,6 +194,9 @@ pub struct HostRegionBase {
     /// The offset into file mapping region where this
     /// [`HostRegionBase`] is pointing.
     pub offset: usize,
+    /// How this region should be mapped through the surrogate process.
+    /// Controls page protection and guard page behaviour.
+    pub surrogate_mapping: SurrogateMapping,
 }
 #[cfg(target_os = "windows")]
 impl std::hash::Hash for HostRegionBase {
@@ -189,6 +208,7 @@ impl std::hash::Hash for HostRegionBase {
         self.handle_base.hash(state);
         self.handle_size.hash(state);
         self.offset.hash(state);
+        self.surrogate_mapping.hash(state);
     }
 }
 #[cfg(target_os = "windows")]
@@ -214,6 +234,7 @@ impl MemoryRegionKind for HostGuestMemoryRegion {
             handle_base: base.handle_base,
             handle_size: base.handle_size,
             offset: base.offset + size,
+            surrogate_mapping: base.surrogate_mapping,
         }
     }
 }
@@ -410,6 +431,162 @@ impl From<&MemoryRegion> for kvm_bindings::kvm_userspace_memory_region {
                 // Note: KVM_MEM_READONLY is executable
                 KVM_MEM_READONLY // RX 
             },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn memory_region_flags_display() {
+        assert_eq!(format!("{}", MemoryRegionFlags::NONE), "NONE");
+        assert_eq!(format!("{}", MemoryRegionFlags::READ), "READ");
+        assert_eq!(
+            format!("{}", MemoryRegionFlags::READ | MemoryRegionFlags::WRITE),
+            "READ | WRITE"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                MemoryRegionFlags::READ | MemoryRegionFlags::WRITE | MemoryRegionFlags::EXECUTE
+            ),
+            "READ | WRITE | EXECUTE"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    mod windows_tests {
+        use std::collections::HashSet;
+        use std::hash::{DefaultHasher, Hash, Hasher};
+
+        use super::*;
+
+        /// Helper to create a `HostRegionBase` with the given `SurrogateMapping`.
+        fn make_host_region_base(mapping: SurrogateMapping) -> HostRegionBase {
+            HostRegionBase {
+                from_handle: windows::Win32::Foundation::INVALID_HANDLE_VALUE.into(),
+                handle_base: 0x1000,
+                handle_size: 0x2000,
+                offset: 0x100,
+                surrogate_mapping: mapping,
+            }
+        }
+
+        fn hash_of(val: &impl Hash) -> u64 {
+            let mut hasher = DefaultHasher::new();
+            val.hash(&mut hasher);
+            hasher.finish()
+        }
+
+        #[test]
+        fn surrogate_mapping_equality() {
+            assert_eq!(
+                SurrogateMapping::SandboxMemory,
+                SurrogateMapping::SandboxMemory
+            );
+            assert_eq!(
+                SurrogateMapping::ReadOnlyFile,
+                SurrogateMapping::ReadOnlyFile
+            );
+            assert_ne!(
+                SurrogateMapping::SandboxMemory,
+                SurrogateMapping::ReadOnlyFile
+            );
+        }
+
+        #[test]
+        fn surrogate_mapping_copy_clone_debug() {
+            let a = SurrogateMapping::ReadOnlyFile;
+            let b = a; // Copy
+            let c = a; // Also Copy (SurrogateMapping implements Copy)
+            assert_eq!(a, b);
+            assert_eq!(a, c);
+            // Debug should produce a non-empty string
+            assert!(!format!("{:?}", a).is_empty());
+        }
+
+        #[test]
+        fn host_region_base_different_surrogate_mapping_not_equal() {
+            let sandbox = make_host_region_base(SurrogateMapping::SandboxMemory);
+            let readonly = make_host_region_base(SurrogateMapping::ReadOnlyFile);
+            assert_ne!(sandbox, readonly);
+        }
+
+        #[test]
+        fn host_region_base_different_surrogate_mapping_different_hash() {
+            let sandbox = make_host_region_base(SurrogateMapping::SandboxMemory);
+            let readonly = make_host_region_base(SurrogateMapping::ReadOnlyFile);
+            assert_ne!(hash_of(&sandbox), hash_of(&readonly));
+        }
+
+        #[test]
+        fn host_region_base_same_surrogate_mapping_equal_and_same_hash() {
+            let a = make_host_region_base(SurrogateMapping::SandboxMemory);
+            let b = make_host_region_base(SurrogateMapping::SandboxMemory);
+            assert_eq!(a, b);
+            assert_eq!(hash_of(&a), hash_of(&b));
+        }
+
+        #[test]
+        fn host_region_base_into_usize() {
+            let hrb = make_host_region_base(SurrogateMapping::SandboxMemory);
+            let addr: usize = hrb.into();
+            assert_eq!(addr, 0x1000 + 0x100); // handle_base + offset
+        }
+
+        #[test]
+        fn memory_region_kind_add_preserves_surrogate_mapping() {
+            let base = make_host_region_base(SurrogateMapping::ReadOnlyFile);
+            let result = <HostGuestMemoryRegion as MemoryRegionKind>::add(base, 0x400);
+
+            assert_eq!(result.from_handle, base.from_handle);
+            assert_eq!(result.handle_base, base.handle_base);
+            assert_eq!(result.handle_size, base.handle_size);
+            assert_eq!(result.offset, base.offset + 0x400);
+            assert_eq!(result.surrogate_mapping, SurrogateMapping::ReadOnlyFile);
+        }
+
+        #[test]
+        fn host_region_base_works_in_hashset() {
+            let sandbox = make_host_region_base(SurrogateMapping::SandboxMemory);
+            let readonly = make_host_region_base(SurrogateMapping::ReadOnlyFile);
+
+            let mut set = HashSet::new();
+            set.insert(sandbox);
+            set.insert(readonly);
+            // Both should be present since they differ by surrogate_mapping
+            assert_eq!(set.len(), 2);
+
+            // Inserting a duplicate should not increase the count
+            set.insert(make_host_region_base(SurrogateMapping::SandboxMemory));
+            assert_eq!(set.len(), 2);
+        }
+
+        #[test]
+        fn memory_region_with_surrogate_mapping_equality() {
+            let base_sandbox = make_host_region_base(SurrogateMapping::SandboxMemory);
+            let base_readonly = make_host_region_base(SurrogateMapping::ReadOnlyFile);
+
+            let region_sandbox = MemoryRegion {
+                guest_region: 0x0..0x2000,
+                host_region: base_sandbox
+                    ..<HostGuestMemoryRegion as MemoryRegionKind>::add(base_sandbox, 0x2000),
+                flags: MemoryRegionFlags::READ,
+                region_type: MemoryRegionType::Code,
+            };
+
+            let region_readonly = MemoryRegion {
+                guest_region: 0x0..0x2000,
+                host_region: base_readonly
+                    ..<HostGuestMemoryRegion as MemoryRegionKind>::add(base_readonly, 0x2000),
+                flags: MemoryRegionFlags::READ,
+                region_type: MemoryRegionType::Code,
+            };
+
+            // Regions with different surrogate_mapping should not be equal
+            assert_ne!(region_sandbox, region_readonly);
         }
     }
 }
