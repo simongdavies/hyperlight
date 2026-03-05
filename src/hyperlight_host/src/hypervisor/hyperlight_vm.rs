@@ -18,6 +18,7 @@ limitations under the License.
 use std::collections::HashMap;
 #[cfg(crashdump)]
 use std::path::Path;
+use std::str::FromStr;
 #[cfg(any(kvm, mshv3))]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU8;
@@ -25,8 +26,9 @@ use std::sync::atomic::AtomicU8;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
-use log::LevelFilter;
+use hyperlight_common::log_level::GuestLogFilter;
 use tracing::{Span, instrument};
+use tracing_core::LevelFilter;
 
 #[cfg(gdb)]
 use super::gdb::arch::VcpuStopReasonError;
@@ -59,7 +61,7 @@ use crate::hypervisor::virtual_machine::{
     HypervisorType, MapMemoryError, RegisterError, RunVcpuError, UnmapMemoryError, VmError, VmExit,
     get_available_hypervisor,
 };
-use crate::hypervisor::{InterruptHandle, InterruptHandleImpl, get_max_log_level};
+use crate::hypervisor::{InterruptHandle, InterruptHandleImpl};
 use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags, MemoryRegionType};
 use crate::mem::mgr::SandboxMemoryManager;
 use crate::mem::ptr::RawPtr;
@@ -73,6 +75,69 @@ use crate::sandbox::snapshot::NextAction;
 use crate::sandbox::trace::MemTraceInfo;
 #[cfg(crashdump)]
 use crate::sandbox::uninitialized::SandboxRuntimeConfig;
+
+/// Get the logging level filter to pass to the guest entrypoint
+///
+/// The guest entrypoint uses this to determine the maximum log level to enable for the guest.
+/// The `RUST_LOG` environment variable is expected to be in the format of comma-separated
+/// key-value pairs, where the key is a log target (e.g., "hyperlight_guest_bin") and the value is
+/// a log level (e.g., "debug").
+///
+/// NOTE: This prioritizes the log level for the targets containing "hyperlight_guest" string, then
+/// "hyperlight_host", and then general log level. If none of these targets are found, it
+/// defaults to "error".
+fn get_max_log_level_filter(rust_log: String) -> LevelFilter {
+    // This is done as the guest will produce logs based on the log level returned here
+    // producing those logs is expensive and we don't want to do it if the host is not
+    // going to process them
+    let level_str = rust_log
+        .split(',')
+        // Prioritize targets containing "hyperlight_guest"
+        .find_map(|part| {
+            let mut kv = part.splitn(2, '=');
+            match (kv.next(), kv.next()) {
+                (Some(k), Some(v)) if k.trim().contains("hyperlight_guest") => Some(v.trim()),
+                _ => None,
+            }
+        })
+        // Then check for "hyperlight_host"
+        .or_else(|| {
+            rust_log.split(',').find_map(|part| {
+                let mut kv = part.splitn(2, '=');
+                match (kv.next(), kv.next()) {
+                    (Some(k), Some(v)) if k.trim().contains("hyperlight_host") => Some(v.trim()),
+                    _ => None,
+                }
+            })
+        })
+        // Finally, check for general log level
+        .or_else(|| {
+            rust_log.split(',').find_map(|part| {
+                if part.contains("=") {
+                    None
+                } else {
+                    Some(part.trim())
+                }
+            })
+        })
+        .unwrap_or("");
+
+    tracing::info!("Determined guest log level: {}", level_str);
+
+    // If no value is found, default to Error
+    LevelFilter::from_str(level_str).unwrap_or(LevelFilter::ERROR)
+}
+
+/// Converts a given [`Option<LevelFilter>`] to a `u64` value to be passed to the guest entrypoint
+/// If the provided filter is `None`, it uses the `RUST_LOG` environment variable to determine the
+/// maximum log level filter for the guest and converts it to a `u64` value.
+fn get_guest_log_filter(guest_max_log_level: Option<LevelFilter>) -> u64 {
+    let guest_log_level_filter = match guest_max_log_level {
+        Some(level) => level,
+        None => get_max_log_level_filter(std::env::var("RUST_LOG").unwrap_or_default()),
+    };
+    GuestLogFilter::from(guest_log_level_filter).into()
+}
 
 /// Represents a Hyperlight Virtual Machine instance.
 ///
@@ -477,11 +542,6 @@ impl HyperlightVm {
 
         self.page_size = page_size as usize;
 
-        let guest_max_log_level: u64 = match guest_max_log_level {
-            Some(level) => level as u64,
-            None => get_max_log_level().into(),
-        };
-
         let regs = CommonRegisters {
             rip: initialise,
             // We usually keep the top of the stack 16-byte
@@ -496,7 +556,7 @@ impl HyperlightVm {
             rdi: peb_addr.into(),
             rsi: seed,
             rdx: page_size.into(),
-            rcx: guest_max_log_level,
+            rcx: get_guest_log_filter(guest_max_log_level),
             rflags: 1 << 1,
 
             ..Default::default()
@@ -2815,5 +2875,105 @@ mod tests {
 
             FxsaveTestContext { ctx, fxsave_offset }
         }
+    }
+
+    /// ========================================================================
+    /// Misc tests
+    /// ========================================================================
+    #[test]
+    fn test_get_max_log_level_filter_both_guest_and_host() {
+        let rust_log = "hyperlight_guest=trace,hyperlight_host=debug".to_string();
+        let filter = get_max_log_level_filter(rust_log);
+
+        assert_eq!(filter, LevelFilter::TRACE, "Max log level should be Trace");
+    }
+    #[test]
+    fn test_get_max_log_level_filter_only_guest() {
+        let rust_log = "hyperlight_guest=info".to_string();
+        let filter = get_max_log_level_filter(rust_log);
+
+        assert_eq!(filter, LevelFilter::INFO, "Max log level should be Info");
+    }
+    #[test]
+    fn test_get_max_log_level_filter_only_host() {
+        let rust_log = "hyperlight_host=debug".to_string();
+        let filter = get_max_log_level_filter(rust_log);
+
+        assert_eq!(filter, LevelFilter::DEBUG, "Max log level should be Debug");
+    }
+    #[test]
+    fn test_get_max_log_level_filter_only_general() {
+        let rust_log = "trace".to_string();
+        let filter = get_max_log_level_filter(rust_log);
+
+        assert_eq!(filter, LevelFilter::TRACE, "Max log level should be Trace");
+    }
+    #[test]
+    fn test_get_max_log_level_filter_complex_rust_log_00() {
+        let rust_log =
+            "error,hyperlight_guest=debug,hyperlight_host=info,hyperlight_guest_bin=trace"
+                .to_string();
+        let filter = get_max_log_level_filter(rust_log);
+
+        assert_eq!(filter, LevelFilter::DEBUG, "Max log level should be Debug");
+    }
+    #[test]
+    fn test_get_max_log_level_filter_complex_rust_log_01() {
+        let rust_log =
+            "error,hyperlight_host=info,hyperlight_guest=debug,hyperlight_guest_bin=trace"
+                .to_string();
+        let filter = get_max_log_level_filter(rust_log);
+
+        assert_eq!(filter, LevelFilter::DEBUG, "Max log level should be Debug");
+    }
+    #[test]
+    fn test_get_max_log_level_filter_complex_rust_log_02() {
+        let rust_log =
+            "hyperlight_host=info,error,hyperlight_guest=debug,hyperlight_guest_bin=trace"
+                .to_string();
+        let filter = get_max_log_level_filter(rust_log);
+
+        assert_eq!(filter, LevelFilter::DEBUG, "Max log level should be Debug");
+    }
+    #[test]
+    fn test_get_max_log_level_filter_general_and_others() {
+        let rust_log =
+            "trace,hyperlight_component_macro=debug,hyperlight_component_util=error".to_string();
+        let filter = get_max_log_level_filter(rust_log);
+
+        assert_eq!(filter, LevelFilter::TRACE, "Max log level should be Trace");
+    }
+    #[test]
+    fn test_get_max_log_level_filter_default() {
+        let rust_log = "hyperlight_common=debug,hyperlight_component_util=info".to_string();
+        let filter = get_max_log_level_filter(rust_log);
+
+        assert_eq!(
+            filter,
+            LevelFilter::ERROR,
+            "Max log level should default to Error"
+        );
+    }
+    #[test]
+    fn test_get_max_log_level_filter_invalid_rust_log() {
+        let rust_log = "this is an invalid rust log string".to_string();
+        let filter = get_max_log_level_filter(rust_log);
+
+        assert_eq!(
+            filter,
+            LevelFilter::ERROR,
+            "Max log level should default to Error"
+        );
+    }
+    #[test]
+    fn test_get_max_log_level_filter_empty_rust_log() {
+        let rust_log = "".to_string();
+        let filter = get_max_log_level_filter(rust_log);
+
+        assert_eq!(
+            filter,
+            LevelFilter::ERROR,
+            "Max log level should default to Error"
+        );
     }
 }
