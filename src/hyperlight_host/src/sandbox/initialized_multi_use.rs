@@ -63,7 +63,6 @@ use crate::{Result, log_then_return};
 /// When dropped, releases both the `MapViewOfFile` view and the
 /// `CreateFileMappingW` handle, preventing resource leaks.
 #[cfg(target_os = "windows")]
-#[allow(dead_code)] // guest_base used in Step 5 (restore cleanup)
 struct OwnedFileMapping {
     /// Guest base address used to identify which region this mapping
     /// belongs to (for cleanup during [`MultiUseSandbox::restore`]).
@@ -392,6 +391,13 @@ impl MultiUseSandbox {
             self.vm
                 .unmap_region(region)
                 .map_err(HyperlightVmError::UnmapRegion)?;
+
+            // Clean up host-side file mapping resources for regions that
+            // were created by map_file_cow. The OwnedFileMapping::Drop
+            // will call UnmapViewOfFile + CloseHandle.
+            #[cfg(target_os = "windows")]
+            self.file_mappings
+                .retain(|fm| fm.guest_base != region.guest_region.start);
         }
 
         for region in regions_to_map {
@@ -2012,5 +2018,121 @@ mod tests {
 
         std::fs::remove_file(&path)
             .expect("File should be deletable after sandbox with map_file_cow is dropped");
+    }
+
+    /// Tests snapshot/restore cycle with map_file_cow:
+    /// snapshot₁ (no file) → map file → snapshot₂ → restore₁ (unmapped)
+    /// → restore₂ (data folded into snapshot).
+    #[test]
+    fn test_map_file_cow_snapshot_remapping_cycle() {
+        let expected = b"snapshot remapping cycle test!";
+        let (path, expected_bytes) =
+            create_test_file("hyperlight_test_map_file_cow_snapshot_remap.bin", expected);
+
+        let mut sbox = UninitializedSandbox::new(
+            GuestBinary::FilePath(simple_guest_as_string().expect("Guest Binary Missing")),
+            None,
+        )
+        .unwrap()
+        .evolve()
+        .unwrap();
+
+        let guest_base: u64 = 0x1_0000_0000;
+
+        // 1. snapshot₁ — no file mapped
+        let snapshot1 = sbox.snapshot().unwrap();
+
+        // 2. Map the file
+        sbox.map_file_cow(&path, guest_base).unwrap();
+
+        // Verify we can read it
+        let actual: Vec<u8> = sbox
+            .call(
+                "ReadMappedBuffer",
+                (guest_base, expected_bytes.len() as u64, true),
+            )
+            .unwrap();
+        assert_eq!(actual, expected_bytes);
+
+        // 3. snapshot₂ — file mapped (data folded into snapshot)
+        let snapshot2 = sbox.snapshot().unwrap();
+
+        // 4. Restore to snapshot₁ — file should be unmapped
+        sbox.restore(snapshot1.clone()).unwrap();
+        let is_mapped: bool = sbox.call("CheckMapped", (guest_base,)).unwrap();
+        assert!(
+            !is_mapped,
+            "Region should be unmapped after restoring to snapshot₁"
+        );
+
+        // 5. Restore to snapshot₂ — data should still be readable
+        //    (folded into snapshot memory, not the original file mapping)
+        sbox.restore(snapshot2).unwrap();
+        let is_mapped: bool = sbox.call("CheckMapped", (guest_base,)).unwrap();
+        assert!(
+            is_mapped,
+            "Region should be mapped after restoring to snapshot₂"
+        );
+        let actual2: Vec<u8> = sbox
+            .call(
+                "ReadMappedBuffer",
+                (guest_base, expected_bytes.len() as u64, false),
+            )
+            .unwrap();
+        assert_eq!(
+            actual2, expected_bytes,
+            "Data should be intact after snapshot₂ restore"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Tests that snapshot correctly captures map_file_cow data and
+    /// restore brings it back.
+    #[test]
+    fn test_map_file_cow_snapshot_restore() {
+        let expected = b"snapshot restore basic test!!";
+        let (path, expected_bytes) =
+            create_test_file("hyperlight_test_map_file_cow_snap_restore.bin", expected);
+
+        let mut sbox = UninitializedSandbox::new(
+            GuestBinary::FilePath(simple_guest_as_string().expect("Guest Binary Missing")),
+            None,
+        )
+        .unwrap()
+        .evolve()
+        .unwrap();
+
+        let guest_base: u64 = 0x1_0000_0000;
+        sbox.map_file_cow(&path, guest_base).unwrap();
+
+        // Read the content to verify mapping works
+        let actual: Vec<u8> = sbox
+            .call(
+                "ReadMappedBuffer",
+                (guest_base, expected_bytes.len() as u64, true),
+            )
+            .unwrap();
+        assert_eq!(actual, expected_bytes);
+
+        // Take snapshot — folds file data into snapshot memory
+        let snapshot = sbox.snapshot().unwrap();
+
+        // Restore — the file-backed region is unmapped but data is in snapshot
+        sbox.restore(snapshot).unwrap();
+
+        // Data should still be readable from snapshot memory
+        let actual2: Vec<u8> = sbox
+            .call(
+                "ReadMappedBuffer",
+                (guest_base, expected_bytes.len() as u64, false),
+            )
+            .unwrap();
+        assert_eq!(
+            actual2, expected_bytes,
+            "Data should be readable after restore from snapshot"
+        );
+
+        let _ = std::fs::remove_file(&path);
     }
 }
