@@ -37,6 +37,9 @@ use crate::{Result, log_then_return};
 pub(crate) struct HandleMapping {
     pub(crate) use_count: u64,
     pub(crate) surrogate_base: *mut c_void,
+    /// The mapping type used when this entry was first created.
+    /// Used for debug assertions to catch conflicting re-maps.
+    pub(crate) mapping_type: SurrogateMapping,
 }
 
 /// Contains details of a surrogate process to be used by a Sandbox for providing memory to a HyperV VM on Windows.
@@ -79,6 +82,14 @@ impl SurrogateProcess {
     ) -> Result<*mut c_void> {
         match self.mappings.entry(host_base) {
             Entry::Occupied(mut oe) => {
+                debug_assert_eq!(
+                    oe.get().mapping_type,
+                    *mapping,
+                    "Conflicting SurrogateMapping for host_base {host_base:#x}: \
+                     existing={:?}, requested={:?}",
+                    oe.get().mapping_type,
+                    mapping
+                );
                 oe.get_mut().use_count += 1;
                 Ok(oe.get().surrogate_base)
             }
@@ -105,6 +116,13 @@ impl SurrogateProcess {
                     )
                 };
 
+                if surrogate_base.Value.is_null() {
+                    log_then_return!(
+                        "MapViewOfFileNuma2 failed: {:?}",
+                        std::io::Error::last_os_error()
+                    );
+                }
+
                 // Only set guard pages for SandboxMemory mappings.
                 // File-backed read-only mappings do not need guard pages
                 // because the host does not write to them.
@@ -122,6 +140,7 @@ impl SurrogateProcess {
                             &mut unused_out_old_prot_flags,
                         )
                     } {
+                        self.unmap_helper(surrogate_base.Value);
                         log_then_return!(WindowsAPIError(e.clone()));
                     }
 
@@ -137,6 +156,7 @@ impl SurrogateProcess {
                             &mut unused_out_old_prot_flags,
                         )
                     } {
+                        self.unmap_helper(surrogate_base.Value);
                         log_then_return!(WindowsAPIError(e.clone()));
                     }
                 }
@@ -144,6 +164,7 @@ impl SurrogateProcess {
                 ve.insert(HandleMapping {
                     use_count: 1,
                     surrogate_base: surrogate_base.Value,
+                    mapping_type: *mapping,
                 });
                 Ok(surrogate_base.Value)
             }
@@ -153,15 +174,25 @@ impl SurrogateProcess {
     pub(super) fn unmap(&mut self, host_base: usize) {
         match self.mappings.entry(host_base) {
             Entry::Occupied(mut oe) => {
-                oe.get_mut().use_count -= 1;
+                oe.get_mut().use_count = oe.get().use_count.checked_sub(1).unwrap_or_else(|| {
+                    tracing::error!(
+                        "Surrogate unmap ref count underflow for host_base {:#x}",
+                        host_base
+                    );
+                    0
+                });
                 if oe.get().use_count == 0 {
                     let entry = oe.remove();
                     self.unmap_helper(entry.surrogate_base);
                 }
             }
             Entry::Vacant(_) => {
+                tracing::error!(
+                    "Attempted to unmap from surrogate a region at host_base {:#x} that was never mapped",
+                    host_base
+                );
                 #[cfg(debug_assertions)]
-                panic!("Attempted to unmap from surrogate a region that was never mapped")
+                panic!("Attempted to unmap from surrogate a region that was never mapped");
             }
         }
     }

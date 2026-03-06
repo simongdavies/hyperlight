@@ -169,7 +169,7 @@ impl MemoryRegionKind for HostGuestMemoryRegion {
 /// behaviour when projected into the surrogate process via `MapViewOfFileNuma2`.
 #[cfg(target_os = "windows")]
 #[derive(Debug, PartialEq, Eq, Copy, Clone, Hash)]
-pub enum SurrogateMapping {
+pub(crate) enum SurrogateMapping {
     /// Standard sandbox shared memory: mapped with `PAGE_READWRITE` protection
     /// and guard pages (`PAGE_NOACCESS`) set on the first and last pages.
     SandboxMemory,
@@ -196,7 +196,7 @@ pub struct HostRegionBase {
     pub offset: usize,
     /// How this region should be mapped through the surrogate process.
     /// Controls page protection and guard page behaviour.
-    pub surrogate_mapping: SurrogateMapping,
+    pub(crate) surrogate_mapping: SurrogateMapping,
 }
 #[cfg(target_os = "windows")]
 impl std::hash::Hash for HostRegionBase {
@@ -497,14 +497,16 @@ mod tests {
         }
 
         #[test]
-        fn surrogate_mapping_copy_clone_debug() {
-            let a = SurrogateMapping::ReadOnlyFile;
-            let b = a; // Copy
-            let c = a; // Also Copy (SurrogateMapping implements Copy)
-            assert_eq!(a, b);
-            assert_eq!(a, c);
-            // Debug should produce a non-empty string
-            assert!(!format!("{:?}", a).is_empty());
+        fn surrogate_mapping_variants_are_distinct() {
+            // Verify the two variants are distinct values that can be
+            // used to key different behaviour in the surrogate pipeline
+            let sandbox = SurrogateMapping::SandboxMemory;
+            let readonly = SurrogateMapping::ReadOnlyFile;
+            assert_ne!(sandbox, readonly);
+
+            // Verify Copy semantics work (enum is Copy + Eq)
+            let copy = sandbox;
+            assert_eq!(sandbox, copy);
         }
 
         #[test]

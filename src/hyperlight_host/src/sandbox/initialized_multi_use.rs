@@ -95,9 +95,10 @@ impl Drop for OwnedFileMapping {
     }
 }
 
-// SAFETY: The raw pointer `view_base` is only accessed during `Drop`
-// (to call `UnmapViewOfFile`), which happens on the owning thread.
-// The `HandleWrapper` is already `Send + Sync`.
+// SAFETY: `view_base` is a pointer to a Windows memory-mapped view created by
+// `MapViewOfFile`. Both `UnmapViewOfFile` and `CloseHandle` are thread-safe
+// Win32 APIs that operate on kernel objects, so they can safely be called
+// from any thread. The `HandleWrapper` is already `Send + Sync`.
 #[cfg(target_os = "windows")]
 unsafe impl Send for OwnedFileMapping {}
 #[cfg(target_os = "windows")]
@@ -621,8 +622,8 @@ impl MultiUseSandbox {
     ///
     /// This method will return [`crate::HyperlightError::PoisonedSandbox`] if the sandbox
     /// is currently poisoned. Use [`restore()`](Self::restore) to recover from a poisoned state.
-    #[instrument(err(Debug), skip(self, _fp, _guest_base), parent = Span::current())]
-    pub fn map_file_cow(&mut self, _fp: &Path, _guest_base: u64) -> Result<u64> {
+    #[instrument(err(Debug), skip(self, file_path, guest_base), parent = Span::current())]
+    pub fn map_file_cow(&mut self, file_path: &Path, guest_base: u64) -> Result<u64> {
         if self.poisoned {
             return Err(crate::HyperlightError::PoisonedSandbox);
         }
@@ -632,10 +633,18 @@ impl MultiUseSandbox {
 
             use windows::Win32::Foundation::HANDLE;
 
-            let file = std::fs::File::options().read(true).open(_fp)?;
+            let file = std::fs::File::options().read(true).open(file_path)?;
             let file_size = file.metadata()?.len();
+            if file_size == 0 {
+                log_then_return!("map_file_cow: cannot map an empty file: {:?}", file_path);
+            }
             let page_size = page_size::get();
-            let size = (file_size as usize).div_ceil(page_size) * page_size;
+            let size = usize::try_from(file_size).map_err(|_| {
+                HyperlightError::Error(format!(
+                    "File size {file_size} exceeds addressable range on this platform"
+                ))
+            })?;
+            let size = size.div_ceil(page_size) * page_size;
 
             let file_handle = HANDLE(file.as_raw_handle());
 
@@ -680,9 +689,9 @@ impl MultiUseSandbox {
 
             let region = MemoryRegion {
                 host_region: host_base..host_end,
-                guest_region: _guest_base as usize.._guest_base as usize + size,
+                guest_region: guest_base as usize..guest_base as usize + size,
                 flags: MemoryRegionFlags::READ | MemoryRegionFlags::EXECUTE,
-                region_type: MemoryRegionType::Heap,
+                region_type: MemoryRegionType::Code,
             };
 
             // Reset snapshot since we are mutating the sandbox state
@@ -702,7 +711,7 @@ impl MultiUseSandbox {
 
             self.mem_mgr.mapped_rgns += 1;
             self.file_mappings.push(OwnedFileMapping {
-                guest_base: _guest_base as usize,
+                guest_base: guest_base as usize,
                 view_base: view.Value,
                 mapping_handle: HandleWrapper::from(mapping_handle),
             });
@@ -711,8 +720,14 @@ impl MultiUseSandbox {
         }
         #[cfg(unix)]
         unsafe {
-            let file = std::fs::File::options().read(true).write(true).open(_fp)?;
+            let file = std::fs::File::options()
+                .read(true)
+                .write(true)
+                .open(file_path)?;
             let file_size = file.metadata()?.st_size();
+            if file_size == 0 {
+                log_then_return!("map_file_cow: cannot map an empty file: {:?}", file_path);
+            }
             let page_size = page_size::get();
             let size = (file_size as usize).div_ceil(page_size) * page_size;
             let base = libc::mmap(
@@ -729,9 +744,9 @@ impl MultiUseSandbox {
 
             if let Err(err) = self.map_region(&MemoryRegion {
                 host_region: base as usize..base.wrapping_add(size) as usize,
-                guest_region: _guest_base as usize.._guest_base as usize + size,
+                guest_region: guest_base as usize..guest_base as usize + size,
                 flags: MemoryRegionFlags::READ | MemoryRegionFlags::EXECUTE,
-                region_type: MemoryRegionType::Heap,
+                region_type: MemoryRegionType::Code,
             }) {
                 libc::munmap(base, size);
                 return Err(err);
@@ -1767,7 +1782,7 @@ mod tests {
     fn create_test_file(name: &str, content: &[u8]) -> (std::path::PathBuf, Vec<u8>) {
         use std::io::Write;
 
-        let page_size = 4096usize;
+        let page_size = page_size::get();
         let padded_len = content.len().max(page_size).div_ceil(page_size) * page_size;
         let mut padded = vec![0u8; padded_len];
         padded[..content.len()].copy_from_slice(content);
