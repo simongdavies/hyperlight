@@ -43,7 +43,7 @@ pub(super) fn evolve_impl_multi_use(u_sbox: UninitializedSandbox) -> Result<Mult
         &u_sbox.config,
         u_sbox.stack_top_gva,
         #[cfg(any(crashdump, gdb))]
-        &u_sbox.rt_cfg,
+        u_sbox.rt_cfg,
         u_sbox.load_info,
     )?;
 
@@ -92,7 +92,7 @@ pub(crate) fn set_up_hypervisor_partition(
     mgr: SandboxMemoryManager<GuestSharedMemory>,
     #[cfg_attr(target_os = "windows", allow(unused_variables))] config: &SandboxConfiguration,
     stack_top_gva: u64,
-    #[cfg(any(crashdump, gdb))] rt_cfg: &SandboxRuntimeConfig,
+    #[cfg(any(crashdump, gdb))] rt_cfg: SandboxRuntimeConfig,
     _load_info: LoadInfo,
 ) -> Result<HyperlightVm> {
     // Create gdb thread if gdb is enabled and the configuration is provided
@@ -119,6 +119,19 @@ pub(crate) fn set_up_hypervisor_partition(
     #[cfg(feature = "mem_profile")]
     let trace_info = MemTraceInfo::new(_load_info.info)?;
 
+    // Store the original entry point address in the runtime config for core dumps.
+    // This is needed because `entrypoint` transitions from `Initialise(addr)` to
+    // `Call(dispatch_addr)` after guest initialisation, losing the original value
+    // that GDB needs to compute the PIE binary's load offset.
+    #[cfg(crashdump)]
+    let rt_cfg = {
+        let mut rt_cfg = rt_cfg;
+        if let crate::sandbox::snapshot::NextAction::Initialise(addr) = mgr.entrypoint {
+            rt_cfg.entry_point = Some(addr);
+        }
+        rt_cfg
+    };
+
     Ok(HyperlightVm::new(
         mgr.shared_mem,
         mgr.scratch_mem,
@@ -129,7 +142,7 @@ pub(crate) fn set_up_hypervisor_partition(
         #[cfg(gdb)]
         gdb_conn,
         #[cfg(crashdump)]
-        rt_cfg.clone(),
+        rt_cfg,
         #[cfg(feature = "mem_profile")]
         trace_info,
     )
