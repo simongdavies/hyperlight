@@ -250,15 +250,12 @@ impl UninitializedSandbox {
         let offset = gpa - base;
 
         if gpa % core::mem::align_of::<u64>() != 0 {
-            return Err(new_error!(
-                "GPA {:#x} is not 8-byte aligned",
-                gpa,
-            ));
+            return Err(new_error!("GPA {:#x} is not 8-byte aligned", gpa,));
         }
 
-        let end = offset.checked_add(core::mem::size_of::<u64>()).ok_or_else(|| {
-            new_error!("GPA {:#x} causes offset overflow", gpa)
-        })?;
+        let end = offset
+            .checked_add(core::mem::size_of::<u64>())
+            .ok_or_else(|| new_error!("GPA {:#x} causes offset overflow", gpa))?;
         if end > mem_size {
             return Err(new_error!(
                 "GPA {:#x} (offset {:#x}, end {:#x}) is outside the sandbox memory region (size {:#x})",
@@ -1424,9 +1421,9 @@ mod tests {
     mod guest_semaphore_tests {
         use hyperlight_testing::simple_guest_as_string;
 
+        use crate::UninitializedSandbox;
         use crate::mem::shared_mem::SharedMemory;
         use crate::sandbox::uninitialized::GuestBinary;
-        use crate::UninitializedSandbox;
 
         fn make_sandbox() -> UninitializedSandbox {
             UninitializedSandbox::new(
