@@ -691,7 +691,7 @@ impl MultiUseSandbox {
                 host_region: host_base..host_end,
                 guest_region: guest_base as usize..guest_base as usize + size,
                 flags: MemoryRegionFlags::READ | MemoryRegionFlags::EXECUTE,
-                region_type: MemoryRegionType::Code,
+                region_type: MemoryRegionType::MappedFile,
             };
 
             // Reset snapshot since we are mutating the sandbox state
@@ -746,7 +746,7 @@ impl MultiUseSandbox {
                 host_region: base as usize..base.wrapping_add(size) as usize,
                 guest_region: guest_base as usize..guest_base as usize + size,
                 flags: MemoryRegionFlags::READ | MemoryRegionFlags::EXECUTE,
-                region_type: MemoryRegionType::Code,
+                region_type: MemoryRegionType::MappedFile,
             }) {
                 libc::munmap(base, size);
                 return Err(err);

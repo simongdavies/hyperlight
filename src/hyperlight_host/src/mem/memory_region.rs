@@ -112,10 +112,13 @@ impl TryFrom<hv_x64_memory_intercept_message> for MemoryRegionFlags {
     }
 }
 
-// only used for debugging
+// NOTE: In the future, all host-side knowledge about memory region types
+// should collapse down to Snapshot vs Scratch (see shared_mem.rs).
+// Until then, these variants help distinguish regions for diagnostics
+// and crash dumps. Not part of the public API.
 #[derive(Debug, PartialEq, Eq, Copy, Clone, Hash)]
 /// The type of memory region
-pub enum MemoryRegionType {
+pub(crate) enum MemoryRegionType {
     /// The region contains the guest's code
     Code,
     /// The region contains the guest's init data
@@ -128,6 +131,11 @@ pub enum MemoryRegionType {
     Scratch,
     /// The snapshot region
     Snapshot,
+    /// An externally-mapped file (via [`MultiUseSandbox::map_file_cow`]).
+    /// These regions are backed by file handles (Windows) or mmap
+    /// (Linux) and are read-only + executable. They are cleaned up
+    /// during restore/drop — not part of the guest's own allocator.
+    MappedFile,
 }
 
 /// A trait that distinguishes between different kinds of memory region representations.

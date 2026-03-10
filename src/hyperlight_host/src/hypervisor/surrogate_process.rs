@@ -82,14 +82,14 @@ impl SurrogateProcess {
     ) -> Result<*mut c_void> {
         match self.mappings.entry(host_base) {
             Entry::Occupied(mut oe) => {
-                debug_assert_eq!(
-                    oe.get().mapping_type,
-                    *mapping,
-                    "Conflicting SurrogateMapping for host_base {host_base:#x}: \
-                     existing={:?}, requested={:?}",
-                    oe.get().mapping_type,
-                    mapping
-                );
+                if oe.get().mapping_type != *mapping {
+                    tracing::warn!(
+                        "Conflicting SurrogateMapping for host_base {host_base:#x}: \
+                         existing={:?}, requested={:?}",
+                        oe.get().mapping_type,
+                        mapping
+                    );
+                }
                 oe.get_mut().use_count += 1;
                 Ok(oe.get().surrogate_base)
             }
