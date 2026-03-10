@@ -272,7 +272,7 @@ pub struct MemoryRegion_<K: MemoryRegionKind> {
     /// memory access flags for the given region
     pub flags: MemoryRegionFlags,
     /// the type of memory region
-    pub region_type: MemoryRegionType,
+    pub(crate) region_type: MemoryRegionType,
 }
 
 /// A memory region that tracks both host and guest addresses.

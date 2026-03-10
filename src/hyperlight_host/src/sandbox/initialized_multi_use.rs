@@ -84,10 +84,11 @@ impl Drop for OwnedFileMapping {
             }) {
                 tracing::error!("Failed to unmap file view at {:?}: {:?}", self.view_base, e);
             }
-            if let Err(e) = CloseHandle(self.mapping_handle.into()) {
+            let mapping_handle = self.mapping_handle.into();
+            if let Err(e) = CloseHandle(mapping_handle) {
                 tracing::error!(
                     "Failed to close file mapping handle {:?}: {:?}",
-                    self.mapping_handle,
+                    mapping_handle,
                     e
                 );
             }
@@ -394,7 +395,7 @@ impl MultiUseSandbox {
                 .map_err(HyperlightVmError::UnmapRegion)?;
 
             // Clean up host-side file mapping resources for regions that
-            // were created by map_file_cow. The OwnedFileMapping::Drop
+            // were created by map_file_cow. The OwnedFileMapping::drop
             // will call UnmapViewOfFile + CloseHandle.
             #[cfg(target_os = "windows")]
             self.file_mappings
