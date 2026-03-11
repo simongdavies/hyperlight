@@ -79,6 +79,7 @@ impl HyperlightVm {
         _pml4_addr: u64,
         entrypoint: NextAction,
         rsp_gva: u64,
+        page_size: usize,
         #[cfg_attr(target_os = "windows", allow(unused_variables))] config: &SandboxConfiguration,
         #[cfg(gdb)] gdb_conn: Option<DebugCommChannel<DebugResponse, DebugMsg>>,
         #[cfg(crashdump)] rt_cfg: SandboxRuntimeConfig,
@@ -145,7 +146,7 @@ impl HyperlightVm {
             entrypoint,
             rsp_gva,
             interrupt_handle,
-            page_size: 0, // Will be set in `initialise`
+            page_size,
 
             next_slot: scratch_slot + 1,
             freed_slots: Vec::new(),
@@ -206,8 +207,6 @@ impl HyperlightVm {
         let NextAction::Initialise(initialise) = self.entrypoint else {
             return Ok(());
         };
-
-        self.page_size = page_size as usize;
 
         let regs = CommonRegisters {
             rip: initialise,
@@ -1505,6 +1504,7 @@ mod tests {
             gshm,
             &config,
             stack_top_gva,
+            page_size::get(),
             #[cfg(any(crashdump, gdb))]
             rt_cfg,
             crate::mem::exe::LoadInfo::dummy(),

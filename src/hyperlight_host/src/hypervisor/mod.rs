@@ -493,6 +493,7 @@ pub(crate) mod tests {
             gshm,
             &config,
             exn_stack_top_gva,
+            page_size::get(),
             #[cfg(any(crashdump, gdb))]
             rt_cfg,
             sandbox.load_info,
