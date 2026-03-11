@@ -20,9 +20,10 @@ use std::os::raw::c_void;
 use tracing::Span;
 #[cfg(feature = "trace_guest")]
 use tracing_opentelemetry::OpenTelemetrySpanExt;
-use windows::Win32::Foundation::{FreeLibrary, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, FreeLibrary, HANDLE};
 use windows::Win32::System::Hypervisor::*;
 use windows::Win32::System::LibraryLoader::*;
+use windows::Win32::System::Memory::{MEMORY_MAPPED_VIEW_ADDRESS, UnmapViewOfFile};
 use windows::core::s;
 use windows_result::HRESULT;
 
@@ -40,7 +41,8 @@ use crate::hypervisor::virtual_machine::{
     CreateVmError, HypervisorError, MapMemoryError, RegisterError, RunVcpuError, UnmapMemoryError,
     VirtualMachine, VmExit, XSAVE_MIN_SIZE,
 };
-use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags};
+use crate::hypervisor::wrappers::HandleWrapper;
+use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags, MemoryRegionType};
 #[cfg(feature = "trace_guest")]
 use crate::sandbox::trace::TraceContext as SandboxTraceContext;
 
@@ -65,12 +67,63 @@ pub(crate) fn is_hypervisor_present() -> bool {
     }
 }
 
+/// Tracks a host-side file mapping created by [`MultiUseSandbox::map_file_cow`],
+/// providing RAII cleanup of the underlying Windows handles.
+///
+/// When dropped, releases both the `MapViewOfFile` view and the
+/// `CreateFileMappingW` handle, preventing resource leaks.
+struct OwnedFileMapping {
+    /// Host-side base pointer returned by `MapViewOfFile`.
+    view_base: *mut core::ffi::c_void,
+    /// File mapping handle returned by `CreateFileMappingW`.
+    mapping_handle: HandleWrapper,
+}
+
+impl std::fmt::Debug for OwnedFileMapping {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OwnedFileMapping")
+            .field("view_base", &self.view_base)
+            .field("mapping_handle", &self.mapping_handle)
+            .finish()
+    }
+}
+
+impl Drop for OwnedFileMapping {
+    fn drop(&mut self) {
+        // Unmap the view first, then close the file mapping handle.
+        unsafe {
+            if let Err(e) = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS {
+                Value: self.view_base,
+            }) {
+                tracing::error!("Failed to unmap file view at {:?}: {:?}", self.view_base, e);
+            }
+            if let Err(e) = CloseHandle(self.mapping_handle.into()) {
+                tracing::error!(
+                    "Failed to close file mapping handle {:?}: {:?}",
+                    self.mapping_handle,
+                    e
+                );
+            }
+        }
+    }
+}
+
+// SAFETY: `view_base` is a pointer to a Windows memory-mapped view created by
+// `MapViewOfFile`. Both `UnmapViewOfFile` and `CloseHandle` are thread-safe
+// Win32 APIs that operate on kernel objects, so they can safely be called
+// from any thread. The `HandleWrapper` is already `Send + Sync`.
+unsafe impl Send for OwnedFileMapping {}
+unsafe impl Sync for OwnedFileMapping {}
+
 /// A Windows Hypervisor Platform implementation of a single-vcpu VM
 #[derive(Debug)]
 pub(crate) struct WhpVm {
     partition: WHV_PARTITION_HANDLE,
     // Surrogate process for memory mapping
     surrogate_process: SurrogateProcess,
+    /// Tracks host-side file mappings created by `map_file_cow` for
+    /// RAII cleanup. Keyed by host handle_base address.
+    file_mappings: Vec<OwnedFileMapping>,
 }
 
 // Safety: `WhpVm` is !Send because it holds `SurrogateProcess` which contains a raw pointer
@@ -78,6 +131,8 @@ pub(crate) struct WhpVm {
 // in the surrogate process. It is never dereferenced, only used for address arithmetic and
 // resource management (unmapping). This is a system resource that is not bound to the creating
 // thread and can be safely transferred between threads.
+// `OwnedFileMapping` contains a raw pointer (`view_base`) that is also a kernel resource
+// handle, safe to use from any thread.
 unsafe impl Send for WhpVm {}
 
 impl WhpVm {
@@ -109,6 +164,7 @@ impl WhpVm {
         Ok(WhpVm {
             partition,
             surrogate_process,
+            file_mappings: Vec::new(),
         })
     }
 
@@ -144,7 +200,7 @@ impl VirtualMachine for WhpVm {
                 region.host_region.start.from_handle,
                 region.host_region.start.handle_base,
                 region.host_region.start.handle_size,
-                &region.host_region.start.surrogate_mapping,
+                &region.region_type.surrogate_mapping(),
             )
             .map_err(|e| MapMemoryError::SurrogateProcess(e.to_string()))?;
         let surrogate_addr = surrogate_base.wrapping_add(region.host_region.start.offset);
@@ -194,6 +250,16 @@ impl VirtualMachine for WhpVm {
             )));
         }
 
+        // Track host-side file mappings for RAII cleanup.
+        // MappedFile regions have host views + handles that need
+        // UnmapViewOfFile + CloseHandle when the region is unmapped.
+        if region.region_type == MemoryRegionType::MappedFile {
+            self.file_mappings.push(OwnedFileMapping {
+                view_base: region.host_region.start.handle_base as *mut core::ffi::c_void,
+                mapping_handle: region.host_region.start.from_handle,
+            });
+        }
+
         Ok(())
     }
 
@@ -211,6 +277,15 @@ impl VirtualMachine for WhpVm {
         }
         self.surrogate_process
             .unmap(region.host_region.start.handle_base);
+
+        // Clean up host-side file mapping resources for MappedFile regions.
+        // OwnedFileMapping::Drop calls UnmapViewOfFile + CloseHandle.
+        if region.region_type == MemoryRegionType::MappedFile {
+            let handle_base = region.host_region.start.handle_base;
+            self.file_mappings
+                .retain(|fm| fm.view_base as usize != handle_base);
+        }
+
         Ok(())
     }
 

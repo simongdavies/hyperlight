@@ -774,7 +774,6 @@ pub trait SharedMemory {
             handle_base: self.region().ptr as usize,
             handle_size: self.region().size,
             offset: PAGE_SIZE_USIZE,
-            surrogate_mapping: super::memory_region::SurrogateMapping::SandboxMemory,
         }
     }
 
