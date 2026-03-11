@@ -67,53 +67,22 @@ pub(crate) fn is_hypervisor_present() -> bool {
     }
 }
 
-/// Tracks a host-side file mapping created by [`MultiUseSandbox::map_file_cow`],
-/// providing RAII cleanup of the underlying Windows handles.
-///
-/// When dropped, releases both the `MapViewOfFile` view and the
-/// `CreateFileMappingW` handle, preventing resource leaks.
-struct OwnedFileMapping {
-    /// Host-side base pointer returned by `MapViewOfFile`.
-    view_base: *mut core::ffi::c_void,
-    /// File mapping handle returned by `CreateFileMappingW`.
-    mapping_handle: HandleWrapper,
-}
-
-impl std::fmt::Debug for OwnedFileMapping {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OwnedFileMapping")
-            .field("view_base", &self.view_base)
-            .field("mapping_handle", &self.mapping_handle)
-            .finish()
-    }
-}
-
-impl Drop for OwnedFileMapping {
-    fn drop(&mut self) {
-        // Unmap the view first, then close the file mapping handle.
-        unsafe {
-            if let Err(e) = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS {
-                Value: self.view_base,
-            }) {
-                tracing::error!("Failed to unmap file view at {:?}: {:?}", self.view_base, e);
-            }
-            if let Err(e) = CloseHandle(self.mapping_handle.into()) {
-                tracing::error!(
-                    "Failed to close file mapping handle {:?}: {:?}",
-                    self.mapping_handle,
-                    e
-                );
-            }
+/// Helper: release a host-side file mapping view and its handle.
+/// Called from both `unmap_memory` and `WhpVm::drop`.
+fn release_file_mapping(view_base: *mut c_void, mapping_handle: HandleWrapper) {
+    unsafe {
+        if let Err(e) = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: view_base }) {
+            tracing::error!("Failed to unmap file view at {:?}: {:?}", view_base, e);
+        }
+        if let Err(e) = CloseHandle(mapping_handle.into()) {
+            tracing::error!(
+                "Failed to close file mapping handle {:?}: {:?}",
+                mapping_handle,
+                e
+            );
         }
     }
 }
-
-// SAFETY: `view_base` is a pointer to a Windows memory-mapped view created by
-// `MapViewOfFile`. Both `UnmapViewOfFile` and `CloseHandle` are thread-safe
-// Win32 APIs that operate on kernel objects, so they can safely be called
-// from any thread. The `HandleWrapper` is already `Send + Sync`.
-unsafe impl Send for OwnedFileMapping {}
-unsafe impl Sync for OwnedFileMapping {}
 
 /// A Windows Hypervisor Platform implementation of a single-vcpu VM
 #[derive(Debug)]
@@ -121,9 +90,9 @@ pub(crate) struct WhpVm {
     partition: WHV_PARTITION_HANDLE,
     // Surrogate process for memory mapping
     surrogate_process: SurrogateProcess,
-    /// Tracks host-side file mappings created by `map_file_cow` for
-    /// RAII cleanup. Keyed by host handle_base address.
-    file_mappings: Vec<OwnedFileMapping>,
+    /// Tracks host-side file mappings (view_base, mapping_handle) for
+    /// cleanup on unmap or drop. Only populated for MappedFile regions.
+    file_mappings: Vec<(HandleWrapper, *mut c_void)>,
 }
 
 // Safety: `WhpVm` is !Send because it holds `SurrogateProcess` which contains a raw pointer
@@ -131,8 +100,8 @@ pub(crate) struct WhpVm {
 // in the surrogate process. It is never dereferenced, only used for address arithmetic and
 // resource management (unmapping). This is a system resource that is not bound to the creating
 // thread and can be safely transferred between threads.
-// `OwnedFileMapping` contains a raw pointer (`view_base`) that is also a kernel resource
-// handle, safe to use from any thread.
+// `file_mappings` contains raw pointers that are also kernel resource handles,
+// safe to use from any thread.
 unsafe impl Send for WhpVm {}
 
 impl WhpVm {
@@ -250,14 +219,12 @@ impl VirtualMachine for WhpVm {
             )));
         }
 
-        // Track host-side file mappings for RAII cleanup.
-        // MappedFile regions have host views + handles that need
-        // UnmapViewOfFile + CloseHandle when the region is unmapped.
+        // Track host-side file mappings for cleanup on unmap or drop.
         if region.region_type == MemoryRegionType::MappedFile {
-            self.file_mappings.push(OwnedFileMapping {
-                view_base: region.host_region.start.handle_base as *mut core::ffi::c_void,
-                mapping_handle: region.host_region.start.from_handle,
-            });
+            self.file_mappings.push((
+                region.host_region.start.from_handle,
+                region.host_region.start.handle_base as *mut c_void,
+            ));
         }
 
         Ok(())
@@ -279,11 +246,16 @@ impl VirtualMachine for WhpVm {
             .unmap(region.host_region.start.handle_base);
 
         // Clean up host-side file mapping resources for MappedFile regions.
-        // OwnedFileMapping::Drop calls UnmapViewOfFile + CloseHandle.
         if region.region_type == MemoryRegionType::MappedFile {
-            let handle_base = region.host_region.start.handle_base;
-            self.file_mappings
-                .retain(|fm| fm.view_base as usize != handle_base);
+            let handle_base = region.host_region.start.handle_base as *mut c_void;
+            if let Some(pos) = self
+                .file_mappings
+                .iter()
+                .position(|(_, vb)| *vb == handle_base)
+            {
+                let (handle, view) = self.file_mappings.swap_remove(pos);
+                release_file_mapping(view, handle);
+            }
         }
 
         Ok(())
@@ -840,6 +812,11 @@ impl DebuggableVm for WhpVm {
 
 impl Drop for WhpVm {
     fn drop(&mut self) {
+        // Clean up any remaining file mappings that weren't explicitly unmapped.
+        for (handle, view) in self.file_mappings.drain(..) {
+            release_file_mapping(view, handle);
+        }
+
         // HyperlightVm::drop() calls set_dropped() before this runs.
         // set_dropped() ensures no WHvCancelRunVirtualProcessor calls are in progress
         // or will be made in the future, so it's safe to delete the partition.
