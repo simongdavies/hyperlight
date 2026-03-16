@@ -31,7 +31,7 @@ pub(crate) mod surrogate_process;
 pub(crate) mod surrogate_process_manager;
 /// Safe wrappers around windows types like `PSTR`
 #[cfg(target_os = "windows")]
-pub(crate) mod wrappers;
+pub mod wrappers;
 
 #[cfg(crashdump)]
 pub(crate) mod crashdump;
