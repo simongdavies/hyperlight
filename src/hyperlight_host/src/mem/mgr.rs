@@ -68,6 +68,7 @@ fn mapping_kind_to_flags(kind: &MappingKind) -> (MemoryRegionFlags, MemoryRegion
             }
             (flags, MemoryRegionType::Scratch)
         }
+        MappingKind::Unmapped => (MemoryRegionFlags::empty(), MemoryRegionType::Snapshot),
     }
 }
 

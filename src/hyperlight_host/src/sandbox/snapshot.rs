@@ -471,6 +471,7 @@ impl Snapshot {
                             writable: false,
                             executable: bm.executable,
                         }),
+                        MappingKind::Unmapped => continue,
                     };
                     let new_gpa = phys_seen.entry(mapping.phys_base).or_insert_with(|| {
                         let new_offset = snapshot_memory.len();

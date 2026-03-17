@@ -140,6 +140,7 @@ impl<'a> ResolvedGpa<&'a [u8], &'a [u8]> {
     }
 }
 #[cfg(any(gdb, feature = "mem_profile"))]
+#[allow(unused)] // may be unused when nanvix-unstable is also enabled
 pub(crate) trait ReadableSharedMemory {
     fn copy_to_slice(&self, slice: &mut [u8], offset: usize) -> Result<()>;
 }
@@ -177,7 +178,7 @@ impl<T: coherence_hack::SharedMemoryAsRefMarker> ReadableSharedMemory for T {
 }
 #[cfg(any(gdb, feature = "mem_profile"))]
 impl<Sn: ReadableSharedMemory, Sc: ReadableSharedMemory> ResolvedGpa<Sn, Sc> {
-    #[cfg(feature = "gdb")]
+    #[allow(unused)] // may be unused when nanvix-unstable is also enabled
     pub(crate) fn copy_to_slice(&self, slice: &mut [u8]) -> Result<()> {
         match &self.base {
             BaseGpaRegion::Snapshot(sn) => sn.copy_to_slice(slice, self.offset),
