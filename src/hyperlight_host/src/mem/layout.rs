@@ -68,13 +68,149 @@ use tracing::{Span, instrument};
 
 use super::memory_region::MemoryRegionType::{Code, Heap, InitData, Peb};
 use super::memory_region::{
-    DEFAULT_GUEST_BLOB_MEM_FLAGS, MemoryRegion_, MemoryRegionFlags, MemoryRegionKind,
+    DEFAULT_GUEST_BLOB_MEM_FLAGS, MemoryRegion, MemoryRegion_, MemoryRegionFlags, MemoryRegionKind,
     MemoryRegionVecBuilder,
 };
-use super::shared_mem::{ExclusiveSharedMemory, SharedMemory};
+#[cfg(any(gdb, feature = "mem_profile"))]
+use super::shared_mem::HostSharedMemory;
+use super::shared_mem::{ExclusiveSharedMemory, ReadonlySharedMemory};
 use crate::error::HyperlightError::{MemoryRequestTooBig, MemoryRequestTooSmall};
 use crate::sandbox::SandboxConfiguration;
 use crate::{Result, new_error};
+
+pub(crate) enum BaseGpaRegion<Sn, Sc> {
+    Snapshot(Sn),
+    Scratch(Sc),
+    Mmap(MemoryRegion),
+}
+
+// It's an invariant of this type, checked on creation, that the
+// offset is in bounds for the base region.
+pub(crate) struct ResolvedGpa<Sn, Sc> {
+    pub(crate) offset: usize,
+    pub(crate) base: BaseGpaRegion<Sn, Sc>,
+}
+
+impl AsRef<[u8]> for ExclusiveSharedMemory {
+    fn as_ref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+impl AsRef<[u8]> for ReadonlySharedMemory {
+    fn as_ref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+impl<Sn, Sc> ResolvedGpa<Sn, Sc> {
+    pub(crate) fn with_memories<Sn2, Sc2>(self, sn: Sn2, sc: Sc2) -> ResolvedGpa<Sn2, Sc2> {
+        ResolvedGpa {
+            offset: self.offset,
+            base: match self.base {
+                BaseGpaRegion::Snapshot(_) => BaseGpaRegion::Snapshot(sn),
+                BaseGpaRegion::Scratch(_) => BaseGpaRegion::Scratch(sc),
+                BaseGpaRegion::Mmap(r) => BaseGpaRegion::Mmap(r),
+            },
+        }
+    }
+}
+impl<'a> BaseGpaRegion<&'a [u8], &'a [u8]> {
+    pub(crate) fn as_ref<'b>(&'b self) -> &'a [u8] {
+        match self {
+            BaseGpaRegion::Snapshot(sn) => sn,
+            BaseGpaRegion::Scratch(sc) => sc,
+            BaseGpaRegion::Mmap(r) => unsafe {
+                #[allow(clippy::useless_conversion)]
+                let host_region_base: usize = r.host_region.start.into();
+                #[allow(clippy::useless_conversion)]
+                let host_region_end: usize = r.host_region.end.into();
+                let len = host_region_end - host_region_base;
+                std::slice::from_raw_parts(host_region_base as *const u8, len)
+            },
+        }
+    }
+}
+impl<'a> ResolvedGpa<&'a [u8], &'a [u8]> {
+    pub(crate) fn as_ref<'b>(&'b self) -> &'a [u8] {
+        let base = self.base.as_ref();
+        if self.offset > base.len() {
+            return &[];
+        }
+        &self.base.as_ref()[self.offset..]
+    }
+}
+#[cfg(any(gdb, feature = "mem_profile"))]
+pub(crate) trait ReadableSharedMemory {
+    fn copy_to_slice(&self, slice: &mut [u8], offset: usize) -> Result<()>;
+}
+#[cfg(any(gdb, feature = "mem_profile"))]
+impl ReadableSharedMemory for &HostSharedMemory {
+    fn copy_to_slice(&self, slice: &mut [u8], offset: usize) -> Result<()> {
+        HostSharedMemory::copy_to_slice(self, slice, offset)
+    }
+}
+#[cfg(any(gdb, feature = "mem_profile"))]
+mod coherence_hack {
+    use super::{ExclusiveSharedMemory, ReadonlySharedMemory};
+    #[allow(unused)] // it actually is; see the impl below
+    pub(super) trait SharedMemoryAsRefMarker: AsRef<[u8]> {}
+    impl SharedMemoryAsRefMarker for ExclusiveSharedMemory {}
+    impl SharedMemoryAsRefMarker for &ExclusiveSharedMemory {}
+    impl SharedMemoryAsRefMarker for ReadonlySharedMemory {}
+    impl SharedMemoryAsRefMarker for &ReadonlySharedMemory {}
+}
+#[cfg(any(gdb, feature = "mem_profile"))]
+impl<T: coherence_hack::SharedMemoryAsRefMarker> ReadableSharedMemory for T {
+    fn copy_to_slice(&self, slice: &mut [u8], offset: usize) -> Result<()> {
+        let ss: &[u8] = self.as_ref();
+        let end = offset + slice.len();
+        if end > ss.len() {
+            return Err(new_error!(
+                "Attempt to read up to {} in memory of size {}",
+                offset + slice.len(),
+                self.as_ref().len()
+            ));
+        }
+        slice.copy_from_slice(&ss[offset..end]);
+        Ok(())
+    }
+}
+#[cfg(any(gdb, feature = "mem_profile"))]
+impl<Sn: ReadableSharedMemory, Sc: ReadableSharedMemory> ResolvedGpa<Sn, Sc> {
+    #[cfg(feature = "gdb")]
+    pub(crate) fn copy_to_slice(&self, slice: &mut [u8]) -> Result<()> {
+        match &self.base {
+            BaseGpaRegion::Snapshot(sn) => sn.copy_to_slice(slice, self.offset),
+            BaseGpaRegion::Scratch(sc) => sc.copy_to_slice(slice, self.offset),
+            BaseGpaRegion::Mmap(r) => unsafe {
+                #[allow(clippy::useless_conversion)]
+                let host_region_base: usize = r.host_region.start.into();
+                #[allow(clippy::useless_conversion)]
+                let host_region_end: usize = r.host_region.end.into();
+                let len = host_region_end - host_region_base;
+                // Safety: it's a documented invariant of MemoryRegion
+                // that the memory must remain alive as long as the
+                // sandbox is alive, and the way this code is used,
+                // the lifetimes of the snapshot and scratch memories
+                // ensure that the sandbox is still alive. This could
+                // perhaps be cleaned up/improved/made harder to
+                // misuse significantly, but it would require a much
+                // larger rework.
+                let ss = std::slice::from_raw_parts(host_region_base as *const u8, len);
+                let end = self.offset + slice.len();
+                if end > ss.len() {
+                    return Err(new_error!(
+                        "Attempt to read up to {} in memory of size {}",
+                        self.offset + slice.len(),
+                        ss.len()
+                    ));
+                }
+                slice.copy_from_slice(&ss[self.offset..end]);
+                Ok(())
+            },
+        }
+    }
+}
 
 #[derive(Copy, Clone)]
 pub(crate) struct SandboxMemoryLayout {
@@ -108,6 +244,9 @@ pub(crate) struct SandboxMemoryLayout {
     // The size of the scratch region in physical memory; note that
     // this will appear under the top of physical memory.
     scratch_size: usize,
+    // The size of the snapshot region in physical memory; note that
+    // this will appear somewhere near the base of physical memory.
+    snapshot_size: usize,
 }
 
 impl Debug for SandboxMemoryLayout {
@@ -242,8 +381,7 @@ impl SandboxMemoryLayout {
         // make sure init data starts at 4K boundary
         let init_data_offset =
             (guest_heap_buffer_offset + heap_size).next_multiple_of(PAGE_SIZE_USIZE);
-
-        Ok(Self {
+        let mut ret = Self {
             peb_offset,
             heap_size,
             peb_input_data_offset,
@@ -262,7 +400,10 @@ impl SandboxMemoryLayout {
             init_data_permissions,
             pt_size: None,
             scratch_size,
-        })
+            snapshot_size: 0,
+        };
+        ret.set_snapshot_size(ret.get_memory_size()?);
+        Ok(ret)
     }
 
     /// Get the offset in guest memory to the output data size
@@ -458,8 +599,15 @@ impl SandboxMemoryLayout {
         if self.scratch_size < min_scratch {
             return Err(MemoryRequestTooSmall(self.scratch_size, min_scratch));
         }
+        let old_pt_size = self.pt_size.unwrap_or(0);
+        self.snapshot_size = self.snapshot_size - old_pt_size + size;
         self.pt_size = Some(size);
         Ok(())
+    }
+
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
+    pub(crate) fn set_snapshot_size(&mut self, new_size: usize) {
+        self.snapshot_size = new_size;
     }
 
     /// Get the size of the memory region used for page tables
@@ -576,10 +724,10 @@ impl SandboxMemoryLayout {
         Ok(())
     }
 
-    /// Write the finished memory layout to `shared_mem` and return
-    /// `Ok` if successful.
+    /// Write the finished memory layout to `mem` and return `Ok` if
+    /// successful.
     ///
-    /// Note: `shared_mem` may have been modified, even if `Err` was returned
+    /// Note: `mem` may have been modified, even if `Err` was returned
     /// from this function.
     #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
     pub(crate) fn write_peb(&self, mem: &mut [u8]) -> Result<()> {
@@ -670,6 +818,37 @@ impl SandboxMemoryLayout {
         // [`SandboxMemoryManager::update_scratch_bookkeeping`].
 
         Ok(())
+    }
+
+    /// Determine what region this gpa is in, and its offset into that region
+    pub(crate) fn resolve_gpa(
+        &self,
+        gpa: u64,
+        mmap_regions: &[MemoryRegion],
+    ) -> Option<ResolvedGpa<(), ()>> {
+        let scratch_base = hyperlight_common::layout::scratch_base_gpa(self.scratch_size);
+        if gpa >= scratch_base && gpa < scratch_base + self.scratch_size as u64 {
+            return Some(ResolvedGpa {
+                offset: (gpa - scratch_base) as usize,
+                base: BaseGpaRegion::Scratch(()),
+            });
+        } else if gpa >= SandboxMemoryLayout::BASE_ADDRESS as u64
+            && gpa < SandboxMemoryLayout::BASE_ADDRESS as u64 + self.snapshot_size as u64
+        {
+            return Some(ResolvedGpa {
+                offset: gpa as usize - SandboxMemoryLayout::BASE_ADDRESS,
+                base: BaseGpaRegion::Snapshot(()),
+            });
+        }
+        for rgn in mmap_regions {
+            if gpa >= rgn.guest_region.start as u64 && gpa < rgn.guest_region.end as u64 {
+                return Some(ResolvedGpa {
+                    offset: gpa as usize - rgn.guest_region.start,
+                    base: BaseGpaRegion::Mmap(rgn.clone()),
+                });
+            }
+        }
+        None
     }
 }
 

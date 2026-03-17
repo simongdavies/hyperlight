@@ -240,10 +240,6 @@ pub enum HyperlightError {
     #[error("Failed To Convert Return Value {0:?} to {1:?}")]
     ReturnValueConversionFailure(ReturnValue, &'static str),
 
-    /// Attempted to process a snapshot but the snapshot size does not match the current memory size
-    #[error("Snapshot Size Mismatch: Memory Size {0:?} Snapshot Size {1:?}")]
-    SnapshotSizeMismatch(usize, usize),
-
     /// Tried to restore snapshot to a sandbox that is not the same as the one the snapshot was taken from
     #[error("Snapshot was taken from a different sandbox")]
     SnapshotSandboxMismatch,
@@ -335,7 +331,6 @@ impl HyperlightError {
             | HyperlightError::PoisonedSandbox
             | HyperlightError::ExecutionAccessViolation(_)
             | HyperlightError::MemoryAccessViolation(_, _, _)
-            | HyperlightError::SnapshotSizeMismatch(_, _)
             | HyperlightError::MemoryRegionSizeMismatch(_, _, _)
             // HyperlightVmError::Restore is already handled manually in restore(), but we mark it
             // as poisoning here too for defense in depth.

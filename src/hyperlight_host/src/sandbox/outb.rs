@@ -245,9 +245,7 @@ mod tests {
 
     use super::outb_log;
     use crate::GuestBinary;
-    use crate::mem::layout::SandboxMemoryLayout;
     use crate::mem::mgr::SandboxMemoryManager;
-    use crate::mem::shared_mem::SharedMemory;
     use crate::sandbox::SandboxConfiguration;
     use crate::sandbox::outb::GuestLogData;
     use crate::testing::log_values::test_value_as_str;
