@@ -447,6 +447,8 @@ impl Snapshot {
         sregs: CommonSpecialRegisters,
         entrypoint: NextAction,
     ) -> Result<Self> {
+        use std::collections::HashMap;
+        let mut phys_seen = HashMap::<u64, usize>::new();
         let memory = shared_mem.with_contents(|snap_c| {
             scratch_mem.with_contents(|scratch_c| {
                 // Pass 1: count how many pages need to live
@@ -458,9 +460,6 @@ impl Snapshot {
                 let pt_buf = GuestPageTableBuffer::new(layout.get_pt_base_gpa() as usize);
                 let mut snapshot_memory: Vec<u8> = Vec::new();
                 for (mapping, contents) in live_pages {
-                    let new_offset = snapshot_memory.len();
-                    snapshot_memory.extend(contents);
-                    let new_gpa = new_offset + SandboxMemoryLayout::BASE_ADDRESS;
                     let kind = match mapping.kind {
                         MappingKind::Cow(cm) => MappingKind::Cow(cm),
                         MappingKind::Basic(bm) if bm.writable => MappingKind::Cow(CowMapping {
@@ -473,8 +472,13 @@ impl Snapshot {
                             executable: bm.executable,
                         }),
                     };
+                    let new_gpa = phys_seen.entry(mapping.phys_base).or_insert_with(|| {
+                        let new_offset = snapshot_memory.len();
+                        snapshot_memory.extend(contents);
+                        new_offset + SandboxMemoryLayout::BASE_ADDRESS
+                    });
                     let mapping = Mapping {
-                        phys_base: new_gpa as u64,
+                        phys_base: *new_gpa as u64,
                         virt_base: mapping.virt_base,
                         len: PAGE_SIZE as u64,
                         kind,
