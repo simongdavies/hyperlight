@@ -282,7 +282,7 @@ pub(crate) fn prepare_file_cow(
 
     // Validate alignment eagerly to fail fast before allocating OS resources.
     let page_size = page_size::get();
-    if guest_base as usize % page_size != 0 {
+    if !(guest_base as usize).is_multiple_of(page_size) {
         log_then_return!(
             "map_file_cow: guest_base {:#x} is not page-aligned (page size: {:#x})",
             guest_base,
