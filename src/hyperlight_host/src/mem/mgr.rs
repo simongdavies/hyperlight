@@ -303,17 +303,6 @@ impl SandboxMemoryManager<ExclusiveSharedMemory> {
         Ok(Self::new(layout, shared_mem, scratch_mem, entrypoint))
     }
 
-    /// Write memory layout
-    #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
-    pub(crate) fn write_memory_layout(&mut self) -> Result<()> {
-        let mem_size = self.shared_mem.mem_size();
-        self.layout.write(
-            &mut self.shared_mem,
-            SandboxMemoryLayout::BASE_ADDRESS,
-            mem_size,
-        )
-    }
-
     /// Wraps ExclusiveSharedMemory::build
     // Morally, this should not have to be a Result: this operation is
     // infallible. The source of the Result is

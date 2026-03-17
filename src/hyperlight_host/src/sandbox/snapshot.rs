@@ -382,6 +382,8 @@ impl Snapshot {
             &mut memory[layout.get_guest_code_offset()..],
         )?;
 
+        layout.write_peb(&mut memory)?;
+
         blob.map(|x| layout.write_init_data(&mut memory, x.data))
             .transpose()?;
 

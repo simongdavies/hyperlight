@@ -104,10 +104,6 @@ pub enum HyperlightError {
     #[error("Unsupported type: {0}")]
     GuestInterfaceUnsupportedType(String),
 
-    /// The guest offset is invalid.
-    #[error("The guest offset {0} is invalid.")]
-    GuestOffsetIsInvalid(usize),
-
     /// The guest binary was built with a different hyperlight-guest-bin version than the host expects.
     /// Hyperlight currently provides no backwards compatibility guarantees for guest binaries,
     /// so the guest and host versions must match exactly. This might change in the future.
@@ -369,7 +365,6 @@ impl HyperlightError {
             | HyperlightError::GuestExecutionHungOnHostFunctionCall()
             | HyperlightError::GuestFunctionCallAlreadyInProgress()
             | HyperlightError::GuestInterfaceUnsupportedType(_)
-            | HyperlightError::GuestOffsetIsInvalid(_)
             | HyperlightError::HostFunctionNotFound(_)
             | HyperlightError::HyperlightVmError(HyperlightVmError::Create(_))
             | HyperlightError::HyperlightVmError(HyperlightVmError::Initialize(_))

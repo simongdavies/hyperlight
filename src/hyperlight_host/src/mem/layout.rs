@@ -72,9 +72,7 @@ use super::memory_region::{
     MemoryRegionVecBuilder,
 };
 use super::shared_mem::{ExclusiveSharedMemory, SharedMemory};
-use crate::error::HyperlightError::{
-    GuestOffsetIsInvalid, MemoryRequestTooBig, MemoryRequestTooSmall,
-};
+use crate::error::HyperlightError::{MemoryRequestTooBig, MemoryRequestTooSmall};
 use crate::sandbox::SandboxConfiguration;
 use crate::{Result, new_error};
 
@@ -584,68 +582,70 @@ impl SandboxMemoryLayout {
     /// Note: `shared_mem` may have been modified, even if `Err` was returned
     /// from this function.
     #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
-    pub(crate) fn write(
-        &self,
-        shared_mem: &mut ExclusiveSharedMemory,
-        guest_offset: usize,
-        //TODO: Unused remove
-        _size: usize,
-    ) -> Result<()> {
+    pub(crate) fn write_peb(&self, mem: &mut [u8]) -> Result<()> {
+        let guest_offset = SandboxMemoryLayout::BASE_ADDRESS;
+
+        fn write_u64(mem: &mut [u8], offset: usize, value: u64) -> Result<()> {
+            if offset + 8 > mem.len() {
+                return Err(new_error!(
+                    "Cannot write to offset {} in slice of len {}",
+                    offset,
+                    mem.len()
+                ));
+            }
+            mem[offset..offset + 8].copy_from_slice(&u64::to_ne_bytes(value));
+            Ok(())
+        }
+
         macro_rules! get_address {
             ($something:ident) => {
                 u64::try_from(guest_offset + self.$something)?
             };
         }
 
-        if guest_offset != SandboxMemoryLayout::BASE_ADDRESS
-            && guest_offset != shared_mem.base_addr()
-        {
-            return Err(GuestOffsetIsInvalid(guest_offset));
-        }
-
         // Start of setting up the PEB. The following are in the order of the PEB fields
 
-        // Skip guest_dispatch_function_ptr_offset because it is set by the guest
-
-        // Skip code, is set when loading binary
-        // skip outb and outb context, is set when running in_proc
-
         // Set up input buffer pointer
-        shared_mem.write_u64(
+        write_u64(
+            mem,
             self.get_input_data_size_offset(),
             self.sandbox_memory_config
                 .get_input_data_size()
                 .try_into()?,
         )?;
-        shared_mem.write_u64(
+        write_u64(
+            mem,
             self.get_input_data_pointer_offset(),
             self.get_input_data_buffer_gva(),
         )?;
 
         // Set up output buffer pointer
-        shared_mem.write_u64(
+        write_u64(
+            mem,
             self.get_output_data_size_offset(),
             self.sandbox_memory_config
                 .get_output_data_size()
                 .try_into()?,
         )?;
-        shared_mem.write_u64(
+        write_u64(
+            mem,
             self.get_output_data_pointer_offset(),
             self.get_output_data_buffer_gva(),
         )?;
 
         // Set up init data pointer
-        shared_mem.write_u64(
+        write_u64(
+            mem,
             self.get_init_data_size_offset(),
             (self.get_unaligned_memory_size() - self.init_data_offset).try_into()?,
         )?;
         let addr = get_address!(init_data_offset);
-        shared_mem.write_u64(self.get_init_data_pointer_offset(), addr)?;
+        write_u64(mem, self.get_init_data_pointer_offset(), addr)?;
 
         // Set up heap buffer pointer
         let addr = get_address!(guest_heap_buffer_offset);
-        shared_mem.write_u64(self.get_heap_size_offset(), self.heap_size.try_into()?)?;
-        shared_mem.write_u64(self.get_heap_pointer_offset(), addr)?;
+        write_u64(mem, self.get_heap_size_offset(), self.heap_size.try_into()?)?;
+        write_u64(mem, self.get_heap_pointer_offset(), addr)?;
 
         // Set up the file_mappings descriptor in the PEB.
         // - The `size` field holds the number of valid FileMappingInfo

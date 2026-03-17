@@ -274,13 +274,7 @@ mod tests {
         let new_mgr = || {
             let bin = GuestBinary::FilePath(simple_guest_as_string().unwrap());
             let snapshot = crate::sandbox::snapshot::Snapshot::from_env(bin, sandbox_cfg).unwrap();
-            let mut mgr = SandboxMemoryManager::from_snapshot(&snapshot).unwrap();
-            let mem_size = mgr.get_shared_mem_mut().mem_size();
-            let layout = mgr.layout;
-            let shared_mem = mgr.get_shared_mem_mut();
-            layout
-                .write(shared_mem, SandboxMemoryLayout::BASE_ADDRESS, mem_size)
-                .unwrap();
+            let mgr = SandboxMemoryManager::from_snapshot(&snapshot).unwrap();
             let (hmgr, _) = mgr.build().unwrap();
             hmgr
         };
@@ -386,13 +380,7 @@ mod tests {
                 let bin = GuestBinary::FilePath(simple_guest_as_string().unwrap());
                 let snapshot =
                     crate::sandbox::snapshot::Snapshot::from_env(bin, sandbox_cfg).unwrap();
-                let mut mgr = SandboxMemoryManager::from_snapshot(&snapshot).unwrap();
-                let mem_size = mgr.get_shared_mem_mut().mem_size();
-                let layout = mgr.layout;
-                let shared_mem = mgr.get_shared_mem_mut();
-                layout
-                    .write(shared_mem, SandboxMemoryLayout::BASE_ADDRESS, mem_size)
-                    .unwrap();
+                let mgr = SandboxMemoryManager::from_snapshot(&snapshot).unwrap();
                 let (hmgr, _) = mgr.build().unwrap();
                 hmgr
             };
