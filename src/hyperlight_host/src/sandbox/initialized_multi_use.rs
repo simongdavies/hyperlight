@@ -15,10 +15,6 @@ limitations under the License.
 */
 
 use std::collections::HashSet;
-#[cfg(unix)]
-use std::os::fd::AsRawFd;
-#[cfg(unix)]
-use std::os::linux::fs::MetadataExt;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -30,31 +26,26 @@ use hyperlight_common::flatbuffer_wrappers::function_types::{
 };
 use hyperlight_common::flatbuffer_wrappers::util::estimate_flatbuffer_capacity;
 use tracing::{Span, instrument};
-#[cfg(target_os = "windows")]
-use windows::Win32::Foundation::CloseHandle;
-#[cfg(target_os = "windows")]
-use windows::Win32::System::Memory::{
-    CreateFileMappingW, FILE_MAP_READ, MapViewOfFile, PAGE_READONLY, UnmapViewOfFile,
-};
 
 use super::Callable;
+use super::file_mapping::prepare_file_cow;
 use super::host_funcs::FunctionRegistry;
 use super::snapshot::Snapshot;
 use crate::HyperlightError::{self, SnapshotSandboxMismatch};
+use crate::Result;
 use crate::func::{ParameterTuple, SupportedReturnType};
 use crate::hypervisor::InterruptHandle;
 use crate::hypervisor::hyperlight_vm::{HyperlightVm, HyperlightVmError};
-#[cfg(target_os = "windows")]
-use crate::hypervisor::wrappers::HandleWrapper;
-#[cfg(target_os = "windows")]
-use crate::mem::memory_region::{HostRegionBase, MemoryRegionKind};
-use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags, MemoryRegionType};
+#[cfg(target_os = "linux")]
+use crate::log_then_return;
+use crate::mem::memory_region::MemoryRegion;
+#[cfg(target_os = "linux")]
+use crate::mem::memory_region::MemoryRegionFlags;
 use crate::mem::mgr::SandboxMemoryManager;
 use crate::mem::shared_mem::HostSharedMemory;
 use crate::metrics::{
     METRIC_GUEST_ERROR, METRIC_GUEST_ERROR_LABEL_CODE, maybe_time_and_emit_guest_call,
 };
-use crate::{Result, log_then_return};
 
 /// A fully initialized sandbox that can execute guest functions multiple times.
 ///
@@ -565,127 +556,26 @@ impl MultiUseSandbox {
         if self.poisoned {
             return Err(crate::HyperlightError::PoisonedSandbox);
         }
-        #[cfg(windows)]
-        {
-            use std::os::windows::io::AsRawHandle;
+        // Phase 1: host-side OS work (open file, create mapping)
+        let mut prepared = prepare_file_cow(file_path, guest_base)?;
 
-            use windows::Win32::Foundation::HANDLE;
+        // Phase 2: VM-side work (map into guest address space)
+        let region = prepared.to_memory_region()?;
 
-            let file = std::fs::File::options().read(true).open(file_path)?;
-            let file_size = file.metadata()?.len();
-            if file_size == 0 {
-                log_then_return!("map_file_cow: cannot map an empty file: {:?}", file_path);
-            }
-            let page_size = page_size::get();
-            let size = usize::try_from(file_size).map_err(|_| {
-                HyperlightError::Error(format!(
-                    "File size {file_size} exceeds addressable range on this platform"
-                ))
-            })?;
-            let size = size.div_ceil(page_size) * page_size;
+        // Reset snapshot since we are mutating the sandbox state
+        self.snapshot = None;
 
-            let file_handle = HANDLE(file.as_raw_handle());
+        unsafe { self.vm.map_region(&region) }
+            .map_err(HyperlightVmError::MapRegion)
+            .map_err(crate::HyperlightError::HyperlightVmError)?;
 
-            // Create a read-only file mapping object backed by the actual file.
-            // Pass 0,0 for size to use the file's actual size — Windows will
-            // NOT extend a read-only file, so requesting page-aligned size
-            // would fail for files smaller than one page.  MapViewOfFile and
-            // the surrogate process will round up to page boundaries internally.
-            let mapping_handle =
-                unsafe { CreateFileMappingW(file_handle, None, PAGE_READONLY, 0, 0, None) }
-                    .map_err(|e| {
-                        HyperlightError::Error(format!("CreateFileMappingW failed: {e}"))
-                    })?;
+        // Successfully mapped — transfer host resource ownership to
+        // the VM layer.
+        let size = prepared.size as u64;
+        prepared.mark_consumed();
+        self.mem_mgr.mapped_rgns += 1;
 
-            // Map a read-only view into the host process.
-            // Passing 0 for dwNumberOfBytesToMap maps the entire file; the OS
-            // rounds up to the next page boundary and zero-fills the remainder.
-            let view = unsafe { MapViewOfFile(mapping_handle, FILE_MAP_READ, 0, 0, 0) };
-            if view.Value.is_null() {
-                // Clean up the mapping handle before returning
-                unsafe {
-                    let _ = CloseHandle(mapping_handle);
-                }
-                log_then_return!(
-                    "MapViewOfFile failed: {:?}",
-                    std::io::Error::last_os_error()
-                );
-            }
-
-            let host_base = HostRegionBase {
-                from_handle: HandleWrapper::from(mapping_handle),
-                handle_base: view.Value as usize,
-                handle_size: size,
-                offset: 0,
-            };
-
-            let host_end =
-                <crate::mem::memory_region::HostGuestMemoryRegion as MemoryRegionKind>::add(
-                    host_base, size,
-                );
-
-            let region = MemoryRegion {
-                host_region: host_base..host_end,
-                guest_region: guest_base as usize..guest_base as usize + size,
-                flags: MemoryRegionFlags::READ | MemoryRegionFlags::EXECUTE,
-                region_type: MemoryRegionType::MappedFile,
-            };
-
-            // Reset snapshot since we are mutating the sandbox state
-            self.snapshot = None;
-
-            if let Err(err) = unsafe { self.vm.map_region(&region) }
-                .map_err(HyperlightVmError::MapRegion)
-                .map_err(HyperlightError::HyperlightVmError)
-            {
-                // Clean up host-side resources on failure
-                unsafe {
-                    let _ = UnmapViewOfFile(view);
-                    let _ = CloseHandle(mapping_handle);
-                }
-                return Err(err);
-            }
-
-            self.mem_mgr.mapped_rgns += 1;
-
-            Ok(size as u64)
-        }
-        #[cfg(unix)]
-        unsafe {
-            let file = std::fs::File::options()
-                .read(true)
-                .write(true)
-                .open(file_path)?;
-            let file_size = file.metadata()?.st_size();
-            if file_size == 0 {
-                log_then_return!("map_file_cow: cannot map an empty file: {:?}", file_path);
-            }
-            let page_size = page_size::get();
-            let size = (file_size as usize).div_ceil(page_size) * page_size;
-            let base = libc::mmap(
-                std::ptr::null_mut(),
-                size,
-                libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
-                libc::MAP_PRIVATE,
-                file.as_raw_fd(),
-                0,
-            );
-            if base == libc::MAP_FAILED {
-                log_then_return!("mmap error: {:?}", std::io::Error::last_os_error());
-            }
-
-            if let Err(err) = self.map_region(&MemoryRegion {
-                host_region: base as usize..base.wrapping_add(size) as usize,
-                guest_region: guest_base as usize..guest_base as usize + size,
-                flags: MemoryRegionFlags::READ | MemoryRegionFlags::EXECUTE,
-                region_type: MemoryRegionType::MappedFile,
-            }) {
-                libc::munmap(base, size);
-                return Err(err);
-            };
-
-            Ok(size as u64)
-        }
+        Ok(size)
     }
 
     /// Calls a guest function with type-erased parameters and return values.
@@ -2008,6 +1898,128 @@ mod tests {
             actual2, expected_bytes,
             "Data should be readable after restore from snapshot"
         );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Tests the deferred `map_file_cow` flow: map a file on
+    /// `UninitializedSandbox` (before evolve), then evolve and verify
+    /// the guest can read the mapped content.
+    #[test]
+    fn test_map_file_cow_deferred_basic() {
+        let expected = b"deferred map_file_cow test data";
+        let (path, expected_bytes) =
+            create_test_file("hyperlight_test_map_file_cow_deferred.bin", expected);
+
+        let guest_base: u64 = 0x1_0000_0000;
+
+        let mut u_sbox = UninitializedSandbox::new(
+            GuestBinary::FilePath(simple_guest_as_string().expect("Guest Binary Missing")),
+            None,
+        )
+        .unwrap();
+
+        // Map the file before evolving — this defers the VM-side work.
+        let mapped_size = u_sbox.map_file_cow(&path, guest_base).unwrap();
+        assert!(mapped_size > 0, "mapped_size should be positive");
+        assert!(
+            mapped_size >= expected.len() as u64,
+            "mapped_size should be >= file content length"
+        );
+
+        // Evolve — deferred mappings are applied during this step.
+        let mut sbox: MultiUseSandbox = u_sbox.evolve().unwrap();
+
+        // Verify the guest can read the mapped content.
+        let actual: Vec<u8> = sbox
+            .call(
+                "ReadMappedBuffer",
+                (guest_base, expected_bytes.len() as u64, true),
+            )
+            .unwrap();
+
+        assert_eq!(
+            actual, expected_bytes,
+            "Guest should read back the exact file content after deferred mapping"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Tests that dropping an `UninitializedSandbox` with pending
+    /// deferred file mappings does not leak or crash — the
+    /// `PreparedFileMapping::Drop` should clean up host resources.
+    #[test]
+    fn test_map_file_cow_deferred_drop_without_evolve() {
+        let (path, _) = create_test_file(
+            "hyperlight_test_map_file_cow_deferred_drop.bin",
+            &[0xAA; 4096],
+        );
+
+        let guest_base: u64 = 0x1_0000_0000;
+
+        {
+            let mut u_sbox = UninitializedSandbox::new(
+                GuestBinary::FilePath(simple_guest_as_string().expect("Guest Binary Missing")),
+                None,
+            )
+            .unwrap();
+
+            u_sbox.map_file_cow(&path, guest_base).unwrap();
+            // u_sbox dropped here without evolving — PreparedFileMapping::drop
+            // should clean up host-side OS resources.
+        }
+
+        // If we get here without a crash/hang, cleanup worked.
+        // On Windows, also verify the file handle was released.
+        #[cfg(target_os = "windows")]
+        std::fs::remove_file(&path)
+            .expect("File should be deletable after dropping UninitializedSandbox");
+        #[cfg(not(target_os = "windows"))]
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Tests that `prepare_file_cow` rejects unaligned `guest_base`
+    /// addresses eagerly, before allocating any OS resources.
+    #[test]
+    fn test_map_file_cow_unaligned_guest_base() {
+        let (path, _) =
+            create_test_file("hyperlight_test_map_file_cow_unaligned.bin", &[0xBB; 4096]);
+
+        let mut u_sbox = UninitializedSandbox::new(
+            GuestBinary::FilePath(simple_guest_as_string().expect("Guest Binary Missing")),
+            None,
+        )
+        .unwrap();
+
+        // Use an intentionally unaligned address (page_size + 1).
+        let unaligned_base: u64 = (page_size::get() + 1) as u64;
+        let result = u_sbox.map_file_cow(&path, unaligned_base);
+        assert!(
+            result.is_err(),
+            "map_file_cow should reject unaligned guest_base"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Tests that `prepare_file_cow` rejects empty files.
+    #[test]
+    fn test_map_file_cow_empty_file() {
+        let temp_dir = std::env::temp_dir();
+        let path = temp_dir.join("hyperlight_test_map_file_cow_empty.bin");
+        let _ = std::fs::remove_file(&path);
+        std::fs::File::create(&path).unwrap(); // create empty file
+
+        let mut u_sbox = UninitializedSandbox::new(
+            GuestBinary::FilePath(simple_guest_as_string().expect("Guest Binary Missing")),
+            None,
+        )
+        .unwrap();
+
+        let guest_base: u64 = 0x1_0000_0000;
+        let result = u_sbox.map_file_cow(&path, guest_base);
+        assert!(result.is_err(), "map_file_cow should reject empty files");
 
         let _ = std::fs::remove_file(&path);
     }
