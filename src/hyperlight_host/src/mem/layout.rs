@@ -92,6 +92,7 @@ pub(crate) struct SandboxMemoryLayout {
     peb_output_data_offset: usize,
     peb_init_data_offset: usize,
     peb_heap_data_offset: usize,
+    #[cfg(feature = "nanvix-unstable")]
     peb_file_mappings_offset: usize,
 
     guest_heap_buffer_offset: usize,
@@ -113,57 +114,58 @@ pub(crate) struct SandboxMemoryLayout {
 
 impl Debug for SandboxMemoryLayout {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SandboxMemoryLayout")
-            .field(
-                "Total Memory Size",
-                &format_args!("{:#x}", self.get_memory_size().unwrap_or(0)),
-            )
-            .field("Heap Size", &format_args!("{:#x}", self.heap_size))
-            .field(
-                "Init Data Size",
-                &format_args!("{:#x}", self.init_data_size),
-            )
-            .field("PEB Address", &format_args!("{:#x}", self.peb_address))
-            .field("PEB Offset", &format_args!("{:#x}", self.peb_offset))
-            .field("Code Size", &format_args!("{:#x}", self.code_size))
-            .field(
-                "Input Data Offset",
-                &format_args!("{:#x}", self.peb_input_data_offset),
-            )
-            .field(
-                "Output Data Offset",
-                &format_args!("{:#x}", self.peb_output_data_offset),
-            )
-            .field(
-                "Init Data Offset",
-                &format_args!("{:#x}", self.peb_init_data_offset),
-            )
-            .field(
-                "Guest Heap Offset",
-                &format_args!("{:#x}", self.peb_heap_data_offset),
-            )
-            .field(
-                "File Mappings Offset",
-                &format_args!("{:#x}", self.peb_file_mappings_offset),
-            )
-            .field(
-                "Guest Heap Buffer Offset",
-                &format_args!("{:#x}", self.guest_heap_buffer_offset),
-            )
-            .field(
-                "Init Data Offset",
-                &format_args!("{:#x}", self.init_data_offset),
-            )
-            .field("PT Size", &format_args!("{:#x}", self.pt_size.unwrap_or(0)))
-            .field(
-                "Guest Code Offset",
-                &format_args!("{:#x}", self.guest_code_offset),
-            )
-            .field(
-                "Scratch region size",
-                &format_args!("{:#x}", self.scratch_size),
-            )
-            .finish()
+        let mut ff = f.debug_struct("SandboxMemoryLayout");
+        ff.field(
+            "Total Memory Size",
+            &format_args!("{:#x}", self.get_memory_size().unwrap_or(0)),
+        )
+        .field("Heap Size", &format_args!("{:#x}", self.heap_size))
+        .field(
+            "Init Data Size",
+            &format_args!("{:#x}", self.init_data_size),
+        )
+        .field("PEB Address", &format_args!("{:#x}", self.peb_address))
+        .field("PEB Offset", &format_args!("{:#x}", self.peb_offset))
+        .field("Code Size", &format_args!("{:#x}", self.code_size))
+        .field(
+            "Input Data Offset",
+            &format_args!("{:#x}", self.peb_input_data_offset),
+        )
+        .field(
+            "Output Data Offset",
+            &format_args!("{:#x}", self.peb_output_data_offset),
+        )
+        .field(
+            "Init Data Offset",
+            &format_args!("{:#x}", self.peb_init_data_offset),
+        )
+        .field(
+            "Guest Heap Offset",
+            &format_args!("{:#x}", self.peb_heap_data_offset),
+        );
+        #[cfg(feature = "nanvix-unstable")]
+        ff.field(
+            "File Mappings Offset",
+            &format_args!("{:#x}", self.peb_file_mappings_offset),
+        );
+        ff.field(
+            "Guest Heap Buffer Offset",
+            &format_args!("{:#x}", self.guest_heap_buffer_offset),
+        )
+        .field(
+            "Init Data Offset",
+            &format_args!("{:#x}", self.init_data_offset),
+        )
+        .field("PT Size", &format_args!("{:#x}", self.pt_size.unwrap_or(0)))
+        .field(
+            "Guest Code Offset",
+            &format_args!("{:#x}", self.guest_code_offset),
+        )
+        .field(
+            "Scratch region size",
+            &format_args!("{:#x}", self.scratch_size),
+        )
+        .finish()
     }
 }
 
@@ -213,6 +215,7 @@ impl SandboxMemoryLayout {
         let peb_output_data_offset = peb_offset + offset_of!(HyperlightPEB, output_stack);
         let peb_init_data_offset = peb_offset + offset_of!(HyperlightPEB, init_data);
         let peb_heap_data_offset = peb_offset + offset_of!(HyperlightPEB, guest_heap);
+        #[cfg(feature = "nanvix-unstable")]
         let peb_file_mappings_offset = peb_offset + offset_of!(HyperlightPEB, file_mappings);
 
         // The following offsets are the actual values that relate to memory layout,
@@ -227,11 +230,16 @@ impl SandboxMemoryLayout {
         // many file mappings the host will register, so we reserve space for
         // the maximum number.
         // The heap starts at the next page boundary after this reserved area.
+        #[cfg(feature = "nanvix-unstable")]
         let file_mappings_array_end = peb_offset
             + size_of::<HyperlightPEB>()
             + hyperlight_common::mem::MAX_FILE_MAPPINGS
                 * size_of::<hyperlight_common::mem::FileMappingInfo>();
+        #[cfg(feature = "nanvix-unstable")]
         let guest_heap_buffer_offset = file_mappings_array_end.next_multiple_of(PAGE_SIZE_USIZE);
+        #[cfg(not(feature = "nanvix-unstable"))]
+        let guest_heap_buffer_offset =
+            (peb_offset + size_of::<HyperlightPEB>()).next_multiple_of(PAGE_SIZE_USIZE);
 
         // make sure init data starts at 4K boundary
         let init_data_offset =
@@ -244,6 +252,7 @@ impl SandboxMemoryLayout {
             peb_output_data_offset,
             peb_init_data_offset,
             peb_heap_data_offset,
+            #[cfg(feature = "nanvix-unstable")]
             peb_file_mappings_offset,
             sandbox_memory_config: cfg,
             code_size,
@@ -367,22 +376,26 @@ impl SandboxMemoryLayout {
 
     /// Get the offset in guest memory to the file_mappings count field
     /// (the `size` field of the `GuestMemoryRegion` in the PEB).
+    #[cfg(feature = "nanvix-unstable")]
     pub(crate) fn get_file_mappings_size_offset(&self) -> usize {
         self.peb_file_mappings_offset
     }
 
     /// Get the offset in guest memory to the file_mappings pointer field.
+    #[cfg(feature = "nanvix-unstable")]
     fn get_file_mappings_pointer_offset(&self) -> usize {
         self.get_file_mappings_size_offset() + size_of::<u64>()
     }
 
     /// Get the offset in snapshot memory where the FileMappingInfo array starts
     /// (immediately after the PEB struct, within the same page).
+    #[cfg(feature = "nanvix-unstable")]
     pub(crate) fn get_file_mappings_array_offset(&self) -> usize {
         self.peb_offset + size_of::<HyperlightPEB>()
     }
 
     /// Get the guest address of the FileMappingInfo array.
+    #[cfg(feature = "nanvix-unstable")]
     fn get_file_mappings_array_gva(&self) -> u64 {
         (Self::BASE_ADDRESS + self.get_file_mappings_array_offset()) as u64
     }
@@ -484,14 +497,20 @@ impl SandboxMemoryLayout {
         }
 
         // PEB + preallocated FileMappingInfo array
-        let peb_and_array_size = size_of::<HyperlightPEB>()
-            + hyperlight_common::mem::MAX_FILE_MAPPINGS
-                * size_of::<hyperlight_common::mem::FileMappingInfo>();
-        let heap_offset = builder.push_page_aligned(
-            peb_and_array_size,
-            MemoryRegionFlags::READ | MemoryRegionFlags::WRITE,
-            Peb,
-        );
+        #[cfg(feature = "nanvix-unstable")]
+        let heap_offset = {
+            let peb_and_array_size = size_of::<HyperlightPEB>()
+                + hyperlight_common::mem::MAX_FILE_MAPPINGS
+                    * size_of::<hyperlight_common::mem::FileMappingInfo>();
+            builder.push_page_aligned(
+                peb_and_array_size,
+                MemoryRegionFlags::READ | MemoryRegionFlags::WRITE,
+                Peb,
+            )
+        };
+        #[cfg(not(feature = "nanvix-unstable"))]
+        let heap_offset =
+            builder.push_page_aligned(size_of::<HyperlightPEB>(), MemoryRegionFlags::READ, Peb);
 
         let expected_heap_offset = TryInto::<usize>::try_into(self.guest_heap_buffer_offset)?;
 
@@ -634,8 +653,11 @@ impl SandboxMemoryLayout {
         //   later by map_file_cow / evolve).
         // - The `ptr` field holds the guest address of the preallocated
         //   FileMappingInfo array
-        shared_mem.write_u64(self.get_file_mappings_size_offset(), 0)?;
-        shared_mem.write_u64(
+        #[cfg(feature = "nanvix-unstable")]
+        write_u64(mem, self.get_file_mappings_size_offset(), 0)?;
+        #[cfg(feature = "nanvix-unstable")]
+        write_u64(
+            mem,
             self.get_file_mappings_pointer_offset(),
             self.get_file_mappings_array_gva(),
         )?;
@@ -664,9 +686,12 @@ mod tests {
         expected_size += layout.code_size;
 
         // PEB + preallocated FileMappingInfo array
+        #[cfg(feature = "nanvix-unstable")]
         let peb_and_array = size_of::<HyperlightPEB>()
             + hyperlight_common::mem::MAX_FILE_MAPPINGS
                 * size_of::<hyperlight_common::mem::FileMappingInfo>();
+        #[cfg(not(feature = "nanvix-unstable"))]
+        let peb_and_array = size_of::<HyperlightPEB>();
         expected_size += peb_and_array.next_multiple_of(PAGE_SIZE_USIZE);
 
         expected_size += layout.heap_size.next_multiple_of(PAGE_SIZE_USIZE);

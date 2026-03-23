@@ -562,11 +562,13 @@ impl MultiUseSandbox {
 
         // Pre-check the file mapping limit before doing any expensive
         // OS or VM work. The PEB count is the source of truth.
+        #[cfg(feature = "nanvix-unstable")]
         let current_count = self
             .mem_mgr
             .shared_mem
             .read::<u64>(self.mem_mgr.layout.get_file_mappings_size_offset())?
             as usize;
+        #[cfg(feature = "nanvix-unstable")]
         if current_count >= hyperlight_common::mem::MAX_FILE_MAPPINGS {
             return Err(crate::HyperlightError::Error(format!(
                 "map_file_cow: file mapping limit reached ({} of {})",
@@ -638,6 +640,7 @@ impl MultiUseSandbox {
         // still holds a valid mapping but the PEB won't list it — the
         // limit was already pre-checked above so this should not fail
         // in practice.
+        #[cfg(feature = "nanvix-unstable")]
         self.mem_mgr
             .write_file_mapping_entry(prepared.guest_base, size, &prepared.label)?;
 
@@ -2135,6 +2138,7 @@ mod tests {
     /// the FileMappingInfo entry (count, guest_addr, size, label) into
     /// the PEB.
     #[test]
+    #[cfg(feature = "nanvix-unstable")]
     fn test_map_file_cow_peb_entry_multiuse() {
         use std::mem::offset_of;
 
@@ -2210,6 +2214,7 @@ mod tests {
     /// Tests that deferred `map_file_cow` (before evolve) correctly
     /// writes FileMappingInfo entries into the PEB during evolve.
     #[test]
+    #[cfg(feature = "nanvix-unstable")]
     fn test_map_file_cow_peb_entry_deferred() {
         use std::mem::offset_of;
 
@@ -2283,6 +2288,7 @@ mod tests {
     /// populates all PEB FileMappingInfo slots with the right guest_addr,
     /// size, and label for each entry.
     #[test]
+    #[cfg(feature = "nanvix-unstable")]
     fn test_map_file_cow_peb_multiple_entries() {
         use std::mem::{offset_of, size_of};
 

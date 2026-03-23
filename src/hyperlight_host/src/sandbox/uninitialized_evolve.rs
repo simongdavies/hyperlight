@@ -114,6 +114,7 @@ pub(super) fn evolve_impl_multi_use(u_sbox: UninitializedSandbox) -> Result<Mult
         // it — acceptable since we're about to return Err and the
         // VM will be dropped. The limit was already validated in
         // UninitializedSandbox::map_file_cow.
+        #[cfg(feature = "nanvix-unstable")]
         hshm.write_file_mapping_entry(prepared.guest_base, prepared.size as u64, &prepared.label)?;
         hshm.mapped_rgns += 1;
     }

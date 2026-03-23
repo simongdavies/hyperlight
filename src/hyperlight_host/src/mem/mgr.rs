@@ -12,7 +12,8 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
-*/
+ */
+#[cfg(feature = "nanvix-unstable")]
 use std::mem::offset_of;
 
 use flatbuffers::FlatBufferBuilder;
@@ -369,6 +370,7 @@ impl SandboxMemoryManager<HostSharedMemory> {
     ///
     /// [`FileMappingInfo`]: hyperlight_common::mem::FileMappingInfo
     /// [`MAX_FILE_MAPPINGS`]: hyperlight_common::mem::MAX_FILE_MAPPINGS
+    #[cfg(feature = "nanvix-unstable")]
     pub(crate) fn write_file_mapping_entry(
         &mut self,
         guest_addr: u64,
