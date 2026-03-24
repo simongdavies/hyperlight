@@ -170,13 +170,10 @@ impl Debug for SandboxMemoryLayout {
 impl SandboxMemoryLayout {
     /// The maximum amount of memory a single sandbox will be allowed.
     ///
-    /// Currently, both the scratch region and the snapshot region are
-    /// bounded by this size. The current value is essentially
-    /// arbitrary and chosen for historical reasons; the modern
-    /// sandbox virtual memory layout can support much more, so this
-    /// could be increased should use cases for larger sandboxes
-    /// arise.
-    const MAX_MEMORY_SIZE: usize = 0x4000_0000 - Self::BASE_ADDRESS;
+    /// Both the scratch region and the snapshot region are bounded by
+    /// this size. The value is arbitrary but chosen to be large enough
+    /// for most workloads while preventing accidental resource exhaustion.
+    const MAX_MEMORY_SIZE: usize = (16 * 1024 * 1024 * 1024) - Self::BASE_ADDRESS; // 16 GiB - BASE_ADDRESS
 
     /// The base address of the sandbox's memory.
     #[cfg(not(feature = "nanvix-unstable"))]
@@ -690,8 +687,9 @@ mod tests {
     #[test]
     fn test_max_memory_sandbox() {
         let mut cfg = SandboxConfiguration::default();
-        cfg.set_scratch_size(0x40004000);
-        cfg.set_input_data_size(0x40000000);
+        // scratch_size exceeds 16 GiB limit
+        cfg.set_scratch_size(17 * 1024 * 1024 * 1024);
+        cfg.set_input_data_size(16 * 1024 * 1024 * 1024);
         let layout = SandboxMemoryLayout::new(cfg, 4096, 4096, None);
         assert!(matches!(layout.unwrap_err(), MemoryRequestTooBig(..)));
     }
