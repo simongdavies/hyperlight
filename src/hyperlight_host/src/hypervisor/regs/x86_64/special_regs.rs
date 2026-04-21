@@ -251,7 +251,6 @@ impl From<&CommonSpecialRegisters> for kvm_sregs {
 pub(crate) struct Align16<T>(pub(crate) T);
 
 #[cfg(target_os = "windows")]
-#[allow(clippy::disallowed_macros)] // compile time
 const _: () = {
     assert!(
         std::mem::size_of::<Align16<WHV_REGISTER_VALUE>>()

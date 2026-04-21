@@ -14,11 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-#![expect(
-    clippy::disallowed_macros,
-    reason = "This is a benchmark file, so using disallowed macros is fine here."
-)]
-
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
