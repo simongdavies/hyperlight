@@ -71,8 +71,6 @@ limitations under the License.
 //!
 //! Core dump files are named `hl_core_<timestamp>.elf`.
 
-#![allow(clippy::disallowed_macros)]
-
 #[cfg(all(crashdump, target_os = "linux"))]
 use std::io::Write;
 

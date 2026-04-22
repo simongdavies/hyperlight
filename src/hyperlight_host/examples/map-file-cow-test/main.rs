@@ -28,7 +28,6 @@ limitations under the License.
 // Run:
 //   cargo run --release --example map-file-cow-test
 
-#![allow(clippy::disallowed_macros)]
 use std::path::Path;
 
 use hyperlight_host::sandbox::SandboxConfiguration;
