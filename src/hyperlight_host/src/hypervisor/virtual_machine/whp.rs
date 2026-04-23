@@ -803,6 +803,52 @@ impl VirtualMachine for WhpVm {
     fn partition_handle(&self) -> WHV_PARTITION_HANDLE {
         self.partition
     }
+
+    #[cfg(feature = "enable_guest_clock")]
+    fn setup_pvclock(&mut self, clock_page_gpa: u64) -> crate::Result<()> {
+        // Hyper-V Reference TSC page via WHP: write `WHvRegisterReferenceTsc`
+        // with `gpa | 1`. Bit 0 is the "enable" flag.
+        //
+        // Reference: Hyper-V TLFS section 12.7 (Reference TSC Page).
+        const REFERENCE_TSC_ENABLE_BIT: u64 = 1;
+
+        let reg_value = WHV_REGISTER_VALUE {
+            Reg64: clock_page_gpa | REFERENCE_TSC_ENABLE_BIT,
+        };
+        self.set_registers(&[(WHvRegisterReferenceTsc, Align16(reg_value))])
+            .map_err(|e| crate::new_error!("Failed to set WHvRegisterReferenceTsc: {}", e))?;
+
+        tracing::debug!(
+            target: "hyperlight::pvclock",
+            clock_page_gpa,
+            "WHP Reference TSC armed"
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "enable_guest_clock")]
+    fn current_monotonic_ns(&self) -> crate::Result<u64> {
+        // HV Reference TSC is partition reference time in 100 ns units;
+        // the host reads the same time base via HvRegisterTimeRefCount.
+        // Not exported by the `windows` crate, so we define it from the
+        // TLFS value (0x00090004, confirmed via mshv-bindings).
+        const WHV_REGISTER_TIME_REF_COUNT: WHV_REGISTER_NAME = WHV_REGISTER_NAME(0x00090004);
+
+        let names = [WHV_REGISTER_TIME_REF_COUNT];
+        let mut value: Align16<WHV_REGISTER_VALUE> = unsafe { std::mem::zeroed() };
+        unsafe {
+            WHvGetVirtualProcessorRegisters(
+                self.partition,
+                0,
+                names.as_ptr(),
+                1,
+                &mut value as *mut Align16<WHV_REGISTER_VALUE> as *mut WHV_REGISTER_VALUE,
+            )
+            .map_err(|e| crate::new_error!("Failed to read WHvRegisterTimeRefCount: {}", e))?;
+        }
+        let ticks_100ns = unsafe { value.0.Reg64 };
+        Ok(ticks_100ns.wrapping_mul(100))
+    }
 }
 
 #[cfg(gdb)]
