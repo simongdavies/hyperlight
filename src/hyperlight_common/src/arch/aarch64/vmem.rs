@@ -20,6 +20,8 @@ use crate::vmem::{Mapping, TableOps, TableReadOps, Void};
 
 pub const PAGE_SIZE: usize = 4096;
 pub const PAGE_TABLE_SIZE: usize = 4096;
+pub const PAGE_PRESENT: u64 = 1; // AArch64: bit 0 is the "valid" bit
+pub const PTE_ADDR_MASK: u64 = 0x0000_FFFF_FFFF_F000; // bits [47:12]
 pub type PageTableEntry = u64;
 pub type VirtAddr = u64;
 pub type PhysAddr = u64;
@@ -42,6 +44,29 @@ pub unsafe fn virt_to_phys<'a, Op: TableReadOps + 'a>(
     unimplemented!("virt_to_phys");
     #[allow(unreachable_code)]
     core::iter::empty()
+}
+
+/// Stub — see [`crate::vmem::walk_va_spaces`].
+#[allow(clippy::missing_safety_doc)]
+pub unsafe fn walk_va_spaces<Op: TableReadOps>(
+    _op: &Op,
+    _roots: &[Op::TableAddr],
+    _address: u64,
+    _len: u64,
+) -> ::alloc::vec::Vec<(
+    crate::vmem::SpaceId,
+    ::alloc::vec::Vec<crate::vmem::SpaceAwareMapping>,
+)> {
+    ::alloc::vec::Vec::new()
+}
+
+/// Stub — see [`crate::vmem::space_aware_map`].
+#[allow(clippy::missing_safety_doc)]
+pub unsafe fn space_aware_map<Op: TableOps>(
+    _op: &Op,
+    _ref_map: crate::vmem::SpaceReferenceMapping,
+    _built_roots: &::alloc::collections::BTreeMap<crate::vmem::SpaceId, Op::TableAddr>,
+) {
 }
 
 pub trait TableMovability<Op: TableReadOps + ?Sized, TableMoveInfo> {}

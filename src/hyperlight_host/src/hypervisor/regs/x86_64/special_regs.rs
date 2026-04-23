@@ -27,24 +27,27 @@ use windows::Win32::System::Hypervisor::*;
 #[cfg(target_os = "windows")]
 use super::FromWhpRegisterError;
 
-cfg_if::cfg_if! {
-    if #[cfg(not(feature = "nanvix-unstable"))] {
-        pub(crate) const CR4_PAE: u64 = 1 << 5;
-        pub(crate) const CR4_OSFXSR: u64 = 1 << 9;
-        pub(crate) const CR4_OSXMMEXCPT: u64 = 1 << 10;
-        pub(crate) const CR0_PE: u64 = 1;
-        pub(crate) const CR0_MP: u64 = 1 << 1;
-        pub(crate) const CR0_ET: u64 = 1 << 4;
-        pub(crate) const CR0_NE: u64 = 1 << 5;
-        pub(crate) const CR0_WP: u64 = 1 << 16;
-        pub(crate) const CR0_AM: u64 = 1 << 18;
-        pub(crate) const CR0_PG: u64 = 1 << 31;
-        pub(crate) const EFER_LME: u64 = 1 << 8;
-        pub(crate) const EFER_LMA: u64 = 1 << 10;
-        pub(crate) const EFER_SCE: u64 = 1;
-        pub(crate) const EFER_NX: u64 = 1 << 11;
-    }
+// CR0 bits used by both 32-bit and 64-bit guest
+const CR0_PE: u64 = 1;
+const CR0_ET: u64 = 1 << 4;
+const CR0_WP: u64 = 1 << 16;
+const CR0_PG: u64 = 1 << 31;
+
+#[cfg(not(feature = "i686-guest"))]
+mod amd64_consts {
+    pub(crate) const CR4_PAE: u64 = 1 << 5;
+    pub(crate) const CR4_OSFXSR: u64 = 1 << 9;
+    pub(crate) const CR4_OSXMMEXCPT: u64 = 1 << 10;
+    pub(crate) const CR0_MP: u64 = 1 << 1;
+    pub(crate) const CR0_NE: u64 = 1 << 5;
+    pub(crate) const CR0_AM: u64 = 1 << 18;
+    pub(crate) const EFER_LME: u64 = 1 << 8;
+    pub(crate) const EFER_LMA: u64 = 1 << 10;
+    pub(crate) const EFER_SCE: u64 = 1;
+    pub(crate) const EFER_NX: u64 = 1 << 11;
 }
+#[cfg(not(feature = "i686-guest"))]
+use amd64_consts::*;
 
 #[derive(Debug, Default, Copy, Clone, PartialEq)]
 pub(crate) struct CommonSpecialRegisters {
@@ -69,8 +72,8 @@ pub(crate) struct CommonSpecialRegisters {
 }
 
 impl CommonSpecialRegisters {
-    #[cfg(not(feature = "nanvix-unstable"))]
-    pub(crate) fn standard_64bit_defaults(pml4_addr: u64) -> Self {
+    #[cfg(not(feature = "i686-guest"))]
+    pub(crate) fn standard_64bit_defaults(root_pt_addr: u64) -> Self {
         CommonSpecialRegisters {
             cs: CommonSegmentRegister {
                 l: 1,          // 64-bit
@@ -97,43 +100,61 @@ impl CommonSpecialRegisters {
             cr0: CR0_PE | CR0_MP | CR0_ET | CR0_NE | CR0_AM | CR0_WP | CR0_PG,
             cr2: 0,
             cr4: CR4_PAE | CR4_OSFXSR | CR4_OSXMMEXCPT,
-            cr3: pml4_addr,
+            cr3: root_pt_addr,
             cr8: 0,
             apic_base: 0,
             interrupt_bitmap: [0; 4],
         }
     }
 
-    #[cfg(feature = "nanvix-unstable")]
-    pub(crate) fn standard_real_mode_defaults() -> Self {
+    /// Returns special registers for 32-bit protected mode with paging enabled.
+    /// Used for i686 guests that need CoW page tables from boot.
+    #[cfg(feature = "i686-guest")]
+    pub(crate) fn standard_32bit_paging_defaults(root_pt_addr: u64) -> Self {
+        // Flat 32-bit code segment: base=0, limit=4GB, 32-bit, executable
+        let code_seg = CommonSegmentRegister {
+            base: 0,
+            selector: 0x08,
+            limit: 0xFFFFFFFF,
+            type_: 11, // Execute/Read, Accessed
+            present: 1,
+            s: 1,
+            db: 1, // 32-bit
+            g: 1,  // 4KB granularity
+            ..Default::default()
+        };
+        // Flat 32-bit data segment: base=0, limit=4GB, 32-bit, writable
+        let data_seg = CommonSegmentRegister {
+            base: 0,
+            selector: 0x10,
+            limit: 0xFFFFFFFF,
+            type_: 3, // Read/Write, Accessed
+            present: 1,
+            s: 1,
+            db: 1, // 32-bit
+            g: 1,  // 4KB granularity
+            ..Default::default()
+        };
+        let tr_seg = CommonSegmentRegister {
+            base: 0,
+            selector: 0,
+            limit: 0xFFFF,
+            type_: 11,
+            present: 1,
+            s: 0,
+            ..Default::default()
+        };
         CommonSpecialRegisters {
-            cs: CommonSegmentRegister {
-                base: 0,
-                selector: 0,
-                limit: 0xFFFF,
-                type_: 11,
-                present: 1,
-                s: 1,
-                ..Default::default()
-            },
-            ds: CommonSegmentRegister {
-                base: 0,
-                selector: 0,
-                limit: 0xFFFF,
-                type_: 3,
-                present: 1,
-                s: 1,
-                ..Default::default()
-            },
-            tr: CommonSegmentRegister {
-                base: 0,
-                selector: 0,
-                limit: 0xFFFF,
-                type_: 11,
-                present: 1,
-                s: 0,
-                ..Default::default()
-            },
+            cs: code_seg,
+            ds: data_seg,
+            es: data_seg,
+            ss: data_seg,
+            fs: data_seg,
+            gs: data_seg,
+            tr: tr_seg,
+            cr0: CR0_PE | CR0_ET | CR0_WP | CR0_PG,
+            cr3: root_pt_addr,
+            cr4: 0, // No PAE, no PSE
             ..Default::default()
         }
     }

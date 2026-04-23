@@ -22,8 +22,8 @@ use hyperlight_common::flatbuffer_wrappers::function_call::{
 };
 use hyperlight_common::flatbuffer_wrappers::function_types::FunctionCallResult;
 use hyperlight_common::flatbuffer_wrappers::guest_log_data::GuestLogData;
-use hyperlight_common::vmem::{self, PAGE_TABLE_SIZE, PageTableEntry, PhysAddr};
-#[cfg(all(feature = "crashdump", not(feature = "nanvix-unstable")))]
+use hyperlight_common::vmem::{self, PAGE_TABLE_SIZE};
+#[cfg(all(feature = "crashdump", not(feature = "i686-guest")))]
 use hyperlight_common::vmem::{BasicMapping, MappingKind};
 use tracing::{Span, instrument};
 
@@ -38,7 +38,7 @@ use crate::mem::memory_region::{CrashDumpRegion, MemoryRegionFlags, MemoryRegion
 use crate::sandbox::snapshot::{NextAction, Snapshot};
 use crate::{Result, new_error};
 
-#[cfg(all(feature = "crashdump", not(feature = "nanvix-unstable")))]
+#[cfg(all(feature = "crashdump", not(feature = "i686-guest")))]
 fn mapping_kind_to_flags(kind: &MappingKind) -> (MemoryRegionFlags, MemoryRegionType) {
     match kind {
         MappingKind::Basic(BasicMapping {
@@ -76,7 +76,7 @@ fn mapping_kind_to_flags(kind: &MappingKind) -> (MemoryRegionFlags, MemoryRegion
 /// in both guest and host address space and has the same flags.
 ///
 /// Returns `true` if the region was coalesced, `false` if a new region is needed.
-#[cfg(all(feature = "crashdump", not(feature = "nanvix-unstable")))]
+#[cfg(all(feature = "crashdump", not(feature = "i686-guest")))]
 fn try_coalesce_region(
     regions: &mut [CrashDumpRegion],
     virt_base: usize,
@@ -101,7 +101,7 @@ fn try_coalesce_region(
 // fact that the snapshot shared memory is `ReadonlySharedMemory`
 // normally, but there is (temporary) support for writable
 // `GuestSharedMemory` with `#[cfg(feature =
-// "nanvix-unstable")]`. Unfortunately, rustc gets annoyed about an
+// "i686-guest")]`. Unfortunately, rustc gets annoyed about an
 // unused type parameter, unless one goes to a little bit of effort to
 // trick it...
 mod unused_hack {
@@ -148,68 +148,78 @@ pub(crate) struct SandboxMemoryManager<S: SharedMemory> {
     pub(crate) mapped_rgns: u64,
     /// Buffer for accumulating guest abort messages
     pub(crate) abort_buffer: Vec<u8>,
+    /// Generation counter: how many snapshots have been taken from
+    /// this sandbox's execution path from init to here. Incremented
+    /// on each `snapshot` call; on `restore_snapshot` we inherit the
+    /// restored snapshot's own generation number so the guest-visible
+    /// counter tracks which snapshot the sandbox is a clone of.
+    pub(crate) snapshot_count: u64,
 }
 
+/// Buffer for building guest page tables during snapshot creation.
+/// `TableAddr` is an absolute GPA (u64) so the same address space is
+/// used regardless of entry size.
 pub(crate) struct GuestPageTableBuffer {
     buffer: std::cell::RefCell<Vec<u8>>,
     phys_base: usize,
+    /// Absolute GPA of the currently-active root table. For
+    /// multi-root guests, `set_root` switches which root subsequent
+    /// `vmem::map` / `vmem::space_aware_map` calls target — typically
+    /// to an address previously returned by `alloc_table`.
+    root: std::cell::Cell<u64>,
 }
 
 impl vmem::TableReadOps for GuestPageTableBuffer {
-    type TableAddr = (usize, usize); // (table_index, entry_index)
+    type TableAddr = u64;
 
-    fn entry_addr(addr: (usize, usize), offset: u64) -> (usize, usize) {
-        // Convert to physical address, add offset, convert back
-        let phys = Self::to_phys(addr) + offset;
-        Self::from_phys(phys)
+    fn entry_addr(addr: u64, offset: u64) -> u64 {
+        addr + offset
     }
 
-    unsafe fn read_entry(&self, addr: (usize, usize)) -> PageTableEntry {
-        let b = self.buffer.borrow();
-        let byte_offset =
-            (addr.0 - self.phys_base / PAGE_TABLE_SIZE) * PAGE_TABLE_SIZE + addr.1 * 8;
-        b.get(byte_offset..byte_offset + 8)
-            .and_then(|s| <[u8; 8]>::try_from(s).ok())
-            .map(u64::from_ne_bytes)
-            .unwrap_or(0)
+    unsafe fn read_entry(&self, addr: u64) -> vmem::PageTableEntry {
+        let buffer = self.buffer.borrow();
+        let byte_offset = addr as usize - self.phys_base;
+        let pte_size = core::mem::size_of::<vmem::PageTableEntry>();
+        let Some(bytes) = buffer.get(byte_offset..byte_offset + pte_size) else {
+            return 0;
+        };
+        let mut buf = [0u8; 8];
+        buf[..pte_size].copy_from_slice(bytes);
+        vmem::PageTableEntry::from_le_bytes(buf[..pte_size].try_into().unwrap_or_default())
     }
 
-    fn to_phys(addr: (usize, usize)) -> PhysAddr {
-        (addr.0 as u64 * PAGE_TABLE_SIZE as u64) + (addr.1 as u64 * 8)
+    fn to_phys(addr: u64) -> vmem::PhysAddr {
+        addr as vmem::PhysAddr
     }
 
-    fn from_phys(addr: PhysAddr) -> (usize, usize) {
-        (
-            addr as usize / PAGE_TABLE_SIZE,
-            (addr as usize % PAGE_TABLE_SIZE) / 8,
-        )
+    fn from_phys(addr: vmem::PhysAddr) -> u64 {
+        #[allow(clippy::unnecessary_cast)]
+        {
+            addr as u64
+        }
     }
 
-    fn root_table(&self) -> (usize, usize) {
-        (self.phys_base / PAGE_TABLE_SIZE, 0)
+    fn root_table(&self) -> u64 {
+        self.root.get()
     }
 }
+
 impl vmem::TableOps for GuestPageTableBuffer {
     type TableMovability = vmem::MayNotMoveTable;
 
-    unsafe fn alloc_table(&self) -> (usize, usize) {
+    unsafe fn alloc_table(&self) -> u64 {
         let mut b = self.buffer.borrow_mut();
-        let table_index = b.len() / PAGE_TABLE_SIZE;
-        let new_len = b.len() + PAGE_TABLE_SIZE;
-        b.resize(new_len, 0);
-        (self.phys_base / PAGE_TABLE_SIZE + table_index, 0)
+        let offset = b.len();
+        b.resize(offset + PAGE_TABLE_SIZE, 0);
+        (self.phys_base + offset) as u64
     }
 
-    unsafe fn write_entry(
-        &self,
-        addr: (usize, usize),
-        entry: PageTableEntry,
-    ) -> Option<vmem::Void> {
+    unsafe fn write_entry(&self, addr: u64, entry: vmem::PageTableEntry) -> Option<vmem::Void> {
         let mut b = self.buffer.borrow_mut();
-        let byte_offset =
-            (addr.0 - self.phys_base / PAGE_TABLE_SIZE) * PAGE_TABLE_SIZE + addr.1 * 8;
-        if let Some(slice) = b.get_mut(byte_offset..byte_offset + 8) {
-            slice.copy_from_slice(&entry.to_ne_bytes());
+        let byte_offset = addr as usize - self.phys_base;
+        let pte_size = core::mem::size_of::<vmem::PageTableEntry>();
+        if let Some(slice) = b.get_mut(byte_offset..byte_offset + pte_size) {
+            slice.copy_from_slice(&entry.to_le_bytes()[..pte_size]);
         }
         None
     }
@@ -219,12 +229,33 @@ impl vmem::TableOps for GuestPageTableBuffer {
     }
 }
 
+impl core::convert::AsRef<GuestPageTableBuffer> for GuestPageTableBuffer {
+    fn as_ref(&self) -> &Self {
+        self
+    }
+}
+
 impl GuestPageTableBuffer {
+    /// Create a new buffer with an initial zeroed root table at
+    /// `phys_base`. The returned buffer's current root is `phys_base`;
+    /// additional roots can be obtained by calling `alloc_table`.
     pub(crate) fn new(phys_base: usize) -> Self {
         GuestPageTableBuffer {
             buffer: std::cell::RefCell::new(vec![0u8; PAGE_TABLE_SIZE]),
             phys_base,
+            root: std::cell::Cell::new(phys_base as u64),
         }
+    }
+
+    /// Switch the active root. `addr` must have been obtained either
+    /// as the initial root GPA (`phys_base`) or via `alloc_table`.
+    pub(crate) fn set_root(&self, addr: u64) {
+        self.root.set(addr);
+    }
+
+    /// GPA of the initial root allocated by `new`.
+    pub(crate) fn initial_root(&self) -> u64 {
+        self.phys_base as u64
     }
 
     #[cfg(test)]
@@ -257,6 +288,7 @@ where
             entrypoint,
             mapped_rgns: 0,
             abort_buffer: Vec::new(),
+            snapshot_count: 0,
         }
     }
 
@@ -270,11 +302,12 @@ where
         &mut self,
         sandbox_id: u64,
         mapped_regions: Vec<MemoryRegion>,
-        root_pt_gpa: u64,
+        root_pt_gpas: &[u64],
         rsp_gva: u64,
         sregs: CommonSpecialRegisters,
         entrypoint: NextAction,
     ) -> Result<Snapshot> {
+        self.snapshot_count += 1;
         Snapshot::new(
             &mut self.shared_mem,
             &mut self.scratch_mem,
@@ -282,10 +315,11 @@ where
             self.layout,
             crate::mem::exe::LoadInfo::dummy(),
             mapped_regions,
-            root_pt_gpa,
+            root_pt_gpas,
             rsp_gva,
             sregs,
             entrypoint,
+            self.snapshot_count,
         )
     }
 }
@@ -324,6 +358,7 @@ impl SandboxMemoryManager<ExclusiveSharedMemory> {
             entrypoint: self.entrypoint,
             mapped_rgns: self.mapped_rgns,
             abort_buffer: self.abort_buffer,
+            snapshot_count: self.snapshot_count,
         };
         let guest_mgr = SandboxMemoryManager {
             shared_mem: gshm,
@@ -332,6 +367,7 @@ impl SandboxMemoryManager<ExclusiveSharedMemory> {
             entrypoint: self.entrypoint,
             mapped_rgns: self.mapped_rgns,
             abort_buffer: Vec::new(), // Guest doesn't need abort buffer
+            snapshot_count: self.snapshot_count,
         };
         host_mgr.update_scratch_bookkeeping()?;
         Ok((host_mgr, guest_mgr))
@@ -523,6 +559,12 @@ impl SandboxMemoryManager<HostSharedMemory> {
             Some(gscratch)
         };
         self.layout = *snapshot.layout();
+        // Inherit the snapshot's own generation number — the
+        // guest-visible counter reflects "which snapshot is the
+        // sandbox currently a clone of", not "how many restores have
+        // happened into this (possibly-reused) partition".
+        self.snapshot_count = snapshot.snapshot_generation();
+
         self.update_scratch_bookkeeping()?;
         Ok((gsnapshot, gscratch))
     }
@@ -542,6 +584,22 @@ impl SandboxMemoryManager<HostSharedMemory> {
             SCRATCH_TOP_ALLOCATOR_OFFSET,
             self.layout.get_first_free_scratch_gpa(),
         )?;
+        // Record the GPA of the snapshot's copy of the page tables.
+        // The copy lives at the tail of the snapshot blob; we copy it
+        // into scratch below so the guest walker can run against
+        // mutable, TLB-fresh tables. The guest reads this GPA during
+        // CoW fault-in to follow the original PTs on the first write
+        // — until the HV can execute directly out of the
+        // snapshot-resident PTs, at which point the whole split goes
+        // away.
+        self.update_scratch_bookkeeping_item(
+            SCRATCH_TOP_SNAPSHOT_PT_GPA_BASE_OFFSET,
+            self.layout.get_pt_base_gpa(),
+        )?;
+        self.update_scratch_bookkeeping_item(
+            SCRATCH_TOP_SNAPSHOT_GENERATION_OFFSET,
+            self.snapshot_count,
+        )?;
 
         // Initialise the guest input and output data buffers in
         // scratch memory. TODO: remove the need for this.
@@ -554,7 +612,12 @@ impl SandboxMemoryManager<HostSharedMemory> {
             SandboxMemoryLayout::STACK_POINTER_SIZE_BYTES,
         )?;
 
-        // Copy the page tables into the scratch region
+        // Copy page tables from `shared_mem` into scratch. PT bytes
+        // are appended to the snapshot blob at build time and live
+        // just past the end of the guest-visible KVM slot (see
+        // `Snapshot::new`). Keeping them outside the KVM slot avoids
+        // overlapping with `map_file_cow` regions installed
+        // immediately after the snapshot in the guest PA space.
         let snapshot_pt_end = self.shared_mem.mem_size();
         let snapshot_pt_size = self.layout.get_pt_size();
         let snapshot_pt_start = snapshot_pt_end - snapshot_pt_size;
@@ -579,7 +642,7 @@ impl SandboxMemoryManager<HostSharedMemory> {
     ///
     /// By default, walks the guest page tables to discover
     /// GVA→GPA mappings and translates them to host-backed regions.
-    #[cfg(all(feature = "crashdump", not(feature = "nanvix-unstable")))]
+    #[cfg(all(feature = "crashdump", not(feature = "i686-guest")))]
     pub(crate) fn get_guest_memory_regions(
         &mut self,
         root_pt: u64,
@@ -641,7 +704,7 @@ impl SandboxMemoryManager<HostSharedMemory> {
     /// Without paging, GVA == GPA (identity mapped), so we return the
     /// snapshot and scratch regions directly at their known addresses
     /// alongside any dynamic mmap regions.
-    #[cfg(all(feature = "crashdump", feature = "nanvix-unstable"))]
+    #[cfg(all(feature = "crashdump", feature = "i686-guest"))]
     pub(crate) fn get_guest_memory_regions(
         &mut self,
         _root_pt: u64,
@@ -796,7 +859,7 @@ impl SandboxMemoryManager<HostSharedMemory> {
 }
 
 #[cfg(test)]
-#[cfg(all(not(feature = "nanvix-unstable"), target_arch = "x86_64"))]
+#[cfg(all(not(feature = "i686-guest"), target_arch = "x86_64"))]
 mod tests {
     use hyperlight_common::vmem::{MappingKind, PAGE_TABLE_SIZE};
     use hyperlight_testing::sandbox_sizes::{LARGE_HEAP_SIZE, MEDIUM_HEAP_SIZE, SMALL_HEAP_SIZE};

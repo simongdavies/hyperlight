@@ -76,7 +76,7 @@ impl HyperlightVm {
     pub(crate) fn new(
         snapshot_mem: SnapshotSharedMemory<GuestSharedMemory>,
         scratch_mem: GuestSharedMemory,
-        _pml4_addr: u64,
+        _root_pt_addr: u64,
         entrypoint: NextAction,
         rsp_gva: u64,
         page_size: usize,
@@ -100,12 +100,16 @@ impl HyperlightVm {
             None => return Err(CreateHyperlightVmError::NoHypervisorFound),
         };
 
-        #[cfg(not(feature = "nanvix-unstable"))]
-        vm.set_sregs(&CommonSpecialRegisters::standard_64bit_defaults(_pml4_addr))
-            .map_err(VmError::Register)?;
-        #[cfg(feature = "nanvix-unstable")]
-        vm.set_sregs(&CommonSpecialRegisters::standard_real_mode_defaults())
-            .map_err(VmError::Register)?;
+        #[cfg(not(feature = "i686-guest"))]
+        vm.set_sregs(&CommonSpecialRegisters::standard_64bit_defaults(
+            _root_pt_addr,
+        ))
+        .map_err(VmError::Register)?;
+        #[cfg(feature = "i686-guest")]
+        vm.set_sregs(&CommonSpecialRegisters::standard_32bit_paging_defaults(
+            _root_pt_addr,
+        ))
+        .map_err(VmError::Register)?;
 
         #[cfg(any(kvm, mshv3))]
         let interrupt_handle: Arc<dyn InterruptHandleImpl> = Arc::new(LinuxInterruptHandle {
@@ -248,21 +252,11 @@ impl HyperlightVm {
         Ok(())
     }
 
-    /// Get the current base page table physical address.
-    ///
-    /// By default, reads CR3 from the vCPU special registers.
-    /// With `nanvix-unstable`, returns 0 (identity-mapped, no page tables).
+    /// Get the current base page table physical address from CR3.
     pub(crate) fn get_root_pt(&self) -> Result<u64, AccessPageTableError> {
-        #[cfg(not(feature = "nanvix-unstable"))]
-        {
-            let sregs = self.vm.sregs()?;
-            // Mask off the flags bits
-            Ok(sregs.cr3 & !0xfff_u64)
-        }
-        #[cfg(feature = "nanvix-unstable")]
-        {
-            Ok(0)
-        }
+        let sregs = self.vm.sregs()?;
+        // Mask off the flags bits
+        Ok(sregs.cr3 & !0xfff_u64)
     }
 
     /// Get the special registers that need to be stored in a snapshot.
@@ -352,23 +346,12 @@ impl HyperlightVm {
         self.vm.set_debug_regs(&CommonDebugRegs::default())?;
         self.vm.reset_xsave()?;
 
-        #[cfg(not(feature = "nanvix-unstable"))]
-        {
-            // Restore the full special registers from snapshot, but update CR3
-            // to point to the new (relocated) page tables
-            let mut sregs = *sregs;
-            sregs.cr3 = cr3;
-            self.pending_tlb_flush = true;
-            self.vm.set_sregs(&sregs)?;
-        }
-        #[cfg(feature = "nanvix-unstable")]
-        {
-            let _ = (cr3, sregs); // suppress unused warnings
-            // TODO: This is probably not correct.
-            // Let's deal with it when we clean up the nanvix-unstable feature
-            self.vm
-                .set_sregs(&CommonSpecialRegisters::standard_real_mode_defaults())?;
-        }
+        // Restore the full special registers from snapshot, but update CR3
+        // to point to the new (relocated) page tables
+        let mut sregs = *sregs;
+        sregs.cr3 = cr3;
+        self.pending_tlb_flush = true;
+        self.vm.set_sregs(&sregs)?;
 
         Ok(())
     }
@@ -874,7 +857,7 @@ pub(super) mod debug {
 }
 
 #[cfg(test)]
-#[cfg(not(feature = "nanvix-unstable"))]
+#[cfg(not(feature = "i686-guest"))]
 #[allow(clippy::needless_range_loop)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -953,7 +936,7 @@ mod tests {
 
     /// Build dirty special registers for testing reset_vcpu.
     /// Must be consistent for 64-bit long mode (CR0/CR4/EFER).
-    fn dirty_sregs(_pml4_addr: u64) -> CommonSpecialRegisters {
+    fn dirty_sregs(_root_pt_addr: u64) -> CommonSpecialRegisters {
         let segment = CommonSegmentRegister {
             base: 0x1000,
             limit: 0xFFFF,
@@ -1006,10 +989,10 @@ mod tests {
             idt: table,
             cr0: 0x80000011, // PE + ET + PG
             cr2: 0xBADC0DE,
-            // MSHV validates cr3 and rejects bogus values; use valid _pml4_addr for MSHV
+            // MSHV validates cr3 and rejects bogus values; use valid _root_pt_addr for MSHV
             cr3: match get_available_hypervisor() {
                 #[cfg(mshv3)]
-                Some(HypervisorType::Mshv) => _pml4_addr,
+                Some(HypervisorType::Mshv) => _root_pt_addr,
                 _ => 0x12345000,
             },
             cr4: 0x20, // PAE
@@ -1230,8 +1213,8 @@ mod tests {
 
     /// Assert that special registers are in reset state.
     /// Handles hypervisor-specific differences in hidden descriptor cache fields.
-    fn assert_sregs_reset(vm: &dyn VirtualMachine, pml4_addr: u64) {
-        let defaults = CommonSpecialRegisters::standard_64bit_defaults(pml4_addr);
+    fn assert_sregs_reset(vm: &dyn VirtualMachine, root_pt_addr: u64) {
+        let defaults = CommonSpecialRegisters::standard_64bit_defaults(root_pt_addr);
         let sregs = vm.sregs().unwrap();
         let mut expected_sregs = defaults;
         // Normalize hypervisor implementation-specific fields.
@@ -1461,6 +1444,7 @@ mod tests {
                     writable,
                     executable,
                 }),
+                user_accessible: false,
             };
             unsafe { vmem::map(&pt_buf, mapping) };
         }
@@ -1478,6 +1462,7 @@ mod tests {
                 writable: true,
                 executable: true, // Match regular codepath (map_specials)
             }),
+            user_accessible: false,
         };
         unsafe { vmem::map(&pt_buf, scratch_mapping) };
 
