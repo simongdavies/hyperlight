@@ -142,6 +142,9 @@ nanvix-unstable = ["i686-guest", "hyperlight-common/nanvix-unstable"]
 guest-counter = ["hyperlight-common/guest-counter"]
 # Populate the paravirtualized clock page so guests can read time without VM exits. x86_64 only.
 enable_guest_clock = []
+# Enable guest-side sleep via LAPIC one-shot timer. Requires hw-interrupts (LAPIC emulation)
+# and enable_guest_clock (TSC calibration). x86_64 only.
+guest_sleep = ["hw-interrupts", "enable_guest_clock"]
 
 [[bench]]
 name = "benchmarks"

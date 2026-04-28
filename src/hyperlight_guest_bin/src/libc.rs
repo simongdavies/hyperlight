@@ -188,3 +188,73 @@ pub extern "C" fn lseek(_fd: c_int, _offset: c_long, _whence: c_int) -> c_long {
 pub extern "C" fn close(_fd: c_int) -> c_int {
     0
 }
+
+/// POSIX timespec structure for nanosleep.
+/// (Reuses the existing `Timespec` defined above.)
+
+/// POSIX `nanosleep` — sleep for the duration specified by `req`.
+///
+/// Uses the LAPIC one-shot timer for zero-CPU, zero-VM-exit sleep.
+/// If the sleep infrastructure isn't initialised or the clock isn't
+/// available, falls back to returning immediately with `errno = ENOSYS`.
+///
+/// If interrupted (host cancellation), writes the remaining time to
+/// `rem` (if non-null) and returns -1 with `errno = EINTR`.
+#[unsafe(no_mangle)]
+pub extern "C" fn nanosleep(req: *const Timespec, rem: *mut Timespec) -> c_int {
+    const EINTR: c_int = 4;
+
+    if req.is_null() {
+        set_errno(EINVAL);
+        return -1;
+    }
+
+    let req_ref = unsafe { &*req };
+    if req_ref.tv_sec < 0 || req_ref.tv_nsec < 0 || req_ref.tv_nsec >= 1_000_000_000 {
+        set_errno(EINVAL);
+        return -1;
+    }
+
+    let duration_ns = req_ref.tv_sec as u64 * 1_000_000_000 + req_ref.tv_nsec as u64;
+    if duration_ns == 0 {
+        return 0;
+    }
+
+    let start_ns = time::monotonic_time_ns().unwrap_or(0);
+
+    match crate::sleep::sleep_ns(duration_ns) {
+        Ok(()) => 0,
+        Err(crate::sleep::SleepError::Interrupted) => {
+            // Write remaining time if rem is provided.
+            if !rem.is_null() {
+                let elapsed = time::monotonic_time_ns()
+                    .unwrap_or(0)
+                    .saturating_sub(start_ns);
+                let remaining = duration_ns.saturating_sub(elapsed);
+                unsafe {
+                    (*rem).tv_sec = (remaining / 1_000_000_000) as c_long;
+                    (*rem).tv_nsec = (remaining % 1_000_000_000) as c_long;
+                }
+            }
+            set_errno(EINTR);
+            -1
+        }
+        Err(_) => {
+            // Clock unavailable or not initialised — fall back to no-op.
+            set_errno(ENOSYS);
+            -1
+        }
+    }
+}
+
+/// POSIX `usleep` — sleep for `usec` microseconds.
+#[unsafe(no_mangle)]
+pub extern "C" fn usleep(usec: c_uint) -> c_int {
+    match crate::sleep::sleep_us(usec as u64) {
+        Ok(()) => 0,
+        Err(_) => {
+            set_errno(ENOSYS);
+            -1
+        }
+    }
+}

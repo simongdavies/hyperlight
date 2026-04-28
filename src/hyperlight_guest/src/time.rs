@@ -359,3 +359,60 @@ pub fn wall_clock_time() -> Option<(u64, u32)> {
     let nsecs = (ns % 1_000_000_000) as u32;
     Some((secs, nsecs))
 }
+
+/// Convert a duration in nanoseconds to APIC timer ticks by inverting the
+/// paravirtualized clock's TSC→ns formula.
+///
+/// The LAPIC timer (with divide-by-1) counts at the same rate as the TSC
+/// on CPUs with invariant TSC. This function reads the pvclock / Hyper-V
+/// calibration data to compute the conversion.
+///
+/// Returns `None` if the clock is not configured.
+///
+/// # KVM pvclock
+///
+/// Forward: `ns = (tsc_delta * mul) >> (32 - shift)`
+/// Inverse: `tsc_ticks = (ns << (32 - shift)) / mul`
+///
+/// # Hyper-V Reference TSC
+///
+/// Forward: `time_100ns = ((tsc * scale) >> 64) + offset`
+/// Inverse: `tsc_ticks = (ns / 100) * (1 << 64) / scale`
+///           (simplified via 128-bit arithmetic)
+pub fn ns_to_tsc_ticks(duration_ns: u64) -> Option<u64> {
+    match read_clock_type() {
+        ClockType::KvmPvclock => {
+            let ptr = clock_page_gva() as *const KvmPvclockVcpuTimeInfo;
+            let mul = unsafe { core::ptr::read_volatile(&raw const (*ptr).tsc_to_system_mul) };
+            let shift = unsafe { core::ptr::read_volatile(&raw const (*ptr).tsc_shift) };
+
+            if mul == 0 {
+                return None;
+            }
+
+            // Inverse of: ns = (tsc * mul) >> (32 - shift)
+            // tsc = (ns << (32 - shift)) / mul
+            let raw_shift = 32i32 - shift as i32;
+            let shift_amount = raw_shift.clamp(0, 63) as u32;
+            let ticks =
+                ((duration_ns as u128) << shift_amount) / mul as u128;
+            Some(ticks as u64)
+        }
+        ClockType::HyperVReferenceTsc => {
+            let ptr = clock_page_gva() as *const HvReferenceTscPage;
+            let scale = unsafe { core::ptr::read_volatile(&raw const (*ptr).tsc_scale) };
+
+            if scale == 0 {
+                return None;
+            }
+
+            // Forward: time_100ns = ((tsc * scale) >> 64)
+            // Inverse: tsc = (time_100ns << 64) / scale
+            // time_100ns = duration_ns / 100
+            let time_100ns = duration_ns / 100;
+            let ticks = ((time_100ns as u128) << 64) / scale as u128;
+            Some(ticks as u64)
+        }
+        ClockType::None => None,
+    }
+}

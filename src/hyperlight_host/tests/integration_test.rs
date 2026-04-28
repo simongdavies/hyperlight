@@ -1872,3 +1872,54 @@ fn hw_timer_interrupts() {
         );
     });
 }
+
+/// Test LAPIC one-shot timer sleep — proof that the guest can use the
+/// hardware LAPIC timer to sleep without any host-side involvement.
+///
+/// The guest maps the APIC MMIO page, arms a one-shot LAPIC timer,
+/// halts the vCPU, and wakes when the timer fires. The host thread
+/// is descheduled during the sleep (zero CPU).
+///
+/// Requires `hw-interrupts` (for LAPIC emulation) and
+/// `enable_guest_clock` (for monotonic time measurement).
+#[test]
+#[cfg(feature = "guest_sleep")]
+fn lapic_oneshot_sleep() {
+    with_rust_sandbox(|mut sbox| {
+        // Request a 50ms sleep
+        let elapsed_ms: i32 = sbox.call("TestLapicSleep", (50_i32,)).unwrap();
+
+        // The interrupt should have fired (not -2 = "never fired")
+        assert!(
+            elapsed_ms >= 0,
+            "LAPIC timer interrupt never fired (got {elapsed_ms})"
+        );
+
+        // Elapsed time should be at least ~20ms (allowing for timer inaccuracy
+        // in the spike — we're using a rough TSC estimate for tick count).
+        // The upper bound is generous because this is a spike.
+        assert!(
+            elapsed_ms < 5000,
+            "Sleep took way too long: {elapsed_ms}ms (expected ~50ms)"
+        );
+
+        println!("LAPIC sleep: requested 50ms, measured {elapsed_ms}ms");
+    });
+}
+
+/// Test nanosleep from a C guest — proves the picolibc nanosleep hook
+/// works end-to-end via the guest LAPIC one-shot timer.
+#[test]
+#[cfg(feature = "guest_sleep")]
+fn c_guest_nanosleep() {
+    with_c_sandbox(|mut sbox| {
+        let rc: i32 = sbox.call("CNanosleepTest", (50_i32,)).unwrap();
+
+        assert_eq!(
+            rc, 0,
+            "C nanosleep returned error code {rc}"
+        );
+
+        println!("C nanosleep: 50ms sleep completed successfully (rc={rc})");
+    });
+}

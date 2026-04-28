@@ -7,6 +7,14 @@
 #include "assert.h"
 #include "stdio.h"
 
+// Forward-declare nanosleep + struct timespec to avoid pulling in
+// time.h which conflicts with our Rust clock_gettime export.
+struct timespec {
+    long tv_sec;
+    long tv_nsec;
+};
+int nanosleep(const struct timespec *req, struct timespec *rem);
+
 #define GUEST_SCRATCH_SIZE (0x40000) // default scratch size
 #define MAX_BUFFER_SIZE (1024)
 
@@ -367,8 +375,29 @@ HYPERLIGHT_WRAP_FUNCTION(execute_on_stack, Int, 0)
 HYPERLIGHT_WRAP_FUNCTION(log_message, Int, 2, String, Long)
 // HYPERLIGHT_WRAP_FUNCTION(twenty_four_k_in_eight_k_out, VecBytes, 1, VecBytes) is not valid for functions that return VecBytes
 
+/// Test nanosleep from C — uses picolibc nanosleep which is wired to
+/// the guest LAPIC one-shot timer.
+///
+/// Parameter: sleep_ms (Int) — duration in milliseconds
+/// Returns: 0 on success, -1 on invalid parameter, -2 on nanosleep error
+int c_nanosleep_test(int sleep_ms)
+{
+    if (sleep_ms <= 0) return -1;
+
+    struct timespec req = {
+        .tv_sec = sleep_ms / 1000,
+        .tv_nsec = (sleep_ms % 1000) * 1000000L,
+    };
+
+    int rc = nanosleep(&req, NULL);
+
+    return (rc == 0) ? 0 : -2;
+}
+HYPERLIGHT_WRAP_FUNCTION(c_nanosleep_test, Int, 1, Int)
+
 void hyperlight_main(void)
 {
+    HYPERLIGHT_REGISTER_FUNCTION("CNanosleepTest", c_nanosleep_test);
     HYPERLIGHT_REGISTER_FUNCTION("GuestRetrievesFloatValue", guest_fn_checks_if_host_returns_float_value);
     HYPERLIGHT_REGISTER_FUNCTION("GuestRetrievesDoubleValue", guest_fn_checks_if_host_returns_double_value);
     HYPERLIGHT_REGISTER_FUNCTION("GuestRetrievesStringValue", guest_fn_checks_if_host_returns_string_value);

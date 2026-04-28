@@ -666,6 +666,36 @@ fn test_timer_interrupts(period_us: i32, max_spin: i32) -> i32 {
 
 static mut COUNTER: i32 = 0;
 
+// =============================================================================
+// LAPIC one-shot sleep test
+// =============================================================================
+
+/// Test LAPIC one-shot timer sleep via the hyperlight_guest_bin::sleep API.
+///
+/// Parameters:
+/// - `sleep_ms`: requested sleep duration in milliseconds
+///
+/// Returns elapsed time in milliseconds, or negative on error:
+///   -1 = invalid parameter
+///   -2 = sleep error
+#[guest_function("TestLapicSleep")]
+fn test_lapic_sleep(sleep_ms: i32) -> i32 {
+    if sleep_ms <= 0 {
+        return -1;
+    }
+
+    let start_ns = hyperlight_guest::time::monotonic_time_ns().unwrap_or(0);
+
+    match hyperlight_guest_bin::sleep::sleep_ms(sleep_ms as u64) {
+        Ok(()) => {}
+        Err(_) => return -2,
+    }
+
+    let end_ns = hyperlight_guest::time::monotonic_time_ns().unwrap_or(0);
+    let elapsed_ms = end_ns.saturating_sub(start_ns) / 1_000_000;
+    elapsed_ms as i32
+}
+
 #[guest_function("AddToStatic")]
 fn add_to_static(i: i32) -> i32 {
     unsafe {

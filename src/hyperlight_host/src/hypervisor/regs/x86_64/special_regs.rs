@@ -102,6 +102,13 @@ impl CommonSpecialRegisters {
             cr4: CR4_PAE | CR4_OSFXSR | CR4_OSXMMEXCPT,
             cr3: root_pt_addr,
             cr8: 0,
+            // When hw-interrupts is enabled the hypervisor creates an
+            // in-kernel LAPIC. Set the APIC base MSR so the LAPIC
+            // intercepts MMIO at 0xFEE00000 (base | enable | BSP).
+            // Without hw-interrupts there is no LAPIC so leave it at 0.
+            #[cfg(feature = "hw-interrupts")]
+            apic_base: 0xFEE00900,
+            #[cfg(not(feature = "hw-interrupts"))]
             apic_base: 0,
             interrupt_bitmap: [0; 4],
         }
