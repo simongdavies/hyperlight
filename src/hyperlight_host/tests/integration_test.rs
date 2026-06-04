@@ -935,7 +935,19 @@ fn interrupt_random_kill_stress_test() {
     use hyperlight_host::sandbox::snapshot::Snapshot;
     use log::{error, trace};
 
+    // The number of sandboxes kept live simultaneously must stay within the
+    // host's hypervisor partition pool. AArch64/MSHV hosts expose only a
+    // small, *system-wide* child-partition pool (empirically ~64); exceeding it
+    // fails partition creation with HV_STATUS_NO_RESOURCES (surfaced as EIO). We
+    // therefore shrink the pool and thread count there, while KVM and other
+    // backends keep the original high-concurrency stress.
+    #[cfg(all(target_arch = "aarch64", feature = "mshv3"))]
+    const POOL_SIZE: usize = 32;
+    #[cfg(not(all(target_arch = "aarch64", feature = "mshv3")))]
     const POOL_SIZE: usize = 100;
+    #[cfg(all(target_arch = "aarch64", feature = "mshv3"))]
+    const NUM_THREADS: usize = 32;
+    #[cfg(not(all(target_arch = "aarch64", feature = "mshv3")))]
     const NUM_THREADS: usize = 100;
     const ITERATIONS_PER_THREAD: usize = 500;
     const KILL_PROBABILITY: f64 = 0.5; // 50% chance to attempt kill
@@ -1471,7 +1483,15 @@ fn interrupt_infinite_moving_loop_stress_test() {
     use std::sync::Arc;
     use std::thread;
 
-    // We have a high thread count to stress test and to have interesting interleavings
+    // We have a high thread count to stress test and to have interesting interleavings.
+    // Each thread holds two live sandboxes (real + bait), so the partition demand is
+    // 2 * NUM_THREADS. AArch64/MSHV hosts expose only a small, system-wide
+    // child-partition pool (~64), so we cap the thread count there to avoid
+    // exhausting it (HV_STATUS_NO_RESOURCES / EIO); KVM and other backends keep the
+    // original high-concurrency stress.
+    #[cfg(all(target_arch = "aarch64", feature = "mshv3"))]
+    const NUM_THREADS: usize = 24;
+    #[cfg(not(all(target_arch = "aarch64", feature = "mshv3")))]
     const NUM_THREADS: usize = 200;
 
     let mut handles = vec![];

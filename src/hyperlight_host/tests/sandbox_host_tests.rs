@@ -286,7 +286,18 @@ fn simple_test() {
 
 #[test]
 fn simple_test_parallel() {
-    let handles: Vec<_> = (0..50)
+    // Each spawned thread holds a live sandbox (hypervisor partition) while it
+    // runs. AArch64/MSHV hosts expose only a small, *system-wide*
+    // child-partition pool (empirically ~64); exceeding it fails partition
+    // creation with HV_STATUS_NO_RESOURCES (surfaced as EIO). We therefore cap
+    // the fan-out on AArch64/MSHV so this test can coexist with the rest of the
+    // suite; KVM and other backends keep the original high-concurrency stress.
+    #[cfg(all(target_arch = "aarch64", feature = "mshv3"))]
+    const NUM_PARALLEL: usize = 16;
+    #[cfg(not(all(target_arch = "aarch64", feature = "mshv3")))]
+    const NUM_PARALLEL: usize = 50;
+
+    let handles: Vec<_> = (0..NUM_PARALLEL)
         .map(|_| {
             std::thread::spawn(|| {
                 simple_test_helper();
@@ -330,7 +341,15 @@ fn callback_test() {
 
 #[test]
 fn callback_test_parallel() {
-    let handles: Vec<_> = (0..100)
+    // See `simple_test_parallel` for why AArch64/MSHV caps the fan-out: the
+    // host's system-wide child-partition pool (~64) cannot satisfy 100
+    // simultaneous partitions. KVM and other backends keep the full stress.
+    #[cfg(all(target_arch = "aarch64", feature = "mshv3"))]
+    const NUM_PARALLEL: usize = 16;
+    #[cfg(not(all(target_arch = "aarch64", feature = "mshv3")))]
+    const NUM_PARALLEL: usize = 100;
+
+    let handles: Vec<_> = (0..NUM_PARALLEL)
         .map(|_| {
             std::thread::spawn(|| {
                 callback_test_helper();

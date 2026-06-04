@@ -29,10 +29,10 @@ use crate::hypervisor::hyperlight_vm::get_guest_log_filter;
 use crate::hypervisor::regs::{CommonFpu, CommonRegisters, CommonSpecialRegisters};
 #[cfg(kvm)]
 use crate::hypervisor::virtual_machine::kvm::KvmVm;
-#[cfg(kvm)]
-use crate::hypervisor::virtual_machine::{HypervisorType, VmError};
+#[cfg(mshv3)]
+use crate::hypervisor::virtual_machine::mshv::MshvVm;
 use crate::hypervisor::virtual_machine::{
-    ResetVcpuError, VirtualMachine, get_available_hypervisor,
+    HypervisorType, ResetVcpuError, VirtualMachine, VmError, get_available_hypervisor,
 };
 use crate::hypervisor::{InterruptHandleImpl, LinuxInterruptHandle};
 use crate::mem::mgr::{SandboxMemoryManager, SnapshotSharedMemory};
@@ -64,9 +64,8 @@ impl HyperlightVm {
         let vm: VmType = match get_available_hypervisor() {
             #[cfg(kvm)]
             Some(HypervisorType::Kvm) => Box::new(KvmVm::new().map_err(VmError::CreateVm)?),
-            // TODO: mshv support
             #[cfg(mshv3)]
-            Some(HypervisorType::Mshv) => return Err(CreateHyperlightVmError::NoHypervisorFound),
+            Some(HypervisorType::Mshv) => Box::new(MshvVm::new().map_err(VmError::CreateVm)?),
             None => return Err(CreateHyperlightVmError::NoHypervisorFound),
         };
         vm.set_sregs(&CommonSpecialRegisters::defaults(root_pt_addr))

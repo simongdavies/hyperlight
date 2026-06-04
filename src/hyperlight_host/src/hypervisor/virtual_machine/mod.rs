@@ -112,7 +112,7 @@ pub(crate) const XSAVE_MIN_SIZE: usize = 576;
 
 /// Standard XSAVE buffer size (4KB) used by KVM and MSHV.
 /// WHP queries the required size dynamically.
-#[cfg(all(any(kvm, mshv3), test, not(feature = "i686-guest")))]
+#[cfg(all(target_arch = "x86_64", any(kvm, mshv3), test, not(feature = "i686-guest")))]
 pub(crate) const XSAVE_BUFFER_SIZE: usize = 4096;
 
 // Compiler error if no hypervisor type is available (not applicable on aarch64 yet)
@@ -356,16 +356,23 @@ pub(crate) trait VirtualMachine: Debug + Send {
     #[allow(dead_code)]
     fn debug_regs(&self) -> std::result::Result<CommonDebugRegs, RegisterError>;
     /// Set the debug registers of the vCPU
+    // Used on the x86 reset/debug paths, but unused on aarch64, so only suppress
+    // the dead-code lint there to keep coverage on x86.
+    #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
     fn set_debug_regs(&self, drs: &CommonDebugRegs) -> std::result::Result<(), RegisterError>;
 
     /// Get xsave
     #[allow(dead_code)]
     fn xsave(&self) -> std::result::Result<Vec<u8>, RegisterError>;
     /// Reset xsave to default state
+    // Used on the x86 reset path, but unused on aarch64, so only suppress the
+    // dead-code lint there to keep coverage on x86.
+    #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
     fn reset_xsave(&self) -> std::result::Result<(), RegisterError>;
     /// Set xsave - only used for tests
     #[cfg(test)]
     #[cfg(not(feature = "i686-guest"))]
+    #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
     fn set_xsave(&self, xsave: &[u32]) -> std::result::Result<(), RegisterError>;
 
     /// Single-operation vCPU reset
