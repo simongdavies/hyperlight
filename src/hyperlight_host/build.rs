@@ -30,6 +30,7 @@ fn main() -> Result<()> {
     // This logic runs when targeting Windows, even if cross-compiling from Linux.
     if std::env::var("CARGO_CFG_TARGET_OS")? == "windows" {
         println!("cargo:rerun-if-changed=src/hyperlight_surrogate/src/main.rs");
+        println!("cargo:rerun-if-changed=src/hyperlight_surrogate/build.rs");
 
         // Build hyperlight_surrogate and
         // Set $HYPERLIGHT_SURROGATE_DIR env var during rust build so we can
@@ -45,6 +46,10 @@ fn main() -> Result<()> {
         std::fs::copy(
             format!("{manifest_dir}/src/hyperlight_surrogate/src/main.rs"),
             format!("{out_dir}/hyperlight_surrogate/src/main.rs"),
+        )?;
+        std::fs::copy(
+            format!("{manifest_dir}/src/hyperlight_surrogate/build.rs"),
+            format!("{out_dir}/hyperlight_surrogate/build.rs"),
         )?;
         std::fs::copy(
             format!("{manifest_dir}/src/hyperlight_surrogate/Cargo.toml_temp_name"),

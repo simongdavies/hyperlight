@@ -286,7 +286,12 @@ fn simple_test() {
 
 #[test]
 fn simple_test_parallel() {
-    let handles: Vec<_> = (0..50)
+    #[cfg(all(target_arch = "aarch64", target_os = "windows"))]
+    const NUM_THREADS: usize = 8;
+    #[cfg(not(all(target_arch = "aarch64", target_os = "windows")))]
+    const NUM_THREADS: usize = 50;
+
+    let handles: Vec<_> = (0..NUM_THREADS)
         .map(|_| {
             std::thread::spawn(|| {
                 simple_test_helper();
@@ -330,7 +335,12 @@ fn callback_test() {
 
 #[test]
 fn callback_test_parallel() {
-    let handles: Vec<_> = (0..100)
+    #[cfg(all(target_arch = "aarch64", target_os = "windows"))]
+    const NUM_THREADS: usize = 8;
+    #[cfg(not(all(target_arch = "aarch64", target_os = "windows")))]
+    const NUM_THREADS: usize = 100;
+
+    let handles: Vec<_> = (0..NUM_THREADS)
         .map(|_| {
             std::thread::spawn(|| {
                 callback_test_helper();

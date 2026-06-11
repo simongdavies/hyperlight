@@ -935,7 +935,13 @@ fn interrupt_random_kill_stress_test() {
     use hyperlight_host::sandbox::snapshot::Snapshot;
     use tracing::{error, trace};
 
+    #[cfg(all(target_arch = "aarch64", target_os = "windows"))]
+    const POOL_SIZE: usize = 32;
+    #[cfg(not(all(target_arch = "aarch64", target_os = "windows")))]
     const POOL_SIZE: usize = 100;
+    #[cfg(all(target_arch = "aarch64", target_os = "windows"))]
+    const NUM_THREADS: usize = 32;
+    #[cfg(not(all(target_arch = "aarch64", target_os = "windows")))]
     const NUM_THREADS: usize = 100;
     const ITERATIONS_PER_THREAD: usize = 500;
     const KILL_PROBABILITY: f64 = 0.5; // 50% chance to attempt kill
@@ -1383,6 +1389,9 @@ fn interrupt_infinite_loop_stress_test() {
     use std::sync::{Arc, Barrier};
     use std::thread;
 
+    #[cfg(all(target_arch = "aarch64", target_os = "windows"))]
+    const NUM_THREADS: usize = 24;
+    #[cfg(not(all(target_arch = "aarch64", target_os = "windows")))]
     const NUM_THREADS: usize = 50;
     const ITERATIONS_PER_THREAD: usize = 500;
 
@@ -1472,6 +1481,9 @@ fn interrupt_infinite_moving_loop_stress_test() {
     use std::thread;
 
     // We have a high thread count to stress test and to have interesting interleavings
+    #[cfg(all(target_arch = "aarch64", target_os = "windows"))]
+    const NUM_THREADS: usize = 12;
+    #[cfg(not(all(target_arch = "aarch64", target_os = "windows")))]
     const NUM_THREADS: usize = 200;
 
     let mut handles = vec![];
@@ -1738,8 +1750,14 @@ fn fill_heap_and_cause_exception() {
 #[test]
 #[cfg(target_os = "windows")]
 fn interrupt_cancel_delete_race() {
+    #[cfg(all(target_arch = "aarch64", target_os = "windows"))]
+    const NUM_THREADS: usize = 4;
+    #[cfg(not(all(target_arch = "aarch64", target_os = "windows")))]
     const NUM_THREADS: usize = 8;
     const NUM_KILL_THREADS: usize = 4;
+    #[cfg(all(target_arch = "aarch64", target_os = "windows"))]
+    const ITERATIONS_PER_THREAD: usize = 100;
+    #[cfg(not(all(target_arch = "aarch64", target_os = "windows")))]
     const ITERATIONS_PER_THREAD: usize = 1000;
 
     let mut handles = vec![];

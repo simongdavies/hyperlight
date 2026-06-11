@@ -25,7 +25,7 @@ use mshv_bindings::{SegmentRegister, SpecialRegisters, TableRegister};
 use windows::Win32::System::Hypervisor::*;
 
 #[cfg(target_os = "windows")]
-use super::FromWhpRegisterError;
+use super::{Align16, FromWhpRegisterError};
 
 // CR0 bits used by both 32-bit and 64-bit guest
 const CR0_PE: u64 = 1;
@@ -265,20 +265,8 @@ impl From<&CommonSpecialRegisters> for kvm_sregs {
 }
 
 /// WHV_REGISTER_VALUE must be 16-byte aligned, but the rust struct is incorrectly generated
-/// as 8-byte aligned. This is a workaround to ensure that the struct is 16-byte aligned.
-#[cfg(target_os = "windows")]
-#[repr(C, align(16))]
-#[derive(Debug, Default, Copy, Clone, PartialEq)]
-pub(crate) struct Align16<T>(pub(crate) T);
-
-#[cfg(target_os = "windows")]
-const _: () = {
-    assert!(
-        std::mem::size_of::<Align16<WHV_REGISTER_VALUE>>()
-            == std::mem::size_of::<WHV_REGISTER_VALUE>()
-    );
-};
-
+/// as 8-byte aligned. The 16-byte-aligned wrapper [`Align16`](super::Align16) now lives in the
+/// shared `regs` module so it can be reused by the aarch64 WHP backend.
 #[cfg(target_os = "windows")]
 pub(crate) const WHP_SREGS_NAMES_LEN: usize = 17;
 #[cfg(target_os = "windows")]

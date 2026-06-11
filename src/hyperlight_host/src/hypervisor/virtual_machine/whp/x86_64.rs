@@ -21,13 +21,10 @@ use hyperlight_common::outb::VmAction;
 use tracing::Span;
 #[cfg(feature = "trace_guest")]
 use tracing_opentelemetry::OpenTelemetrySpanExt;
-use windows::Win32::Foundation::{CloseHandle, FreeLibrary, HANDLE};
 use windows::Win32::System::Hypervisor::*;
-use windows::Win32::System::LibraryLoader::*;
-use windows::Win32::System::Memory::{MEMORY_MAPPED_VIEW_ADDRESS, UnmapViewOfFile};
-use windows::core::s;
 use windows_result::HRESULT;
 
+use super::WhpVm;
 #[cfg(gdb)]
 use crate::hypervisor::gdb::{DebugError, DebuggableVm};
 use crate::hypervisor::regs::{
@@ -36,79 +33,14 @@ use crate::hypervisor::regs::{
     WHP_FPU_NAMES, WHP_FPU_NAMES_LEN, WHP_REGS_NAMES, WHP_REGS_NAMES_LEN, WHP_SREGS_NAMES,
     WHP_SREGS_NAMES_LEN,
 };
-use crate::hypervisor::surrogate_process::SurrogateProcess;
 use crate::hypervisor::surrogate_process_manager::get_surrogate_process_manager;
-#[cfg(feature = "hw-interrupts")]
-use crate::hypervisor::virtual_machine::x86_64::hw_interrupts::TimerThread;
 use crate::hypervisor::virtual_machine::{
-    CreateVmError, HypervisorError, MapMemoryError, RegisterError, RunVcpuError, UnmapMemoryError,
-    VirtualMachine, VmExit, XSAVE_MIN_SIZE,
+    CreateVmError, MapMemoryError, RegisterError, RunVcpuError, UnmapMemoryError, VirtualMachine,
+    VmExit, XSAVE_MIN_SIZE,
 };
-use crate::hypervisor::wrappers::HandleWrapper;
-use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags, MemoryRegionType};
+use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags};
 #[cfg(feature = "trace_guest")]
 use crate::sandbox::trace::TraceContext as SandboxTraceContext;
-
-#[allow(dead_code)] // Will be used for runtime hypervisor detection
-pub(crate) fn is_hypervisor_present() -> bool {
-    let mut capability: WHV_CAPABILITY = Default::default();
-    let written_size: Option<*mut u32> = None;
-
-    match unsafe {
-        WHvGetCapability(
-            WHvCapabilityCodeHypervisorPresent,
-            &mut capability as *mut _ as *mut c_void,
-            std::mem::size_of::<WHV_CAPABILITY>() as u32,
-            written_size,
-        )
-    } {
-        Ok(_) => unsafe { capability.HypervisorPresent.as_bool() },
-        Err(_) => {
-            tracing::info!("Windows Hypervisor Platform is not available on this system");
-            false
-        }
-    }
-}
-
-/// Helper: release a host-side file mapping view and its handle.
-/// Called from both `unmap_memory` and `WhpVm::drop`.
-fn release_file_mapping(view_base: *mut c_void, mapping_handle: HandleWrapper) {
-    unsafe {
-        if let Err(e) = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: view_base }) {
-            tracing::error!("Failed to unmap file view at {:?}: {:?}", view_base, e);
-        }
-        if let Err(e) = CloseHandle(mapping_handle.into()) {
-            tracing::error!(
-                "Failed to close file mapping handle {:?}: {:?}",
-                mapping_handle,
-                e
-            );
-        }
-    }
-}
-
-/// A Windows Hypervisor Platform implementation of a single-vcpu VM
-#[derive(Debug)]
-pub(crate) struct WhpVm {
-    partition: WHV_PARTITION_HANDLE,
-    // Surrogate process for memory mapping
-    surrogate_process: SurrogateProcess,
-    /// Tracks host-side file mappings (view_base, mapping_handle) for
-    /// cleanup on unmap or drop. Only populated for MappedFile regions.
-    file_mappings: Vec<(HandleWrapper, *mut c_void)>,
-    /// Handle to the background timer (if started).
-    #[cfg(feature = "hw-interrupts")]
-    timer: Option<TimerThread>,
-}
-
-// Safety: `WhpVm` is !Send because it holds `SurrogateProcess` which contains a raw pointer
-// `allocated_address` (*mut c_void). This pointer represents a memory mapped view address
-// in the surrogate process. It is never dereferenced, only used for address arithmetic and
-// resource management (unmapping). This is a system resource that is not bound to the creating
-// thread and can be safely transferred between threads.
-// `file_mappings` contains raw pointers that are also kernel resource handles,
-// safe to use from any thread.
-unsafe impl Send for WhpVm {}
 
 impl WhpVm {
     pub(crate) fn new() -> Result<Self, CreateVmError> {
@@ -157,25 +89,6 @@ impl WhpVm {
             timer: None,
         })
     }
-
-    /// Helper for setting arbitrary registers. Makes sure the same number
-    /// of names and values are passed (at the expense of some performance).
-    fn set_registers(
-        &self,
-        registers: &[(WHV_REGISTER_NAME, Align16<WHV_REGISTER_VALUE>)],
-    ) -> windows_result::Result<()> {
-        let (names, values): (Vec<_>, Vec<_>) = registers.iter().copied().unzip();
-
-        unsafe {
-            WHvSetVirtualProcessorRegisters(
-                self.partition,
-                0,
-                names.as_ptr(),
-                names.len() as u32,
-                values.as_ptr() as *const WHV_REGISTER_VALUE, // Casting Align16 away
-            )
-        }
-    }
 }
 
 impl VirtualMachine for WhpVm {
@@ -183,103 +96,15 @@ impl VirtualMachine for WhpVm {
         &mut self,
         (_slot, region): (u32, &MemoryRegion),
     ) -> Result<(), MapMemoryError> {
-        // Calculate the surrogate process address for this region
-        let surrogate_base = self
-            .surrogate_process
-            .map(
-                region.host_region.start.from_handle,
-                region.host_region.start.handle_base,
-                region.host_region.start.handle_size,
-                &region.region_type.surrogate_mapping(),
-            )
-            .map_err(|e| MapMemoryError::SurrogateProcess(e.to_string()))?;
-        let surrogate_addr = surrogate_base.wrapping_add(region.host_region.start.offset);
-
-        let flags = region
-            .flags
-            .iter()
-            .map(|flag| match flag {
-                MemoryRegionFlags::NONE => Ok(WHvMapGpaRangeFlagNone),
-                MemoryRegionFlags::READ => Ok(WHvMapGpaRangeFlagRead),
-                MemoryRegionFlags::WRITE => Ok(WHvMapGpaRangeFlagWrite),
-                MemoryRegionFlags::EXECUTE => Ok(WHvMapGpaRangeFlagExecute),
-                _ => Err(MapMemoryError::InvalidFlags(format!(
-                    "Invalid memory region flag: {:?}",
-                    flag
-                ))),
-            })
-            .collect::<std::result::Result<Vec<WHV_MAP_GPA_RANGE_FLAGS>, MapMemoryError>>()?
-            .iter()
-            .fold(WHvMapGpaRangeFlagNone, |acc, flag| acc | *flag);
-
-        let whvmapgparange2_func = unsafe {
-            match try_load_whv_map_gpa_range2() {
-                Ok(func) => func,
-                Err(e) => {
-                    return Err(MapMemoryError::LoadApi {
-                        api_name: "WHvMapGpaRange2",
-                        source: e,
-                    });
-                }
-            }
-        };
-
-        let res = unsafe {
-            whvmapgparange2_func(
-                self.partition,
-                self.surrogate_process.process_handle.into(),
-                surrogate_addr,
-                region.guest_region.start as u64,
-                region.guest_region.len() as u64,
-                flags,
-            )
-        };
-        if res.is_err() {
-            return Err(MapMemoryError::Hypervisor(HypervisorError::WindowsError(
-                windows_result::Error::from_hresult(res),
-            )));
-        }
-
-        // Track host-side file mappings for cleanup on unmap or drop.
-        if region.region_type == MemoryRegionType::MappedFile {
-            self.file_mappings.push((
-                region.host_region.start.from_handle,
-                region.host_region.start.handle_base as *mut c_void,
-            ));
-        }
-
-        Ok(())
+        // Memory mapping is architecture-neutral; delegate to the shared helper.
+        unsafe { self.map_memory_shared(region) }
     }
 
     fn unmap_memory(
         &mut self,
         (_slot, region): (u32, &MemoryRegion),
     ) -> Result<(), UnmapMemoryError> {
-        unsafe {
-            WHvUnmapGpaRange(
-                self.partition,
-                region.guest_region.start as u64,
-                region.guest_region.len() as u64,
-            )
-            .map_err(|e| UnmapMemoryError::Hypervisor(HypervisorError::WindowsError(e)))?;
-        }
-        self.surrogate_process
-            .unmap(region.host_region.start.handle_base);
-
-        // Clean up host-side file mapping resources for MappedFile regions.
-        if region.region_type == MemoryRegionType::MappedFile {
-            let handle_base = region.host_region.start.handle_base as *mut c_void;
-            if let Some(pos) = self
-                .file_mappings
-                .iter()
-                .position(|(_, vb)| *vb == handle_base)
-            {
-                let (handle, view) = self.file_mappings.swap_remove(pos);
-                release_file_mapping(view, handle);
-            }
-        }
-
-        Ok(())
+        self.unmap_memory_shared(region)
     }
 
     #[expect(non_upper_case_globals, reason = "Windows API constant are lower case")]
@@ -347,7 +172,9 @@ impl VirtualMachine for WhpVm {
                             if self.handle_hw_io_out(port, &data) {
                                 continue;
                             }
-                        } else if let Some(val) = super::x86_64::hw_interrupts::handle_io_in(port) {
+                        } else if let Some(val) =
+                            super::super::x86_64::hw_interrupts::handle_io_in(port)
+                        {
                             self.set_registers(&[(
                                 WHvX64RegisterRax,
                                 Align16(WHV_REGISTER_VALUE { Reg64: val }),
@@ -1015,7 +842,7 @@ impl WhpVm {
             ));
         }
 
-        super::x86_64::hw_interrupts::init_lapic_registers(&mut state);
+        super::super::x86_64::hw_interrupts::init_lapic_registers(&mut state);
 
         unsafe {
             WHvSetVirtualProcessorInterruptControllerState2(
@@ -1064,7 +891,7 @@ impl WhpVm {
     /// delivers through the LAPIC and the guest only acknowledges via PIC.
     fn do_lapic_eoi(&self) {
         if let Ok(mut state) = self.get_lapic_state() {
-            super::x86_64::hw_interrupts::lapic_eoi(&mut state);
+            super::super::x86_64::hw_interrupts::lapic_eoi(&mut state);
             if let Err(e) = self.set_lapic_state(&state) {
                 tracing::warn!("WHP set_lapic_state (EOI) failed: {e}");
             }
@@ -1074,8 +901,8 @@ impl WhpVm {
     fn handle_hw_io_out(&mut self, port: u16, data: &[u8]) -> bool {
         if port == VmAction::PvTimerConfig as u16 {
             let partition_raw = self.partition.0;
-            let vector = super::x86_64::hw_interrupts::TIMER_VECTOR;
-            super::x86_64::hw_interrupts::handle_pv_timer_config(
+            let vector = super::super::x86_64::hw_interrupts::TIMER_VECTOR;
+            super::super::x86_64::hw_interrupts::handle_pv_timer_config(
                 &mut self.timer,
                 data,
                 move || {
@@ -1097,72 +924,10 @@ impl WhpVm {
             return true;
         }
         let timer_active = self.timer.as_ref().is_some_and(|t| t.is_active());
-        super::x86_64::hw_interrupts::handle_common_io_out(port, data, timer_active, || {
+        super::super::x86_64::hw_interrupts::handle_common_io_out(port, data, timer_active, || {
             self.do_lapic_eoi()
         })
     }
-}
-
-impl Drop for WhpVm {
-    fn drop(&mut self) {
-        // Clean up any remaining file mappings that weren't explicitly unmapped.
-        for (handle, view) in self.file_mappings.drain(..) {
-            release_file_mapping(view, handle);
-        }
-
-        // Stop the software timer thread before tearing down the partition.
-        #[cfg(feature = "hw-interrupts")]
-        if let Some(mut t) = self.timer.take() {
-            t.stop();
-        }
-
-        // HyperlightVm::drop() calls set_dropped() before this runs.
-        // set_dropped() ensures no WHvCancelRunVirtualProcessor calls are in progress
-        // or will be made in the future, so it's safe to delete the partition.
-        // (HyperlightVm::drop() runs before its fields are dropped, so
-        // set_dropped() completes before this Drop impl runs.)
-        if let Err(e) = unsafe { WHvDeletePartition(self.partition) } {
-            tracing::error!("Failed to delete partition: {}", e);
-        }
-    }
-}
-
-// This function dynamically loads the WHvMapGpaRange2 function from the winhvplatform.dll
-// WHvMapGpaRange2 only available on Windows 11 or Windows Server 2022 and later
-// we do things this way to allow a user trying to load hyperlight on an older version of windows to
-// get an error message saying that hyperlight requires a newer version of windows, rather than just failing
-// with an error about a missing entrypoint
-// This function should always succeed since before we get here we have already checked that the hypervisor is present and
-// that we are on a supported version of windows.
-type WHvMapGpaRange2Func = unsafe extern "C" fn(
-    WHV_PARTITION_HANDLE,
-    HANDLE,
-    *const c_void,
-    u64,
-    u64,
-    WHV_MAP_GPA_RANGE_FLAGS,
-) -> HRESULT;
-
-unsafe fn try_load_whv_map_gpa_range2() -> windows_result::Result<WHvMapGpaRange2Func> {
-    let library = unsafe {
-        LoadLibraryExA(
-            s!("winhvplatform.dll"),
-            None,
-            LOAD_LIBRARY_SEARCH_DEFAULT_DIRS,
-        )
-    }?;
-
-    let address = unsafe { GetProcAddress(library, s!("WHvMapGpaRange2")) };
-
-    if address.is_none() {
-        unsafe { FreeLibrary(library)? };
-        return Err(windows_result::Error::new(
-            HRESULT::from_win32(127), // ERROR_PROC_NOT_FOUND
-            "Failed to find WHvMapGpaRange2 in winhvplatform.dll",
-        ));
-    }
-
-    unsafe { Ok(std::mem::transmute_copy(&address)) }
 }
 
 #[cfg(test)]

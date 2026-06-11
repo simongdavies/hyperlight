@@ -503,23 +503,23 @@ impl SandboxMemoryManager<HostSharedMemory> {
 
     pub(crate) fn clear_io_buffers(&mut self) {
         // Clear the output data buffer
-        loop {
-            let Ok(_) = self.scratch_mem.try_pop_buffer_into::<Vec<u8>>(
+        while self
+            .scratch_mem
+            .try_pop_buffer_into::<Vec<u8>>(
                 self.layout.get_output_data_buffer_scratch_host_offset(),
                 self.layout.output_data_size,
-            ) else {
-                break;
-            };
-        }
+            )
+            .is_ok()
+        {}
         // Clear the input data buffer
-        loop {
-            let Ok(_) = self.scratch_mem.try_pop_buffer_into::<Vec<u8>>(
+        while self
+            .scratch_mem
+            .try_pop_buffer_into::<Vec<u8>>(
                 self.layout.get_input_data_buffer_scratch_host_offset(),
                 self.layout.input_data_size,
-            ) else {
-                break;
-            };
-        }
+            )
+            .is_ok()
+        {}
     }
 
     /// This function restores a memory snapshot from a given snapshot.

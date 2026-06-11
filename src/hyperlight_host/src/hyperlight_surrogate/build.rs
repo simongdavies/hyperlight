@@ -14,24 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// TODO(aarch64): implement real register definitions
-
-mod common_regs;
-pub(crate) use common_regs::*;
-
-mod special_regs;
-pub(crate) use special_regs::*;
-
-mod common_fpu;
-pub(crate) use common_fpu::*;
-
-#[derive(Debug, Default, Copy, Clone, PartialEq)]
-pub(crate) struct CommonDebugRegs {
-    _placeholder: u64,
+fn main() {
+    // The surrogate is a #![no_std] binary with a custom entry point.
+    // We need to tell the MSVC linker the entry point and subsystem.
+    println!("cargo:rustc-link-arg=/ENTRY:mainCRTStartup");
+    println!("cargo:rustc-link-arg=/SUBSYSTEM:CONSOLE");
 }
-
-#[cfg(kvm)]
-pub(crate) mod kvm_reg;
-
-#[cfg(target_os = "windows")]
-pub(crate) mod whp_reg;
