@@ -74,6 +74,12 @@ pub struct SandboxConfiguration {
     interrupt_vcpu_sigrtmin_offset: u8,
     /// How much writable memory to offer the guest
     scratch_size: usize,
+    /// Portion of the configured heap reserved for the ring 3 runtime's own
+    /// (supervisor) kernel heap. The remainder of `heap_size` backs the
+    /// user-accessible ring 3 heap. Only meaningful with the `userspace`
+    /// feature.
+    #[cfg(feature = "userspace")]
+    kernel_heap_size: u64,
 }
 
 impl SandboxConfiguration {
@@ -91,18 +97,27 @@ impl SandboxConfiguration {
     pub const INTERRUPT_VCPU_SIGRTMIN_OFFSET: u8 = 0;
     /// The default heap size of a hyperlight sandbox
     pub const DEFAULT_HEAP_SIZE: u64 = 131072;
+    /// The default size of the ring 3 runtime kernel heap (`userspace` feature).
+    ///
+    /// Deliberately small: with ring 3 enabled the configured heap is the total
+    /// budget, this slice backs the runtime's own allocations (marshalling
+    /// buffers, the decoded call used for verification, etc.), and the
+    /// remainder backs the user-accessible ring 3 heap.
+    #[cfg(feature = "userspace")]
+    pub const DEFAULT_KERNEL_HEAP_SIZE: u64 = 0x10000;
     /// The default size of the scratch region
     #[cfg(not(feature = "userspace"))]
     pub const DEFAULT_SCRATCH_SIZE: usize = 0x48000;
     /// The default size of the scratch region.
     ///
     /// With the `userspace` feature, ring 3 guest code runs with an eagerly
-    /// mapped user stack and user heap that are carved from the scratch region
-    /// by the guest's physical page allocator, so the default is enlarged to
-    /// accommodate them. On-demand growth would remove the need for this; see
-    /// docs/userspace-ring3.md.
+    /// mapped user stack carved from the scratch region by the guest's physical
+    /// page allocator, so the default is enlarged to accommodate it (and the
+    /// page tables that map it). The user heap is carved from the configured
+    /// guest heap, not scratch. On-demand growth would remove the need for this;
+    /// see docs/userspace-ring3.md.
     #[cfg(feature = "userspace")]
-    pub const DEFAULT_SCRATCH_SIZE: usize = 0x48000 + 0x100000;
+    pub const DEFAULT_SCRATCH_SIZE: usize = 0x48000 + 0x20000;
 
     #[allow(clippy::too_many_arguments)]
     /// Create a new configuration for a sandbox with the given sizes.
@@ -124,6 +139,8 @@ impl SandboxConfiguration {
             scratch_size,
             interrupt_retry_delay,
             interrupt_vcpu_sigrtmin_offset,
+            #[cfg(feature = "userspace")]
+            kernel_heap_size: Self::DEFAULT_KERNEL_HEAP_SIZE,
             #[cfg(gdb)]
             guest_debug_info,
             #[cfg(crashdump)]
@@ -223,6 +240,20 @@ impl SandboxConfiguration {
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub fn set_scratch_size(&mut self, scratch_size: usize) {
         self.scratch_size = scratch_size;
+    }
+
+    /// Reserve `kernel_heap_size` bytes of the configured heap for the ring 3
+    /// runtime's own (supervisor) kernel heap; the remainder backs the
+    /// user-accessible ring 3 heap. Only used with the `userspace` feature.
+    #[cfg(feature = "userspace")]
+    pub fn set_kernel_heap_size(&mut self, kernel_heap_size: u64) {
+        self.kernel_heap_size = kernel_heap_size;
+    }
+
+    /// Get the size reserved for the ring 3 runtime kernel heap.
+    #[cfg(feature = "userspace")]
+    pub(crate) fn get_kernel_heap_size(&self) -> u64 {
+        self.kernel_heap_size
     }
 
     #[cfg(crashdump)]

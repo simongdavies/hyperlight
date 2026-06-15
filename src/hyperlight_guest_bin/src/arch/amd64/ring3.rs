@@ -187,9 +187,6 @@ pub(crate) unsafe fn init() {
         );
         crate::paging::barrier::first_valid_same_ctx();
 
-        // Set up the user-accessible heap so ring 3 code can allocate.
-        crate::userspace_heap::init_user_heap();
-
         // Program the syscall MSRs. The host already sets EFER.SCE, but set it
         // defensively in case that ever changes.
         wrmsr(IA32_EFER, rdmsr(IA32_EFER) | EFER_SCE);

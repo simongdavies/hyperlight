@@ -263,13 +263,26 @@ pub(crate) extern "C" fn generic_init(
         let heap_allocator = &HEAP_ALLOCATOR.0;
         // With the userspace feature, the global allocator routes between the
         // kernel and user heaps; here we initialise the kernel heap with the
-        // guest's heap region (the user heap is set up separately in ring3 init).
+        // guest's heap region (the user heap is set up separately below from
+        // the user slice the host carved out of the configured heap).
         #[cfg(all(feature = "userspace", target_arch = "x86_64"))]
         let heap_allocator = HEAP_ALLOCATOR.kernel();
         heap_allocator
             .try_lock()
             .expect("Failed to access HEAP_ALLOCATOR")
             .init(heap_start, heap_size);
+
+        // Initialise the ring 3 user heap over the user-accessible slice the
+        // host carved out of the configured guest heap (PEB `user_heap`). Done
+        // here, rather than in the early architecture init, because it needs
+        // the PEB.
+        #[cfg(all(feature = "userspace", target_arch = "x86_64"))]
+        {
+            let user_heap_start = (*peb_ptr).user_heap.ptr;
+            let user_heap_size = (*peb_ptr).user_heap.size;
+            crate::userspace_heap::init_user_heap(user_heap_start, user_heap_size);
+        }
+
         peb_ptr
     };
 

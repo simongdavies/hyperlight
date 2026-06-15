@@ -223,6 +223,11 @@ pub(crate) struct SandboxMemoryLayout {
     pub(crate) output_data_size: usize,
     /// The heap size of this sandbox.
     pub(crate) heap_size: usize,
+    /// Portion of `heap_size` reserved for the ring 3 runtime's supervisor
+    /// kernel heap; the remainder backs the user-accessible ring 3 heap.
+    /// Page-aligned. Only meaningful with the `userspace` feature.
+    #[cfg(feature = "userspace")]
+    pub(crate) kernel_heap_size: usize,
     /// The size of the guest code section.
     pub(crate) code_size: usize,
     /// The size of the init data section (guest blob).
@@ -314,6 +319,8 @@ impl SandboxMemoryLayout {
             input_data_size,
             output_data_size,
             heap_size,
+            #[cfg(feature = "userspace")]
+            kernel_heap_size,
             code_size,
             init_data_size,
             init_data_permissions,
@@ -328,6 +335,18 @@ impl SandboxMemoryLayout {
             && *init_data_size == other.init_data_size
             && *init_data_permissions == other.init_data_permissions
             && *scratch_size == other.scratch_size
+            // A different kernel/user heap split changes the guest's memory
+            // map, so snapshots are not interchangeable across splits.
+            && {
+                #[cfg(feature = "userspace")]
+                {
+                    *kernel_heap_size == other.kernel_heap_size
+                }
+                #[cfg(not(feature = "userspace"))]
+                {
+                    true
+                }
+            }
     }
 
     /// The maximum amount of memory a single sandbox will be allowed.
@@ -353,6 +372,17 @@ impl SandboxMemoryLayout {
         init_data_permissions: Option<MemoryRegionFlags>,
     ) -> Result<Self> {
         let heap_size = usize::try_from(cfg.get_heap_size())?;
+        #[cfg(feature = "userspace")]
+        let kernel_heap_size = {
+            // Reserve a page-aligned kernel slice; the rest is the ring 3 user
+            // heap. The configured heap must be large enough to leave a
+            // non-empty user heap.
+            let k = usize::try_from(cfg.get_kernel_heap_size())?.next_multiple_of(PAGE_SIZE_USIZE);
+            if heap_size <= k {
+                return Err(MemoryRequestTooSmall(heap_size, k + PAGE_SIZE_USIZE));
+            }
+            k
+        };
         let scratch_size = cfg.get_scratch_size();
         if scratch_size > Self::MAX_MEMORY_SIZE {
             return Err(MemoryRequestTooBig(scratch_size, Self::MAX_MEMORY_SIZE));
@@ -369,6 +399,8 @@ impl SandboxMemoryLayout {
             input_data_size,
             output_data_size,
             heap_size,
+            #[cfg(feature = "userspace")]
+            kernel_heap_size,
             code_size,
             init_data_size,
             init_data_permissions,
@@ -687,6 +719,15 @@ impl SandboxMemoryLayout {
 
         let guest_base = Self::BASE_ADDRESS as u64;
 
+        // With the userspace feature the configured heap is split between the
+        // supervisor kernel heap (guest_heap) and the user-accessible ring 3
+        // heap (user_heap); without it guest_heap spans the whole configured
+        // heap.
+        #[cfg(feature = "userspace")]
+        let guest_heap_size = self.kernel_heap_size as u64;
+        #[cfg(not(feature = "userspace"))]
+        let guest_heap_size = self.heap_size as u64;
+
         let peb = HyperlightPEB {
             input_stack: GuestMemoryRegion {
                 size: self.input_data_size as u64,
@@ -701,8 +742,19 @@ impl SandboxMemoryLayout {
                 ptr: guest_base + self.init_data_offset() as u64,
             },
             guest_heap: GuestMemoryRegion {
-                size: self.heap_size as u64,
+                size: guest_heap_size,
                 ptr: guest_base + self.guest_heap_buffer_offset() as u64,
+            },
+            // With the userspace feature the configured heap is split: the
+            // kernel keeps the first `kernel_heap_size` bytes (guest_heap above)
+            // and the user heap is the remainder. The host marks the user slice
+            // user-accessible.
+            #[cfg(feature = "userspace")]
+            user_heap: GuestMemoryRegion {
+                size: (self.heap_size - self.kernel_heap_size) as u64,
+                ptr: guest_base
+                    + self.guest_heap_buffer_offset() as u64
+                    + self.kernel_heap_size as u64,
             },
             // Set up the file_mappings descriptor in the PEB.
             // - The `size` field holds the number of valid FileMappingInfo

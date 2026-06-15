@@ -72,6 +72,15 @@ pub struct HyperlightPEB {
     pub output_stack: GuestMemoryRegion,
     pub init_data: GuestMemoryRegion,
     pub guest_heap: GuestMemoryRegion,
+    /// Ring 3 user heap region (x86-64 `userspace` feature only).
+    ///
+    /// When the guest runs user code in ring 3, the configured guest heap is
+    /// split: `guest_heap` becomes the supervisor-only kernel slice and this is
+    /// the user-accessible remainder that backs the ring 3 user heap. The host
+    /// maps this slice user-accessible; the guest initialises its user
+    /// allocator over it.
+    #[cfg(feature = "userspace")]
+    pub user_heap: GuestMemoryRegion,
     /// File mappings array descriptor.
     /// **Note:** `size` holds the **entry count** (number of valid
     /// [`FileMappingInfo`] entries), NOT a byte size. `ptr` holds the
@@ -103,6 +112,11 @@ mod tests {
             guest_heap: GuestMemoryRegion {
                 size: 0x7777,
                 ptr: 0x8888,
+            },
+            #[cfg(feature = "userspace")]
+            user_heap: GuestMemoryRegion {
+                size: 0xbbbb,
+                ptr: 0xcccc,
             },
             #[cfg(feature = "nanvix-unstable")]
             file_mappings: GuestMemoryRegion {

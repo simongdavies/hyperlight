@@ -19,12 +19,25 @@ limitations under the License.
 //! `userspace` feature, so the whole file is gated on it.
 #![cfg(feature = "userspace")]
 
-use hyperlight_host::{GuestBinary, MultiUseSandbox, UninitializedSandbox};
+use hyperlight_host::sandbox::SandboxConfiguration;
+use hyperlight_host::{GuestBinary, HyperlightError, MultiUseSandbox, UninitializedSandbox};
 use hyperlight_testing::simple_guest_userspace_as_string;
 
 fn new_userspace_sandbox() -> MultiUseSandbox {
     let path = simple_guest_userspace_as_string().expect("userspace guest binary should exist");
     UninitializedSandbox::new(GuestBinary::FilePath(path), None)
+        .unwrap()
+        .evolve()
+        .unwrap()
+}
+
+/// Build a userspace sandbox with a specific total guest heap size. The kernel
+/// keeps its (small, default) slice and the rest backs the ring 3 user heap.
+fn new_userspace_sandbox_with_heap(heap_size: u64) -> MultiUseSandbox {
+    let path = simple_guest_userspace_as_string().expect("userspace guest binary should exist");
+    let mut cfg = SandboxConfiguration::default();
+    cfg.set_heap_size(heap_size);
+    UninitializedSandbox::new(GuestBinary::FilePath(path), Some(cfg))
         .unwrap()
         .evolve()
         .unwrap()
@@ -102,4 +115,37 @@ fn userspace_guest_call_with_restore() {
         assert_eq!(result, msg);
         sandbox.restore(snapshot.clone()).unwrap();
     }
+}
+
+/// The ring 3 user heap is backed by the user slice of the *configured* guest
+/// heap, so it scales with `heap_size` rather than being a fixed size. With a
+/// large enough heap, a ring 3 allocation far bigger than the historical
+/// hard-coded user heap (512 KiB) succeeds; a default (small) heap cannot
+/// satisfy it and the guest aborts (MallocFailed) instead of corrupting memory.
+#[test]
+fn userspace_guest_user_heap_scales_with_config() {
+    // Larger than the historical fixed 512 KiB user heap.
+    const BIG_ALLOC: i32 = 600 * 1024;
+
+    // Big heap: the user slice is several MiB, so a 600 KiB ring 3 allocation
+    // (impossible with the old fixed 512 KiB user heap) succeeds.
+    let mut big = new_userspace_sandbox_with_heap(8 * 1024 * 1024);
+    let ptr = big.call::<i32>("TestMalloc", BIG_ALLOC).unwrap();
+    assert_ne!(
+        ptr, 0,
+        "600 KiB ring 3 allocation should succeed on an 8 MiB heap"
+    );
+
+    // Default (small) heap: the user slice is only tens of KiB, so the same
+    // allocation cannot be satisfied and the guest aborts rather than
+    // succeeding or corrupting memory. (Today the ring 3 abort path itself
+    // faults on the privileged `out` instruction, so this currently surfaces as
+    // a general-protection fault rather than a clean MallocFailed; routing abort
+    // through a syscall is future work. Either way the call fails safely.)
+    let mut small = new_userspace_sandbox();
+    let err = small.call::<i32>("TestMalloc", BIG_ALLOC).unwrap_err();
+    assert!(
+        matches!(&err, HyperlightError::GuestAborted(_, _)),
+        "expected the oversized ring 3 allocation to abort, got {err:?}"
+    );
 }

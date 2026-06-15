@@ -39,31 +39,29 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::arch::asm;
 
 use buddy_system_allocator::LockedHeap;
-use hyperlight_common::vmem::{BasicMapping, MappingKind, PAGE_SIZE};
-use hyperlight_guest::prim_alloc::alloc_phys_pages;
-
-/// Base (lowest address) of the ring 3 user heap region. The buddy-allocator
-/// control structure lives at this address and the allocatable pool follows it;
-/// both are mapped user-accessible so ring 3 code can allocate directly without
-/// a syscall. It sits in its own high-half slot, clear of the user stack
-/// (0xffff_fc00_..) and the kernel structures above it.
-const USER_HEAP_BASE_GVA: u64 = 0xffff_fb00_0000_0000;
-
-/// Size of the ring 3 user heap (control structure + pool). Mapped eagerly for
-/// now from the scratch region (the host enlarges the default scratch size when
-/// the userspace feature is enabled to accommodate it); on-demand growth is
-/// future work. This bounds how much ring 3 code can allocate, which is
-/// sufficient for the self-test and simple guest functions.
-const USER_HEAP_SIZE: u64 = 512 * 1024;
+use hyperlight_common::vmem::PAGE_SIZE;
 
 /// Buddy-allocator order, matching the kernel heap's historical configuration.
 const HEAP_ORDER: usize = 32;
 
-/// The user heap's buddy-allocator control structure is placed at the base of
-/// the user heap region (user-accessible memory). The allocatable pool follows
-/// it, one page in.
-const USER_HEAP_CONTROL: *mut LockedHeap<HEAP_ORDER> =
-    USER_HEAP_BASE_GVA as *mut LockedHeap<HEAP_ORDER>;
+/// Base (lowest address) of the ring 3 user heap region, set by
+/// [`init_user_heap`] from the region the host carved out of the configured
+/// guest heap. The buddy-allocator control structure lives at this address and
+/// the allocatable pool follows it, one page in; the whole region is mapped
+/// user-accessible by the host so ring 3 code can allocate without a syscall.
+static mut USER_HEAP_BASE: u64 = 0;
+/// Length in bytes of the ring 3 user heap region (see [`USER_HEAP_BASE`]).
+static mut USER_HEAP_LEN: u64 = 0;
+
+/// The user heap's buddy-allocator control structure, placed at the base of the
+/// user heap region (user-accessible memory).
+///
+/// # Safety
+/// [`init_user_heap`] must have run first.
+#[inline(always)]
+unsafe fn user_heap_control() -> *mut LockedHeap<HEAP_ORDER> {
+    unsafe { USER_HEAP_BASE as *mut LockedHeap<HEAP_ORDER> }
+}
 
 /// Global allocator that routes between the supervisor-only kernel heap and the
 /// user-accessible user heap.
@@ -104,7 +102,10 @@ fn in_user_mode() -> bool {
 #[inline(always)]
 fn is_user_ptr(ptr: *mut u8) -> bool {
     let addr = ptr as u64;
-    addr >= USER_HEAP_BASE_GVA && addr < USER_HEAP_BASE_GVA + USER_HEAP_SIZE
+    // SAFETY: USER_HEAP_BASE/LEN are set once at init and only read thereafter
+    // (single-threaded guest).
+    let (base, len) = unsafe { (USER_HEAP_BASE, USER_HEAP_LEN) };
+    addr >= base && addr < base + len
 }
 
 /// Reference to the user heap allocator living in user-accessible memory.
@@ -113,7 +114,7 @@ fn is_user_ptr(ptr: *mut u8) -> bool {
 /// [`init_user_heap`] must have run first.
 #[inline(always)]
 unsafe fn user_heap() -> &'static LockedHeap<HEAP_ORDER> {
-    unsafe { &*USER_HEAP_CONTROL }
+    unsafe { &*user_heap_control() }
 }
 
 /// Allocate `layout` bytes from the **user** heap explicitly, regardless of the
@@ -161,37 +162,34 @@ unsafe impl GlobalAlloc for RoutedHeap {
     }
 }
 
-/// Map the user heap region user-accessible and initialise its allocator.
+/// Initialise the ring 3 user heap over the region the host carved out of the
+/// configured guest heap (communicated via the PEB `user_heap` field).
 ///
-/// Runs once during early initialisation, in ring 0 (so it may write the
-/// user-accessible control structure directly).
+/// The region is already mapped user-accessible (and copy-on-write) by the
+/// host, so this only records the bounds and lays out the allocator: the
+/// control structure goes at the base, and the rest of the region (after the
+/// first page) becomes the pool. Runs once during early initialisation, in
+/// ring 0 (so it may write the user-accessible control structure directly; the
+/// first writes take supervisor copy-on-write faults, which the page-fault
+/// handler services while preserving user accessibility).
 ///
 /// # Safety
 /// Must be called exactly once, after paging is usable and before any ring 3
-/// code allocates.
-pub(crate) unsafe fn init_user_heap() {
+/// code allocates. `base`/`len` must describe a mapped, user-accessible,
+/// page-aligned region of at least two pages.
+pub(crate) unsafe fn init_user_heap(base: u64, len: u64) {
+    debug_assert!(len > PAGE_SIZE as u64, "user heap region too small");
     unsafe {
-        let pages = USER_HEAP_SIZE / PAGE_SIZE as u64;
-        let phys = alloc_phys_pages(pages);
-        crate::paging::map_region_with_access(
-            phys,
-            USER_HEAP_BASE_GVA as *mut u8,
-            USER_HEAP_SIZE,
-            MappingKind::Basic(BasicMapping {
-                readable: true,
-                writable: true,
-                executable: false,
-            }),
-            true, // user-accessible
-        );
-        crate::paging::barrier::first_valid_same_ctx();
+        USER_HEAP_BASE = base;
+        USER_HEAP_LEN = len;
 
         // Place the control structure at the base of the region, and give the
         // allocator the rest of the region (after the first page, which holds
         // the control structure) as its pool.
-        USER_HEAP_CONTROL.write(LockedHeap::empty());
-        let pool_start = (USER_HEAP_BASE_GVA + PAGE_SIZE as u64) as usize;
-        let pool_size = (USER_HEAP_SIZE - PAGE_SIZE as u64) as usize;
-        (*USER_HEAP_CONTROL).lock().init(pool_start, pool_size);
+        let control = user_heap_control();
+        control.write(LockedHeap::empty());
+        let pool_start = (base + PAGE_SIZE as u64) as usize;
+        let pool_size = (len - PAGE_SIZE as u64) as usize;
+        (*control).lock().init(pool_start, pool_size);
     }
 }

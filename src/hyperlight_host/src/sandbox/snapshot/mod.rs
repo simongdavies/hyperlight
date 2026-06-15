@@ -28,6 +28,8 @@ use crate::Result;
 use crate::hypervisor::regs::CommonSpecialRegisters;
 use crate::mem::exe::{ExeInfo, LoadInfo};
 use crate::mem::layout::SandboxMemoryLayout;
+#[cfg(feature = "userspace")]
+use crate::mem::memory_region::MemoryRegionType;
 use crate::mem::memory_region::{GuestMemoryRegion, MemoryRegion, MemoryRegionFlags};
 use crate::mem::mgr::{GuestPageTableBuffer, SnapshotSharedMemory};
 use crate::mem::shared_mem::{ReadonlySharedMemory, SharedMemory};
@@ -349,7 +351,7 @@ impl Snapshot {
                 // instructions from the guest code region, so executable
                 // regions are made user-accessible; read-only regions (e.g.
                 // rodata/init-data blobs) are safe to expose too. Purely
-                // writable data regions (the heap) stay supervisor-only.
+                // writable data regions stay supervisor-only.
                 //
                 // Note the guest image (code + rodata + data + bss) is loaded
                 // as a single RWX region, so exposing it for execution also
@@ -358,6 +360,36 @@ impl Snapshot {
                 // the hardened data partition phase; see docs/userspace-ring3.md.
                 user_accessible: cfg!(feature = "userspace") && (executable || !writable),
             };
+
+            // With the userspace feature the heap region is split: the first
+            // `kernel_heap_size` bytes stay supervisor-only (the runtime's
+            // kernel heap) and the remainder is mapped user-accessible to back
+            // the ring 3 user heap. Both halves keep the same (CoW) kind so
+            // snapshot restore resets them correctly.
+            #[cfg(feature = "userspace")]
+            if rgn.region_type == MemoryRegionType::Heap {
+                let start = rgn.guest_region.start as u64;
+                let total = rgn.guest_region.len() as u64;
+                let kernel = layout.kernel_heap_size as u64;
+                let kernel_mapping = Mapping {
+                    phys_base: start,
+                    virt_base: start,
+                    len: kernel,
+                    kind,
+                    user_accessible: false,
+                };
+                let user_mapping = Mapping {
+                    phys_base: start + kernel,
+                    virt_base: start + kernel,
+                    len: total - kernel,
+                    kind,
+                    user_accessible: true,
+                };
+                unsafe { vmem::map(&pt_buf, kernel_mapping) };
+                unsafe { vmem::map(&pt_buf, user_mapping) };
+                continue;
+            }
+
             unsafe { vmem::map(&pt_buf, mapping) };
         }
 
