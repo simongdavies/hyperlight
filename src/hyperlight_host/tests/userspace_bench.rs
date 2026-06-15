@@ -65,6 +65,37 @@ fn time_echo(sbox: &mut MultiUseSandbox, batches: usize, iters_per_batch: usize)
     median(per_call)
 }
 
+/// Time `iters` cycles of "Echo then restore-from-snapshot" and return the
+/// per-cycle median in nanoseconds.
+///
+/// Restore is copy-on-write, so the first write to each page dirtied during the
+/// call re-faults it. In ring 3 the user stack and user heap are extra writable
+/// regions that get dirtied each call, so this is where any ring 3 page-fault
+/// overhead surfaces (the plain `time_echo` loop keeps its pages resident and
+/// never restores, so it does not).
+fn time_echo_with_restore(
+    sbox: &mut MultiUseSandbox,
+    batches: usize,
+    iters_per_batch: usize,
+) -> u128 {
+    let snapshot = sbox.snapshot().unwrap();
+    // Warm up.
+    for _ in 0..50 {
+        let _ = sbox.call::<String>("Echo", "warmup".to_string()).unwrap();
+        sbox.restore(snapshot.clone()).unwrap();
+    }
+    let mut per_cycle: Vec<u128> = Vec::with_capacity(batches);
+    for _ in 0..batches {
+        let start = Instant::now();
+        for _ in 0..iters_per_batch {
+            let _ = sbox.call::<String>("Echo", "hello\n".to_string()).unwrap();
+            sbox.restore(snapshot.clone()).unwrap();
+        }
+        per_cycle.push(start.elapsed().as_nanos() / iters_per_batch as u128);
+    }
+    median(per_cycle)
+}
+
 #[test]
 #[ignore = "perf harness; run explicitly with --ignored --nocapture"]
 fn bench_ring0_vs_ring3_echo() {
@@ -85,4 +116,29 @@ fn bench_ring0_vs_ring3_echo() {
     println!("  ring 3 : {t3:>7} ns");
     println!("  delta  : {overhead_ns:>7} ns  (+{pct:.1}%)");
     println!("  (batches={BATCHES}, iters/batch={ITERS})\n");
+}
+
+#[test]
+#[ignore = "perf harness; run explicitly with --ignored --nocapture"]
+fn bench_ring0_vs_ring3_echo_with_restore() {
+    const BATCHES: usize = 50;
+    const ITERS: usize = 200;
+
+    let mut ring0 = sandbox_from(simple_guest_as_string().unwrap());
+    let mut ring3 = sandbox_from(simple_guest_userspace_as_string().unwrap());
+
+    let t0 = time_echo_with_restore(&mut ring0, BATCHES, ITERS);
+    let t3 = time_echo_with_restore(&mut ring3, BATCHES, ITERS);
+
+    let overhead_ns = t3.saturating_sub(t0);
+    let pct = (overhead_ns as f64 / t0 as f64) * 100.0;
+
+    println!("\n=== ring 0 vs ring 3: Echo + snapshot restore (median per cycle) ===");
+    println!("  ring 0 : {t0:>7} ns");
+    println!("  ring 3 : {t3:>7} ns");
+    println!("  delta  : {overhead_ns:>7} ns  (+{pct:.1}%)");
+    println!("  (batches={BATCHES}, iters/batch={ITERS})");
+    println!(
+        "  note: restore is copy-on-write; ring 3 re-faults the extra user stack/heap pages\n"
+    );
 }
