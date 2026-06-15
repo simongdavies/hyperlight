@@ -345,7 +345,13 @@ impl Snapshot {
                 virt_base: rgn.guest_region.start as u64,
                 len: rgn.guest_region.len() as u64,
                 kind,
-                user_accessible: false,
+                // With the userspace feature, read-only regions (guest code and
+                // rodata) are made accessible to ring 3 so user code can execute
+                // and read constants. Writable regions (data/bss/heap/PEB) stay
+                // supervisor-only, keeping the runtime's mutable state out of
+                // reach of ring 3. The page tables and scratch region are mapped
+                // elsewhere and remain supervisor-only regardless.
+                user_accessible: cfg!(feature = "userspace") && !writable,
             };
             unsafe { vmem::map(&pt_buf, mapping) };
         }
