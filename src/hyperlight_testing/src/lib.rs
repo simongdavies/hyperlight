@@ -72,6 +72,16 @@ pub fn simple_guest_as_string() -> Result<String> {
         .ok_or_else(|| anyhow!("couldn't convert simple guest PathBuf to string"))
 }
 
+/// Get a fully qualified OS-specific path to the ring 3 (userspace) build of
+/// the simpleguest elf binary. Built by `just guests` alongside the standard
+/// simpleguest and used by the userspace integration tests and benchmarks.
+pub fn simple_guest_userspace_as_string() -> Result<String> {
+    let buf = rust_guest_as_pathbuf("simpleguest-userspace");
+    buf.to_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| anyhow!("couldn't convert userspace simple guest PathBuf to string"))
+}
+
 /// Get a fully-qualified OS-specific path to the witguest elf binary
 pub fn wit_guest_as_string() -> Result<String> {
     let buf = rust_guest_as_pathbuf("witguest");
