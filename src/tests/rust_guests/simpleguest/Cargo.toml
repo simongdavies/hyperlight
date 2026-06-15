@@ -15,4 +15,7 @@ tracing = { version = "0.1.41", default-features = false, features = ["log", "at
 default = []
 trace_guest = ["hyperlight-guest-bin/trace_guest", "hyperlight-guest/trace_guest", "hyperlight-guest-tracing/trace"]
 mem_profile = ["hyperlight-common/mem_profile", "hyperlight-guest-bin/mem_profile"]
+# Run this guest's user code in ring 3 (x86_64). Used to build the ring 3
+# variant of simpleguest for the userspace benchmarks and integration tests.
+userspace = ["hyperlight-guest-bin/userspace", "hyperlight-guest/userspace", "hyperlight-common/userspace"]
 
