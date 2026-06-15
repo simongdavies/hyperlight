@@ -16,31 +16,19 @@ limitations under the License.
 
 //! Build script for `simpleguest`.
 //!
-//! Under the `userspace` feature this guest runs its user code in ring 3. The
-//! runtime's ring-0-only critical statics are tagged
-//! `#[link_section = ".kdata"]` in `hyperlight_guest_bin`; this script supplies
-//! an augmenting linker script that gathers them into a single page-aligned,
-//! bounded section (`__kdata_start` / `__kdata_end`) so the guest can
-//! re-protect them supervisor-only at boot. See
-//! `hyperlight_guest_bin::arch::ring3::protect_kernel_data` and
-//! `docs/userspace-ring3.md`.
-//!
-//! Without the feature this script does nothing, so the default (ring 0) guest
-//! build is byte-for-byte unchanged.
-//!
-//! Note: because the `-T` link argument is emitted from this binary crate's
-//! build script, the hardening is **not** automatic for other guests — each
-//! guest that opts into `userspace` needs an equivalent script until this is
-//! folded into the shared guest build tooling (`cargo hyperlight`).
+//! Under the `userspace` feature, apply the `.kdata` hardening linker script
+//! that `hyperlight-guest-bin` generates and exports. Cargo cannot propagate a
+//! library's link arguments to the final binary link, so each `userspace` guest
+//! needs this tiny, uniform build script; the script *content* lives once, in
+//! the runtime crate (`hyperlight_guest_bin/build.rs`). Without the feature
+//! nothing is emitted and the default build is byte-for-byte unchanged.
 
 fn main() {
-    // `cargo:rustc-link-arg` from a build script reaches `rust-lld` through
-    // `cargo hyperlight build`, so no change to the guest build tool is needed.
-    #[cfg(feature = "userspace")]
-    {
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-            .expect("CARGO_MANIFEST_DIR is always set by cargo for build scripts");
-        println!("cargo:rustc-link-arg=-T{manifest_dir}/userspace.ld");
-        println!("cargo:rerun-if-changed=userspace.ld");
+    // `hyperlight-guest-bin`'s build script exports the generated script's path
+    // via `links` metadata, but only when its `userspace` feature is enabled.
+    if let Some(script) = std::env::var_os("DEP_HYPERLIGHT_GUEST_BIN_KDATA_LINKER_SCRIPT") {
+        let script = script.to_string_lossy();
+        println!("cargo:rustc-link-arg=-T{script}");
+        println!("cargo:rerun-if-changed=build.rs");
     }
 }

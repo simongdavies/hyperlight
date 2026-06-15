@@ -11,6 +11,11 @@ description = """
 This crate provides the opinionated bits of the guest library, such as the panic handler, the entry point, the guest logger, the exception handling logic, 
 and third-party code used by our C-API needed to build a native hyperlight-guest binary.
 """
+# Declared so the build script can export the `.kdata` linker-script path to
+# direct dependents (guest binaries) via `DEP_HYPERLIGHT_GUEST_BIN_*` env vars.
+# This crate links no native library; the key is used purely as a metadata
+# channel for the `userspace` feature (see build.rs).
+links = "hyperlight_guest_bin"
 
 [features]
 default = ["libc", "macros"]
