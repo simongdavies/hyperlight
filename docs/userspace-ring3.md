@@ -332,12 +332,42 @@ loads the `userspace` build of `simpleguest`.
   `iretq` + `sysret` round-trip), an N-host-call function (per-call marshaling),
   and a guest-heap allocation (the CPL-routed allocator).
 
-**Reporting.** `just bench` prints the ring 0 vs ring 3 delta per workload. The
-results and an interpretation (where the cost lands: transition vs marshaling vs
-allocation) will be filled in here once the benchmarks run on a hypervisor.
+**Reporting.** `just bench` prints the ring 0 vs ring 3 delta per workload. A
+lightweight A/B harness also exists in
+[`src/hyperlight_host/tests/userspace_bench.rs`](../src/hyperlight_host/tests/userspace_bench.rs),
+which loads the ring 0 and ring 3 builds of `simpleguest` and times identical
+`Echo` calls against each on the same host:
 
-> **Results: pending hypervisor validation.** The benchmark harness is part of
-> Phase 7; numbers will be added once the ring 3 path executes end to end.
+```text
+cargo test -p hyperlight-host --features userspace --test userspace_bench \
+    -- --ignored --nocapture
+```
+
+### First results (KVM, release host + release guests)
+
+| Workload | ring 0 | ring 3 | overhead |
+|----------|-------:|-------:|---------:|
+| `Echo` guest call (per call) | ~24-25 µs | ~27-29 µs | **~3-4 µs (12-16%)** |
+
+Interpretation:
+
+- The ring 3 cost is a **fixed ~3-4 µs per call**, dominated by the
+  cross-privilege **marshalling** (re-encoding the `FunctionCall` into a user
+  buffer and copying the result back, plus the user-heap allocations), not the
+  raw privilege transition (the `iretq`/`syscall`/`sysretq` instructions are
+  sub-microsecond).
+- `Echo` is close to the **cheapest possible** guest function, so its ~16% is
+  near the worst-case *relative* overhead. Because the cost is fixed per call,
+  any guest function that does real work amortises it toward zero.
+- A known optimisation is to avoid the **double-marshalling**: the runtime
+  currently decodes the `FunctionCall` in ring 0 (for parameter verification),
+  re-encodes it into a user buffer, and re-decodes it in ring 3. Passing the raw
+  request bytes through (decoding only once, in ring 3) would remove the
+  re-encode. This is tracked as a follow-up.
+
+Still to measure: `call_with_restore`, host calls from ring 3 (once Phase 5c
+lands), and the allocation micro-benchmark.
+
 
 ## 8. Building the ring 3 guest
 
