@@ -180,9 +180,14 @@ ring 3 code with a result in `rax`. Implemented so far:
 |---|------|------|---------|
 | 0 | `SYS_RETURN` | non-returning | return a 64-bit value (in `rdi`) from the user function to the `enter_user` caller |
 | 1 | `SYS_SELFTEST` | returning | XOR two scalars in ring 0 (validates the `sysretq` path) |
+| 2 | `SYS_HOST_CALL` | returning | perform a host function call (request/result marshalled via a user-memory descriptor) |
+| 3 | `SYS_OUTB` | returning | perform a privileged `out dx, eax` (abort / debug-print, whose data rides in the value) |
+| 4 | `SYS_LOG` | returning | push a serialized guest log record to the host |
 
-Planned (when host calls / logging / abort move through ring 3):
-`SYS_HOST_CALL`, `SYS_LOG`, `SYS_TRACE`, `SYS_ABORT`.
+The ABI numbers live in one place, `hyperlight_guest::syscall`, shared by the
+ring 3 issuers and the ring 0 dispatcher. Each privileged service keeps all PEB,
+shared-buffer and `out` access in ring 0: ring 3 only ever serialises into, and
+reads results from, its own user-accessible buffers.
 
 ## 4. Feature gating and the host/guest contract
 
@@ -209,10 +214,10 @@ because its code pages would be supervisor-only.
 | 4c | Split kernel/user heaps + CPL-routed allocator | **done**, runtime-validated on KVM |
 | 5a | Returning syscall (`sysretq`) dispatch path | **done**, runtime-validated on KVM |
 | 5b | Run registered guest functions in ring 3 (arg/result marshalling) | **done**, runtime-validated on KVM |
-| 5c | Host calls / logging / abort from ring 3 (`SYS_HOST_CALL` etc.) | **next** (design below) |
+| 5c | Host calls / logging / abort from ring 3 (`SYS_HOST_CALL`/`SYS_LOG`/`SYS_OUTB`) | **done**, runtime-validated on KVM |
 | 4b | Archive-keyed data partition (full data isolation) | designed, not implemented |
 | 6 | Exception robustness from ring 3 + negative security tests | designed, not implemented |
-| 7 | Benchmarks (ring 0 vs ring 3) | harness designed, not implemented |
+| 7 | Benchmarks (ring 0 vs ring 3) | **partial** (Echo + restore measured) |
 
 ### What is validated, and how
 
