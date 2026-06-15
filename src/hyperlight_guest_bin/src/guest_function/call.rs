@@ -40,7 +40,13 @@ fn guest_dispatch_function_default(function_call: FunctionCall) -> Result<Vec<u8
 }
 
 #[instrument(skip_all, level = "Info")]
-pub(crate) fn call_guest_function(function_call: FunctionCall) -> Result<Vec<u8>> {
+pub(crate) fn call_guest_function(
+    function_call: FunctionCall,
+    // The original encoded bytes of `function_call`, forwarded to ring 3 as-is
+    // so the userspace path does not have to re-encode the call. Only present
+    // (and only needed) in userspace builds.
+    #[cfg(all(feature = "userspace", target_arch = "x86_64"))] raw: &[u8],
+) -> Result<Vec<u8>> {
     // Validate this is a Guest Function Call
     if function_call.function_call_type() != FunctionCallType::Guest {
         return Err(HyperlightGuestError::new(
@@ -74,13 +80,14 @@ pub(crate) fn call_guest_function(function_call: FunctionCall) -> Result<Vec<u8>
         // The function lookup and parameter verification above stay in ring 0
         // (they read the supervisor function registry); only the function body
         // runs in ring 3, with its arguments and result marshalled across the
-        // privilege boundary.
+        // privilege boundary. The original encoded call bytes are forwarded
+        // directly, avoiding a re-encode.
         #[cfg(all(feature = "userspace", target_arch = "x86_64"))]
         {
             unsafe {
                 crate::arch::ring3::run_registered_guest_fn(
                     registered_function_definition.function_pointer,
-                    function_call,
+                    raw,
                 )
             }
         }
@@ -118,11 +125,25 @@ pub(crate) fn internal_dispatch_function() {
 
     let handle = unsafe { GUEST_HANDLE };
 
-    let function_call = handle
-        .try_pop_shared_input_data_into::<FunctionCall>()
-        .expect("Function call deserialization failed");
-
-    let res = call_guest_function(function_call);
+    // In userspace builds, keep the original encoded bytes so the call can be
+    // forwarded into ring 3 without re-encoding; the FunctionCall decoded here
+    // is still used in ring 0 for the security checks (lookup + verification).
+    #[cfg(all(feature = "userspace", target_arch = "x86_64"))]
+    let res = {
+        let raw = handle
+            .try_pop_shared_input_data_raw()
+            .expect("Function call deserialization failed");
+        let function_call =
+            FunctionCall::try_from(raw.as_slice()).expect("Function call deserialization failed");
+        call_guest_function(function_call, &raw)
+    };
+    #[cfg(not(all(feature = "userspace", target_arch = "x86_64")))]
+    let res = {
+        let function_call = handle
+            .try_pop_shared_input_data_into::<FunctionCall>()
+            .expect("Function call deserialization failed");
+        call_guest_function(function_call)
+    };
 
     match res {
         Ok(bytes) => {

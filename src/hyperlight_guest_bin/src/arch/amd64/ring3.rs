@@ -483,12 +483,14 @@ struct GuestCallDescriptor {
 /// Run a registered guest function `f` in ring 3 and return the bytes to push
 /// to the host's shared output buffer.
 ///
-/// The `FunctionCall` is re-encoded into a user buffer, the function runs in
-/// ring 3 (so its allocations land on the user heap and a bug cannot touch the
-/// runtime's supervisor state), and the encoded result is copied back. Any
-/// error raised by the guest function is encoded into a `FunctionCallResult` in
-/// ring 3, exactly as the ring 0 dispatch path would, so the returned bytes are
-/// always the final bytes to hand to the host.
+/// `encoded_call` is the original encoded `FunctionCall` (the bytes the host
+/// placed in the shared input buffer). They are copied verbatim into a user
+/// buffer - no re-encoding - the function runs in ring 3 (so its allocations
+/// land on the user heap and a bug cannot touch the runtime's supervisor
+/// state), and the encoded result is copied back. Any error raised by the guest
+/// function is encoded into a `FunctionCallResult` in ring 3, exactly as the
+/// ring 0 dispatch path would, so the returned bytes are always the final bytes
+/// to hand to the host.
 ///
 /// Returned as `Result` only to match the non-userspace call site; it is always
 /// `Ok` (guest-function errors are encoded into the returned bytes).
@@ -500,13 +502,10 @@ struct GuestCallDescriptor {
 /// # Safety
 /// [`init`] and the user heap must be initialised, and `f` must be a valid
 /// registered guest-function pointer.
-pub(crate) unsafe fn run_registered_guest_fn(f: GuestFunc, fc: FunctionCall) -> Result<Vec<u8>> {
-    // Encode the FunctionCall and stage it, plus the descriptor, in
-    // user-accessible memory for ring 3 to read.
-    let mut builder = FlatBufferBuilder::new();
-    let encoded = fc.encode(&mut builder);
-
-    let input_layout = layout_for(encoded.len());
+pub(crate) unsafe fn run_registered_guest_fn(f: GuestFunc, encoded_call: &[u8]) -> Result<Vec<u8>> {
+    // Stage the (already-encoded) call, plus the descriptor, in user-accessible
+    // memory for ring 3 to read.
+    let input_layout = layout_for(encoded_call.len());
     let desc_layout = Layout::new::<GuestCallDescriptor>();
     unsafe {
         let input_buf = user_alloc(input_layout);
@@ -515,11 +514,11 @@ pub(crate) unsafe fn run_registered_guest_fn(f: GuestFunc, fc: FunctionCall) -> 
             !input_buf.is_null() && !desc_buf.is_null(),
             "user heap exhausted while marshalling a guest call into ring 3"
         );
-        core::ptr::copy_nonoverlapping(encoded.as_ptr(), input_buf, encoded.len());
+        core::ptr::copy_nonoverlapping(encoded_call.as_ptr(), input_buf, encoded_call.len());
         desc_buf.write(GuestCallDescriptor {
             fn_ptr: f as usize as u64,
             input_ptr: input_buf as u64,
-            input_len: encoded.len() as u64,
+            input_len: encoded_call.len() as u64,
             output_ptr: 0,
             output_len: 0,
             output_cap: 0,

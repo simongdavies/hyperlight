@@ -88,6 +88,68 @@ impl GuestHandle {
         type_t
     }
 
+    /// Pops the top element from the shared input data buffer and returns its
+    /// raw bytes, without decoding them.
+    ///
+    /// This is used by the `userspace` feature to forward a guest-function call
+    /// into ring 3 without re-encoding it: the runtime decodes a copy in ring 0
+    /// for the security checks, but the bytes handed to ring 3 are the original
+    /// ones. The element's exact length is recovered from the stack
+    /// back-pointer (the data occupies `[element .. top - 8]`), so the returned
+    /// vector contains no trailing padding.
+    #[cfg(feature = "userspace")]
+    pub fn try_pop_shared_input_data_raw(&self) -> Result<alloc::vec::Vec<u8>> {
+        let peb_ptr = self.peb().unwrap();
+        let input_stack_size = unsafe { (*peb_ptr).input_stack.size as usize };
+        let input_stack_ptr = unsafe { (*peb_ptr).input_stack.ptr as *mut u8 };
+
+        let idb = unsafe { from_raw_parts_mut(input_stack_ptr, input_stack_size) };
+
+        if idb.is_empty() {
+            return Err(HyperlightGuestError::new(
+                ErrorCode::GuestError,
+                "Got a 0-size buffer in pop_shared_input_data_raw".to_string(),
+            ));
+        }
+
+        let stack_ptr_rel: u64 =
+            u64::from_le_bytes(idb[..8].try_into().expect("Shared input buffer too small"));
+
+        if stack_ptr_rel as usize > input_stack_size || stack_ptr_rel < 16 {
+            return Err(HyperlightGuestError::new(
+                ErrorCode::GuestError,
+                format!(
+                    "Invalid stack pointer: {} in pop_shared_input_data_raw",
+                    stack_ptr_rel
+                ),
+            ));
+        }
+
+        let last_element_offset_rel = u64::from_le_bytes(
+            idb[stack_ptr_rel as usize - 8..stack_ptr_rel as usize]
+                .try_into()
+                .expect("Invalid stack pointer in pop_shared_input_data_raw"),
+        );
+
+        // The element data is everything between its start and the 8-byte
+        // back-pointer at the top of the stack.
+        if last_element_offset_rel >= stack_ptr_rel - 8 {
+            return Err(HyperlightGuestError::new(
+                ErrorCode::GuestError,
+                "Invalid element offset in pop_shared_input_data_raw".to_string(),
+            ));
+        }
+        let data = idb[last_element_offset_rel as usize..stack_ptr_rel as usize - 8].to_vec();
+
+        // update the stack pointer to point to the element we just popped off
+        idb[..8].copy_from_slice(&last_element_offset_rel.to_le_bytes());
+
+        // zero out popped off buffer
+        idb[last_element_offset_rel as usize..stack_ptr_rel as usize].fill(0);
+
+        Ok(data)
+    }
+
     /// Pushes the given data onto the shared output data buffer.
     pub fn push_shared_output_data(&self, data: &[u8]) -> Result<()> {
         let peb_ptr = self.peb().unwrap();
