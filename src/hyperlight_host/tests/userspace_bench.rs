@@ -24,15 +24,19 @@ limitations under the License.
 //!
 //! Workloads, from cheapest to most page-fault-heavy:
 //!
+//! Workloads, from one-time startup through per-call to page-fault-heavy:
+//!
+//! * sandbox creation — the one-time startup cost (image load, page tables, and
+//!   for ring 3 the GDT/MSR setup, boot self-tests, and critical-data
+//!   re-protection);
 //! * `GetStatic` — a minimal-payload guest call (no input, 4-byte result), which
 //!   isolates the fixed per-call transition + marshalling overhead;
-//! * `Echo` — a string round-trip, which adds payload marshalling in both
-//!   directions;
-//! * `Add` → `HostAdd` — a guest call that itself calls back into a host
-//!   function, exercising the nested ring 3 → ring 0 host-call syscall path;
-//! * `CallMalloc` — an allocate/free pair, exercising the CPL-routed allocator
-//!   (the ring 3 build allocates from the user heap, the ring 0 build from the
-//!   kernel heap);
+//! * `Echo` (small) — a 6-byte string round-trip;
+//! * `Echo` (large) — a 4 KiB string round-trip, showing how marshalling scales
+//!   with payload size;
+//! * `Add` -> `HostAdd` — a guest call that itself calls back into a host
+//!   function, exercising the nested ring 3 -> ring 0 host-call syscall path;
+//! * `CallMalloc` — an allocate/free pair, exercising the CPL-routed allocator;
 //! * `Echo` + snapshot restore — surfaces the copy-on-write page-refault cost,
 //!   since ring 3 dirties extra writable regions (the user stack and user heap)
 //!   each call.
@@ -53,6 +57,10 @@ use hyperlight_testing::{simple_guest_as_string, simple_guest_userspace_as_strin
 const BATCHES: usize = 100;
 const ITERS: usize = 500;
 const WARMUP: usize = 100;
+/// Sandbox creation is far more expensive than a single call, so it is timed
+/// individually over a smaller sample.
+const CREATE_ITERS: usize = 50;
+const CREATE_WARMUP: usize = 5;
 
 fn sandbox_from(path: String) -> MultiUseSandbox {
     UninitializedSandbox::new(GuestBinary::FilePath(path), None)
@@ -75,6 +83,26 @@ fn sandbox_with_host_add(path: String) -> MultiUseSandbox {
 fn median(mut samples: Vec<u128>) -> u128 {
     samples.sort_unstable();
     samples[samples.len() / 2]
+}
+
+/// Time creating (and dropping) a sandbox from `path`, returning the
+/// per-creation median in nanoseconds. This captures the **one-time startup
+/// cost**: loading the guest image, building the page tables, and — for the
+/// ring 3 build — the GDT/MSR programming, boot self-tests, and critical-data
+/// re-protection. The whole image string is read once and reused so disk I/O is
+/// not measured.
+fn time_create(image: &str) -> u128 {
+    for _ in 0..CREATE_WARMUP {
+        drop(sandbox_from(image.to_string()));
+    }
+    let mut samples: Vec<u128> = Vec::with_capacity(CREATE_ITERS);
+    for _ in 0..CREATE_ITERS {
+        let start = Instant::now();
+        let sbox = sandbox_from(image.to_string());
+        samples.push(start.elapsed().as_nanos());
+        drop(sbox);
+    }
+    median(samples)
 }
 
 /// Time `batches * iters_per_batch` invocations of `op` against `sbox`, in
@@ -154,6 +182,32 @@ fn op_add_hostcall(sbox: &mut MultiUseSandbox) {
 
 fn op_malloc(sbox: &mut MultiUseSandbox) {
     let _ = sbox.call::<i32>("CallMalloc", 1024_i32).unwrap();
+}
+
+#[test]
+#[ignore = "perf harness; run explicitly with --ignored --nocapture"]
+fn bench_ring0_vs_ring3_sandbox_create() {
+    let ring0_image = simple_guest_as_string().unwrap();
+    let ring3_image = simple_guest_userspace_as_string().unwrap();
+    let t0 = time_create(&ring0_image);
+    let t3 = time_create(&ring3_image);
+    report("sandbox creation (median per sandbox)", t0, t3);
+    println!("  note: one-time startup cost, amortised across all calls a sandbox serves");
+    println!("  (iters={CREATE_ITERS})");
+}
+
+#[test]
+#[ignore = "perf harness; run explicitly with --ignored --nocapture"]
+fn bench_ring0_vs_ring3_echo_large() {
+    let mut ring0 = sandbox_from(simple_guest_as_string().unwrap());
+    let mut ring3 = sandbox_from(simple_guest_userspace_as_string().unwrap());
+    let payload = "x".repeat(4096);
+    let op = |s: &mut MultiUseSandbox| {
+        let _ = s.call::<String>("Echo", payload.clone()).unwrap();
+    };
+    let t0 = time_op(&mut ring0, op);
+    let t3 = time_op(&mut ring3, op);
+    report("Echo 4 KiB payload (median per call)", t0, t3);
 }
 
 #[test]
