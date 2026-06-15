@@ -92,7 +92,17 @@ impl SandboxConfiguration {
     /// The default heap size of a hyperlight sandbox
     pub const DEFAULT_HEAP_SIZE: u64 = 131072;
     /// The default size of the scratch region
+    #[cfg(not(feature = "userspace"))]
     pub const DEFAULT_SCRATCH_SIZE: usize = 0x48000;
+    /// The default size of the scratch region.
+    ///
+    /// With the `userspace` feature, ring 3 guest code runs with an eagerly
+    /// mapped user stack and user heap that are carved from the scratch region
+    /// by the guest's physical page allocator, so the default is enlarged to
+    /// accommodate them. On-demand growth would remove the need for this; see
+    /// docs/userspace-ring3.md.
+    #[cfg(feature = "userspace")]
+    pub const DEFAULT_SCRATCH_SIZE: usize = 0x48000 + 0x100000;
 
     #[allow(clippy::too_many_arguments)]
     /// Create a new configuration for a sandbox with the given sizes.

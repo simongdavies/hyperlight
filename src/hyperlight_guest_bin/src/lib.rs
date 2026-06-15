@@ -21,6 +21,7 @@ extern crate alloc;
 use core::fmt::Write;
 
 use arch::dispatch::dispatch_function;
+#[cfg(not(all(feature = "userspace", target_arch = "x86_64")))]
 use buddy_system_allocator::LockedHeap;
 use guest_function::register::GuestFunctionRegister;
 use guest_logger::init_logger;
@@ -53,6 +54,14 @@ pub mod host_comm;
 pub mod memory;
 #[cfg(target_arch = "x86_64")]
 pub mod paging;
+#[cfg(all(feature = "userspace", target_arch = "x86_64"))]
+pub(crate) mod userspace_heap;
+
+// `mem_profile` reports allocations to the host with the privileged `out`
+// instruction, which faults in ring 3, so it cannot coexist with the ring 3
+// `userspace` feature.
+#[cfg(all(feature = "mem_profile", feature = "userspace"))]
+compile_error!("the `mem_profile` and `userspace` features are mutually exclusive");
 
 /// Bridge between picolibc's POSIX expectations and the Hyperlight host.
 /// cbindgen:ignore
@@ -119,13 +128,23 @@ unsafe impl<const ORDER: usize> alloc::alloc::GlobalAlloc for ProfiledLockedHeap
 }
 
 // === Globals ===
-#[cfg(not(all(feature = "mem_profile", target_arch = "x86_64")))]
+// Kernel-only heap: the default, and any build without the x86_64 userspace or
+// mem_profile variants below.
+#[cfg(all(
+    not(all(feature = "mem_profile", target_arch = "x86_64")),
+    not(all(feature = "userspace", target_arch = "x86_64"))
+))]
 #[global_allocator]
 pub(crate) static HEAP_ALLOCATOR: LockedHeap<32> = LockedHeap::<32>::empty();
 #[cfg(all(feature = "mem_profile", target_arch = "x86_64"))]
 #[global_allocator]
 pub(crate) static HEAP_ALLOCATOR: ProfiledLockedHeap<32> =
     ProfiledLockedHeap(LockedHeap::<32>::empty());
+// Ring 0 / ring 3 routing allocator: the kernel heap plus a user-accessible
+// user heap (see [`userspace_heap`]).
+#[cfg(all(feature = "userspace", target_arch = "x86_64"))]
+#[global_allocator]
+pub(crate) static HEAP_ALLOCATOR: userspace_heap::RoutedHeap = userspace_heap::RoutedHeap::new();
 
 pub static mut GUEST_HANDLE: GuestHandle = GuestHandle::new();
 pub(crate) static mut REGISTERED_GUEST_FUNCTIONS: GuestFunctionRegister<GuestFunc> =
@@ -235,10 +254,18 @@ pub(crate) extern "C" fn generic_init(
 
         let heap_start = (*peb_ptr).guest_heap.ptr as usize;
         let heap_size = (*peb_ptr).guest_heap.size as usize;
-        #[cfg(not(all(feature = "mem_profile", target_arch = "x86_64")))]
+        #[cfg(all(
+            not(all(feature = "mem_profile", target_arch = "x86_64")),
+            not(all(feature = "userspace", target_arch = "x86_64"))
+        ))]
         let heap_allocator = &HEAP_ALLOCATOR;
         #[cfg(all(feature = "mem_profile", target_arch = "x86_64"))]
         let heap_allocator = &HEAP_ALLOCATOR.0;
+        // With the userspace feature, the global allocator routes between the
+        // kernel and user heaps; here we initialise the kernel heap with the
+        // guest's heap region (the user heap is set up separately in ring3 init).
+        #[cfg(all(feature = "userspace", target_arch = "x86_64"))]
+        let heap_allocator = HEAP_ALLOCATOR.kernel();
         heap_allocator
             .try_lock()
             .expect("Failed to access HEAP_ALLOCATOR")
@@ -288,7 +315,10 @@ pub(crate) extern "C" fn generic_init(
     // Verify the ring 0 -> ring 3 -> ring 0 transition machinery works before
     // running any user code in ring 3. Aborts the guest if it is broken.
     #[cfg(all(feature = "userspace", target_arch = "x86_64"))]
-    arch::ring3::selftest();
+    {
+        arch::ring3::selftest();
+        arch::ring3::selftest_user_heap();
+    }
 
     unsafe {
         hyperlight_main();

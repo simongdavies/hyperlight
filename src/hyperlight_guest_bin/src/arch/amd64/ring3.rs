@@ -160,6 +160,9 @@ pub(crate) unsafe fn init() {
         );
         crate::paging::barrier::first_valid_same_ctx();
 
+        // Set up the user-accessible heap so ring 3 code can allocate.
+        crate::userspace_heap::init_user_heap();
+
         // Program the syscall MSRs. The host already sets EFER.SCE, but set it
         // defensively in case that ever changes.
         wrmsr(IA32_EFER, rdmsr(IA32_EFER) | EFER_SCE);
@@ -293,5 +296,34 @@ pub(crate) fn selftest() {
     let got = unsafe { enter_user_fn(user_fn, SENTINEL) };
     if got != SENTINEL ^ TRANSFORM {
         panic!("ring 3 round-trip self-test failed: got {got:#x}");
+    }
+}
+
+/// Self-test the user heap by allocating from ring 3.
+///
+/// Drops into ring 3, allocates a vector from the user heap, fills and checksums
+/// it, frees it, and returns the checksum. This exercises the routed global
+/// allocator's ring 3 path end to end. Aborts the guest on mismatch.
+pub(crate) fn selftest_user_heap() {
+    /// Sentinel mixed into the elements so a stuck/zero result is detected.
+    const SENTINEL: u64 = 0xcafe_f00d_dead_beef;
+    /// Number of elements to allocate and sum.
+    const N: u64 = 128;
+
+    extern "C" fn user_fn(arg: u64) -> ! {
+        // Runs in ring 3. Allocations route to the user heap.
+        let mut v: alloc::vec::Vec<u64> = alloc::vec::Vec::with_capacity(N as usize);
+        for i in 0..N {
+            v.push(arg.wrapping_add(i));
+        }
+        let sum = v.iter().fold(0u64, |acc, &x| acc ^ x);
+        drop(v);
+        unsafe { sys_return(sum) }
+    }
+
+    let expected = (0..N).fold(0u64, |acc, i| acc ^ SENTINEL.wrapping_add(i));
+    let got = unsafe { enter_user_fn(user_fn, SENTINEL) };
+    if got != expected {
+        panic!("ring 3 user-heap self-test failed: got {got:#x}, expected {expected:#x}");
     }
 }
