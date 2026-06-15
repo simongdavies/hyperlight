@@ -33,8 +33,14 @@ pub const PROC_CONTROL_GVA: u64 = 0xffff_fd00_0000_0000;
 #[cfg(feature = "userspace")]
 pub const USER_STACK_TOP_GVA: u64 = 0xffff_fc00_0000_0000;
 
-/// Size of the ring 3 user stack. A small fixed stack is mapped eagerly when
-/// entering ring 3 for the first time; on-demand growth via the page-fault
-/// handler is a later refinement.
+/// Maximum size of the ring 3 user stack. The stack is **not** mapped eagerly;
+/// pages are faulted in on demand by the page-fault handler (see
+/// `exception::handle`) as the stack grows downward from `USER_STACK_TOP_GVA`.
+/// A fault below `USER_STACK_LIMIT_GVA` is a genuine stack overflow and aborts.
 #[cfg(feature = "userspace")]
 pub const USER_STACK_SIZE: u64 = 64 * 1024;
+
+/// Lowest address (inclusive) the ring 3 user stack may grow to. Faults in
+/// `[USER_STACK_LIMIT_GVA, USER_STACK_TOP_GVA)` are serviced on demand.
+#[cfg(feature = "userspace")]
+pub const USER_STACK_LIMIT_GVA: u64 = USER_STACK_TOP_GVA - USER_STACK_SIZE;

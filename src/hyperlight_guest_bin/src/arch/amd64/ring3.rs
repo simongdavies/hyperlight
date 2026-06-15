@@ -44,11 +44,10 @@ use flatbuffers::FlatBufferBuilder;
 use hyperlight_common::flatbuffer_wrappers::function_call::FunctionCall;
 use hyperlight_common::flatbuffer_wrappers::function_types::FunctionCallResult;
 use hyperlight_common::flatbuffer_wrappers::guest_error::{ErrorCode, GuestError};
-use hyperlight_common::vmem::{BasicMapping, MappingKind, PAGE_SIZE};
+use hyperlight_common::vmem::PAGE_SIZE;
 use hyperlight_guest::error::Result;
-use hyperlight_guest::prim_alloc::alloc_phys_pages;
 
-use super::layout::{USER_STACK_SIZE, USER_STACK_TOP_GVA};
+use super::layout::USER_STACK_TOP_GVA;
 use crate::guest_function::definition::{GuestFunc, GuestFunctionDefinition};
 use crate::userspace_heap::{user_alloc, user_dealloc};
 
@@ -174,23 +173,11 @@ unsafe fn wrmsr(msr: u32, value: u64) {
 /// initialised.
 pub(crate) unsafe fn init() {
     unsafe {
-        // Eagerly map a small user stack. On-demand growth via the page-fault
-        // handler is a later refinement.
-        let pages = USER_STACK_SIZE / PAGE_SIZE as u64;
-        let phys = alloc_phys_pages(pages);
-        let base = USER_STACK_TOP_GVA - USER_STACK_SIZE;
-        crate::paging::map_region_with_access(
-            phys,
-            base as *mut u8,
-            USER_STACK_SIZE,
-            MappingKind::Basic(BasicMapping {
-                readable: true,
-                writable: true,
-                executable: false,
-            }),
-            true, // user-accessible
-        );
-        crate::paging::barrier::first_valid_same_ctx();
+        // The ring 3 user stack is grown on demand: its pages are faulted in by
+        // the page-fault handler as the stack descends from `USER_STACK_TOP_GVA`
+        // (see `exception::handle`). Nothing is mapped here, so a guest that
+        // never enters ring 3 — or uses only a shallow stack — costs no physical
+        // pages, and snapshot/restore only ever touches the pages actually used.
 
         // Program the syscall MSRs. The host already sets EFER.SCE, but set it
         // defensively in case that ever changes.

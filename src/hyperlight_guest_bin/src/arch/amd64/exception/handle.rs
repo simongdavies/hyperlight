@@ -98,6 +98,32 @@ fn handle_stack_pagefault(gva: u64) {
     }
 }
 
+/// Maps a fresh, user-accessible page for an on-demand ring 3 user-stack fault.
+///
+/// The ring 3 user stack is not mapped eagerly; pages are populated here as the
+/// stack grows downward from `USER_STACK_TOP_GVA` (see `arch::amd64::layout`).
+/// The page is user-accessible (so ring 3 can use it), writable, and
+/// non-executable.
+#[cfg(all(feature = "userspace", target_arch = "x86_64"))]
+fn handle_user_stack_pagefault(gva: u64) {
+    unsafe {
+        let new_page = hyperlight_guest::prim_alloc::alloc_phys_pages(1);
+        crate::paging::map_region_with_access(
+            new_page,
+            (gva & !0xfff) as *mut u8,
+            PAGE_SIZE as u64,
+            MappingKind::Basic(BasicMapping {
+                readable: true,
+                writable: true,
+                executable: false,
+            }),
+            true, // user-accessible: ring 3 runs on this stack
+        );
+        // First-time mapping (entry was not-present), so no TLB invalidation is
+        // required; the iretq returning to ring 3 serialises.
+    }
+}
+
 fn handle_cow_pagefault(_phys: PhysAddr, virt: VirtAddr, perms: CowMapping, user_accessible: bool) {
     unsafe {
         let new_page = hyperlight_guest::prim_alloc::alloc_phys_pages(1);
@@ -155,6 +181,14 @@ fn try_handle_internal_pagefault(
         // should populate it with a stack page
         if (MAIN_STACK_LIMIT_GVA..MAIN_STACK_TOP_GVA).contains(&gva) {
             handle_stack_pagefault(gva);
+            return true;
+        }
+        // The ring 3 user stack grows on demand within its own range.
+        #[cfg(all(feature = "userspace", target_arch = "x86_64"))]
+        if (super::super::layout::USER_STACK_LIMIT_GVA..super::super::layout::USER_STACK_TOP_GVA)
+            .contains(&gva)
+        {
+            handle_user_stack_pagefault(gva);
             return true;
         }
         return false;

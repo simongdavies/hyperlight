@@ -110,14 +110,15 @@ impl SandboxConfiguration {
     pub const DEFAULT_SCRATCH_SIZE: usize = 0x48000;
     /// The default size of the scratch region.
     ///
-    /// With the `userspace` feature, ring 3 guest code runs with an eagerly
-    /// mapped user stack carved from the scratch region by the guest's physical
-    /// page allocator, so the default is enlarged to accommodate it (and the
-    /// page tables that map it). The user heap is carved from the configured
-    /// guest heap, not scratch. On-demand growth would remove the need for this;
-    /// see docs/userspace-ring3.md.
+    /// With the `userspace` feature, ring 3 guest code runs on a user stack
+    /// whose pages are faulted in on demand from the scratch region by the
+    /// guest's physical page allocator (the stack is no longer mapped eagerly).
+    /// The default is enlarged by one stack's worth so a full-depth user stack
+    /// (and the page tables that map it) still fits; a shallow stack costs
+    /// nothing up front. The user heap is carved from the configured guest heap,
+    /// not scratch. See docs/userspace-ring3.md.
     #[cfg(feature = "userspace")]
-    pub const DEFAULT_SCRATCH_SIZE: usize = 0x48000 + 0x20000;
+    pub const DEFAULT_SCRATCH_SIZE: usize = 0x48000 + 0x10000;
 
     #[allow(clippy::too_many_arguments)]
     /// Create a new configuration for a sandbox with the given sizes.
