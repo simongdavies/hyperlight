@@ -40,9 +40,8 @@ impl log::Log for GuestLogger {
     }
 
     fn log(&self, record: &Record) {
-        let handle = unsafe { GUEST_HANDLE };
         if self.enabled(record.metadata()) {
-            handle.log_message(
+            emit_log(
                 record.level().into(),
                 format!("{}", record.args()).as_str(),
                 record.module_path().unwrap_or("Unknown"),
@@ -64,6 +63,43 @@ pub fn log_message(
     file: &str,
     line: u32,
 ) {
+    emit_log(level, message, module_path, target, file, line);
+}
+
+/// Send a log record to the host, mediating the privileged push/`out` through a
+/// syscall when running in ring 3 (`userspace` feature).
+///
+/// In ring 0 this pushes the record to the shared output buffer and emits the
+/// Log `out` directly. In ring 3 those are inaccessible, so the record is
+/// serialised in user memory and handed to ring 0 via `SYS_LOG`.
+fn emit_log(
+    level: LogLevel,
+    message: &str,
+    module_path: &str,
+    target: &str,
+    file: &str,
+    line: u32,
+) {
+    #[cfg(all(feature = "userspace", target_arch = "x86_64"))]
+    if crate::arch::ring3::in_ring3() {
+        use alloc::vec::Vec;
+
+        use hyperlight_common::flatbuffer_wrappers::guest_log_data::GuestLogData;
+
+        let record = GuestLogData::new(
+            message.into(),
+            module_path.into(),
+            level,
+            target.into(),
+            file.into(),
+            line,
+        );
+        if let Ok(bytes) = TryInto::<Vec<u8>>::try_into(record) {
+            unsafe { crate::arch::ring3::sys_log(&bytes) };
+        }
+        return;
+    }
+
     let handle = unsafe { GUEST_HANDLE };
     handle.log_message(level, message, module_path, target, file, line);
 }

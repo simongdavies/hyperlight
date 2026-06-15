@@ -171,6 +171,23 @@ impl GuestHandle {
         self.try_pop_shared_input_data_raw()
     }
 
+    /// Push a pre-serialized [`GuestLogData`] record to the host (the log half of
+    /// [`log_message`], without producing a return value).
+    ///
+    /// This is the ring 0 worker behind a ring 3 log call (`userspace` feature):
+    /// the ring 3 side serialises the record into a user buffer and hands the
+    /// bytes here via a syscall, keeping the supervisor-only shared output buffer
+    /// and the privileged `out` in ring 0.
+    #[cfg(feature = "userspace")]
+    #[instrument(skip_all, level = "Trace")]
+    pub fn dispatch_log_raw(&self, record: &[u8]) -> Result<()> {
+        self.push_shared_output_data(record)?;
+        unsafe {
+            out32(OutBAction::Log as u16, 0);
+        }
+        Ok(())
+    }
+
     /// Log a message with the specified log level, source, caller, source file, and line number.
     pub fn log_message(
         &self,

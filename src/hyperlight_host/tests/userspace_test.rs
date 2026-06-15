@@ -191,6 +191,23 @@ fn userspace_guest_panic() {
     }
 }
 
+/// A ring 3 guest function can emit a log record. Logging pushes the serialized
+/// record to the supervisor-only shared output buffer and emits a privileged
+/// Log `out`, both impossible in ring 3, so the call is mediated by the SYS_LOG
+/// syscall. The guest function returning successfully proves the log path does
+/// not fault in ring 3.
+#[test]
+fn userspace_guest_log_message() {
+    const LOG_LEVEL_INFORMATION: i32 = 3;
+    let mut sandbox = new_userspace_sandbox();
+    sandbox
+        .call::<()>(
+            "LogMessage",
+            ("hello from ring 3".to_string(), LOG_LEVEL_INFORMATION),
+        )
+        .unwrap();
+}
+
 /// The ring 3 user heap is backed by the user slice of the *configured* guest
 /// heap, so it scales with `heap_size` rather than being a fixed size. With a
 /// large enough heap, a ring 3 allocation far bigger than the historical

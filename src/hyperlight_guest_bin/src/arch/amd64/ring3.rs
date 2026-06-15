@@ -106,7 +106,7 @@ const USER_RFLAGS: u64 = RFLAGS_RESERVED1 | RFLAGS_IF;
 //   caller and never resume the ring 3 code (`SYS_RETURN`).
 // * *Returning* syscalls run a ring 0 handler ([`hl_syscall_dispatch`]) and then
 //   `sysretq` back into the ring 3 code with a result in RAX.
-use hyperlight_guest::syscall::{SYS_HOST_CALL, SYS_OUTB, SYS_RETURN, SYS_SELFTEST};
+use hyperlight_guest::syscall::{SYS_HOST_CALL, SYS_LOG, SYS_OUTB, SYS_RETURN, SYS_SELFTEST};
 
 /// True if the CPU is currently executing in ring 3 (user mode), determined from
 /// the current code segment selector's requested privilege level. Reading CS is
@@ -373,6 +373,7 @@ extern "C" fn hl_syscall_dispatch(num: u64, a0: u64, a1: u64, _a2: u64) -> u64 {
             unsafe { hyperlight_guest::exit::raw_out32(a0 as u16, a1 as u32) };
             0
         }
+        SYS_LOG => unsafe { sys_log_handler(a0) },
         _ => panic!("ring 3 issued an unknown syscall: {num:#x}"),
     }
 }
@@ -472,6 +473,49 @@ pub(crate) unsafe fn sys_host_call(request: &[u8]) -> Option<Vec<u8>> {
         )
     };
     Some(v)
+}
+
+/// Descriptor for a ring 3 log call: a user buffer holding the serialized
+/// `GuestLogData` record. Shared between the ring 3 issuer ([`sys_log`]) and the
+/// ring 0 handler ([`sys_log_handler`]).
+#[repr(C)]
+struct LogDescriptor {
+    record_ptr: u64,
+    record_len: u64,
+}
+
+/// Ring 0 handler for [`SYS_LOG`]: read the serialized log record the ring 3
+/// caller staged in user memory and push it to the host via the supervisor-only
+/// guest handle.
+///
+/// # Safety
+/// `desc_ptr` must point to a valid [`LogDescriptor`] in user memory whose
+/// `record_ptr`/`record_len` describe a readable user buffer.
+unsafe fn sys_log_handler(desc_ptr: u64) -> u64 {
+    unsafe {
+        let desc = &*(desc_ptr as *const LogDescriptor);
+        let record =
+            core::slice::from_raw_parts(desc.record_ptr as *const u8, desc.record_len as usize);
+        // Best-effort: a failed log push must not take the guest down.
+        let handle = crate::GUEST_HANDLE;
+        let _ = handle.dispatch_log_raw(record);
+        0
+    }
+}
+
+/// Issue a [`SYS_LOG`] from ring 3 with a serialized `GuestLogData` record (in
+/// user-accessible memory).
+///
+/// # Safety
+/// Must only be called from ring 3 code entered via [`enter_user`].
+pub(crate) unsafe fn sys_log(record: &[u8]) {
+    let desc = LogDescriptor {
+        record_ptr: record.as_ptr() as u64,
+        record_len: record.len() as u64,
+    };
+    unsafe {
+        syscall2(SYS_LOG, &raw const desc as u64, 0);
+    }
 }
 
 /// Self-test the ring 0 -> ring 3 -> ring 0 round-trip.

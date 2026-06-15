@@ -34,3 +34,6 @@ pub const SYS_HOST_CALL: u64 = 2;
 /// RSI = value; returning). Used by the abort/debug-print paths, whose data is
 /// carried in the `out` value rather than a shared buffer.
 pub const SYS_OUTB: u64 = 3;
+/// Push a serialized guest log record to the host on behalf of ring 3 (RDI
+/// points to a descriptor in user memory; returning).
+pub const SYS_LOG: u64 = 4;
