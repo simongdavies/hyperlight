@@ -239,3 +239,97 @@ fn userspace_guest_user_heap_scales_with_config() {
         "expected a clean MallocFailed abort on the default heap, got {err:?}"
     );
 }
+
+// =============================================================================
+// Negative security tests
+//
+// These prove the ring 3 isolation actually holds: a guest function that
+// deliberately attempts a privileged or supervisor-only operation must fault
+// and abort cleanly, never succeed. The matching guest functions are compiled
+// only into the ring 3 build and run their bodies in ring 3.
+// =============================================================================
+
+/// Assert that `err` is a guest abort whose message names the expected CPU
+/// exception (e.g. "GeneralProtectionFault" or "PageFault"). The host formats
+/// exception aborts as "Exception: {:?} | ...", so the fault type appears
+/// verbatim in the message.
+fn assert_aborted_with_fault(err: &HyperlightError, expected_fault: &str) {
+    match err {
+        HyperlightError::GuestAborted(_, msg) => assert!(
+            msg.contains(expected_fault),
+            "expected the abort to be a {expected_fault}, got: {msg}"
+        ),
+        other => panic!("expected GuestAborted({expected_fault}), got {other:?}"),
+    }
+}
+
+/// Ring 3 must not be able to execute a privileged instruction. `cli` is CPL 0
+/// only, so attempting it in ring 3 raises a general-protection fault.
+#[test]
+fn userspace_ring3_cannot_execute_privileged_instruction() {
+    let mut sandbox = new_userspace_sandbox();
+    let err = sandbox
+        .call::<()>("Ring3ExecutePrivileged", ())
+        .unwrap_err();
+    assert_aborted_with_fault(&err, "GeneralProtectionFault");
+}
+
+/// Ring 3 must not be able to talk to the host by issuing the privileged `out`
+/// instruction directly (bypassing the syscall mediation). It raises a
+/// general-protection fault.
+#[test]
+fn userspace_ring3_cannot_execute_out() {
+    let mut sandbox = new_userspace_sandbox();
+    let err = sandbox.call::<()>("Ring3ExecuteOut", ()).unwrap_err();
+    assert_aborted_with_fault(&err, "GeneralProtectionFault");
+}
+
+/// Ring 3 must not be able to read the runtime's supervisor-only memory (here,
+/// the kernel stack). The page is present but supervisor-only, so the read
+/// raises a page fault rather than leaking kernel data.
+#[test]
+fn userspace_ring3_cannot_read_kernel_memory() {
+    let mut sandbox = new_userspace_sandbox();
+    let err = sandbox
+        .call::<u64>("Ring3ReadKernelMemory", ())
+        .unwrap_err();
+    assert_aborted_with_fault(&err, "PageFault");
+}
+
+/// Ring 3 must not be able to write the runtime's supervisor-only memory. The
+/// write raises a page fault rather than corrupting runtime state.
+#[test]
+fn userspace_ring3_cannot_write_kernel_memory() {
+    let mut sandbox = new_userspace_sandbox();
+    let err = sandbox
+        .call::<()>("Ring3WriteKernelMemory", ())
+        .unwrap_err();
+    assert_aborted_with_fault(&err, "PageFault");
+}
+
+/// A ring 3 isolation violation aborts the *guest* without corrupting the host:
+/// after the abort the sandbox is poisoned, and restoring from a snapshot
+/// recovers it so ordinary guest calls work again. This proves the fault is
+/// contained.
+#[test]
+fn userspace_ring3_violation_is_recoverable() {
+    let mut sandbox = new_userspace_sandbox();
+    let snapshot = sandbox.snapshot().unwrap();
+
+    let err = sandbox
+        .call::<()>("Ring3ExecutePrivileged", ())
+        .unwrap_err();
+    assert_aborted_with_fault(&err, "GeneralProtectionFault");
+    assert!(
+        sandbox.poisoned(),
+        "sandbox should be poisoned after an abort"
+    );
+
+    sandbox.restore(snapshot).unwrap();
+    assert!(!sandbox.poisoned(), "restore should clear the poison");
+
+    let result = sandbox
+        .call::<String>("Echo", "recovered".to_string())
+        .unwrap();
+    assert_eq!(result, "recovered");
+}

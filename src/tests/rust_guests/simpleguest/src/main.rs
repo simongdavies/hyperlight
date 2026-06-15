@@ -502,6 +502,67 @@ fn outb_with_port(port: u32, value: u32) {
 }
 
 // =============================================================================
+// Ring 3 isolation tests (userspace feature only)
+//
+// Each of these guest functions deliberately attempts an operation that the
+// ring 0 runtime is allowed to perform but ring 3 user code must not. When the
+// `userspace` feature is enabled the function body runs in ring 3, so each
+// attempt must fault (and the guest abort cleanly) rather than succeeding. The
+// host-side `userspace_test` integration tests assert exactly that. They live in
+// a feature-gated module so they are only compiled into the ring 3 build.
+// =============================================================================
+
+#[cfg(feature = "userspace")]
+mod ring3_isolation {
+    use super::*;
+
+    /// Attempt a privileged instruction (`cli`) from ring 3. Disabling
+    /// interrupts is a CPL 0 operation, so this raises a general-protection
+    /// fault in ring 3.
+    #[guest_function("Ring3ExecutePrivileged")]
+    fn ring3_execute_privileged() {
+        unsafe { core::arch::asm!("cli", options(nomem, nostack, preserves_flags)) };
+    }
+
+    /// Attempt to issue the host I/O instruction (`out`) directly from ring 3,
+    /// bypassing the syscall mediation. `out` is privileged, so this raises a
+    /// general-protection fault: ring 3 cannot talk to the host except through
+    /// the runtime's syscalls.
+    #[guest_function("Ring3ExecuteOut")]
+    fn ring3_execute_out() {
+        unsafe {
+            core::arch::asm!(
+                "out dx, eax",
+                in("dx") 0x100u16,
+                in("eax") 0u32,
+                options(nomem, nostack, preserves_flags)
+            )
+        };
+    }
+
+    /// Address within the (supervisor-only) kernel main stack's resident top
+    /// page. Reading or writing it from ring 3 must raise a page fault.
+    const KERNEL_SUPERVISOR_ADDR: u64 = hyperlight_guest::layout::MAIN_STACK_TOP_GVA - 0x100;
+
+    /// Attempt to read supervisor-only memory (the runtime's kernel stack) from
+    /// ring 3. The page is present but marked supervisor-only, so this raises a
+    /// page fault rather than leaking kernel data.
+    #[guest_function("Ring3ReadKernelMemory")]
+    fn ring3_read_kernel_memory() -> u64 {
+        let v = unsafe { core::ptr::read_volatile(KERNEL_SUPERVISOR_ADDR as *const u64) };
+        black_box(v)
+    }
+
+    /// Attempt to write supervisor-only memory (the runtime's kernel stack) from
+    /// ring 3. This raises a page fault rather than letting ring 3 corrupt
+    /// runtime state.
+    #[guest_function("Ring3WriteKernelMemory")]
+    fn ring3_write_kernel_memory() {
+        unsafe { core::ptr::write_volatile(KERNEL_SUPERVISOR_ADDR as *mut u64, 0xdead_beef) };
+    }
+}
+
+// =============================================================================
 // Hardware timer interrupt test infrastructure
 // =============================================================================
 
