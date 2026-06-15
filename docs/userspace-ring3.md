@@ -46,6 +46,14 @@ With the feature enabled, ring 3 user code:
 The privilege drop is one-way per call: the runtime enters ring 3 to run user
 code and regains control via a controlled `syscall` trap.
 
+These guarantees are **enforced by hardware and proven by negative tests**
+(`userspace_test`): a ring 3 guest function that attempts a privileged
+instruction (`cli`, a raw `out`) faults with a general-protection fault, and one
+that reads or writes the runtime's supervisor-only memory (the kernel stack)
+faults with a page fault. In every case the guest aborts cleanly; a further test
+confirms the abort poisons the sandbox without corrupting the host and that a
+snapshot restore recovers it.
+
 ## 3. Architecture
 
 ### 3.1 Privilege levels and the GDT
@@ -215,8 +223,8 @@ because its code pages would be supervisor-only.
 | 5a | Returning syscall (`sysretq`) dispatch path | **done**, runtime-validated on KVM |
 | 5b | Run registered guest functions in ring 3 (arg/result marshalling) | **done**, runtime-validated on KVM |
 | 5c | Host calls / logging / abort from ring 3 (`SYS_HOST_CALL`/`SYS_LOG`/`SYS_OUTB`) | **done**, runtime-validated on KVM |
+| 6 | Negative security tests (isolation enforcement) | **done**, runtime-validated on KVM |
 | 4b | Archive-keyed data partition (full data isolation) | designed, not implemented |
-| 6 | Exception robustness from ring 3 + negative security tests | designed, not implemented |
 | 7 | Benchmarks (ring 0 vs ring 3) | **partial** (Echo + restore measured) |
 
 ### What is validated, and how
