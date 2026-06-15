@@ -12,7 +12,7 @@
 Historically, **all** code in a Hyperlight guest — both the Hyperlight runtime
 (the guest library: entry point, exception handlers, guest-function dispatch,
 host-call plumbing) and the **user-provided** code (`hyperlight_main` and
-registered guest functions) — runs at **ring 0** (CPL 0, supervisor) inside the
+registered guest functions) — runs at **ring 0** (CPL 0, privileged) inside the
 micro-VM.
 
 The goal of the `userspace` feature is to run **user-provided code in ring 3**
@@ -79,6 +79,28 @@ This is x86-64 only. i686 and aarch64 are out of scope (see
 [Future work](#9-future-work)).
 
 ## 2. Isolation goals (threat model)
+
+### Trust boundary
+
+The guest binary is a **single trust unit**: the Hyperlight runtime
+(`hyperlight-guest-bin`) and the user-provided code (`hyperlight_main` and the
+registered guest functions) are compiled and linked together by a **trusted**
+party, against the *unmodified* runtime. This is the same arrangement an
+operating system relies on: compiling a program does not grant it ring 0,
+because the trusted kernel and the libraries it is linked against expose no
+ring 0 primitives. Here the trusted runtime owns the entrypoint and drops **all**
+user code — `hyperlight_main` included — into ring 3, and the only way back into
+ring 0 is the narrow syscall ABI it defines (§3.6).
+
+The threat this contains is therefore **untrusted *input*, not an untrusted
+binary author**: a trusted author writes a guest function that processes
+attacker-controlled data and has a memory-safety bug. Ring 3 isolation ensures
+that hijacking such a function cannot corrupt the runtime or drive the host and
+hypervisor interfaces directly (§1). Containing an untrusted *binary* — one whose
+author is the adversary — remains the job of the VM boundary, which confines the
+guest regardless of the ring its code runs in.
+
+### Guarantees
 
 With the feature enabled, ring 3 user code:
 
@@ -257,6 +279,7 @@ ring 3 code with a result in `rax`. The complete set is:
 | 2 | `SYS_HOST_CALL` | returning | perform a host function call (request/result marshalled via a user-memory descriptor) |
 | 3 | `SYS_OUTB` | returning | perform a privileged `out dx, eax` (abort / debug-print, whose data rides in the value) |
 | 4 | `SYS_LOG` | returning | push a serialized guest log record to the host |
+| 5 | `SYS_REGISTER` | returning | register a guest function whose definition was built in ring 3 (e.g. in `hyperlight_main`); the handler deep-clones it into the kernel heap and inserts it into the supervisor-only registry |
 
 The ABI numbers live in one place, `hyperlight_guest::syscall`, shared by the
 ring 3 issuers and the ring 0 dispatcher. Each privileged service keeps all PEB,
@@ -312,8 +335,7 @@ partition, deliberately chosen over a blanket sweep of all runtime writable data
 because the CPL-routed allocator (§3.9) keeps dispatch state that ring 3 must be
 able to read; a blanket sweep would fault ring 3's own allocator. It closes the
 *escalation* (ring 0 honouring ring-3-controlled pointers) but not every
-*information leak* from shared runtime data. It is also wired up via a `build.rs`
-+ linker script in the *binary* crate (`simpleguest`), so it is **not yet
+*information leak* from shared runtime data. It is also wired up via a `build.rs` linker script in the *binary* crate (`simpleguest`), so it is **not yet
 automatic** for other guests. Both are tracked as [future work](#9-future-work).
 
 ### 3.8 Running guest functions in ring 3
@@ -338,9 +360,21 @@ cannot touch supervisor memory or execute privileged instructions:
    calls, whose request and result are marshalled through user buffers while the
    privileged `out` and the shared-buffer access stay in ring 0.
 
-The one-time initialisation entry point, `hyperlight_main`, currently runs in
-**ring 0** (it executes once during guest init, before any ring 3 call). Running
-it in ring 3 as well is a possible refinement (see [Future work](#9-future-work)).
+The initialisation entry point, `hyperlight_main`, **also runs in ring 3** (via a
+trampoline that runs its body and returns through `SYS_RETURN`), so *all* user
+code runs unprivileged. `hyperlight_main` commonly registers guest functions, and
+registration writes the supervisor-only registry (§3.7); that write is therefore
+mediated by the `SYS_REGISTER` syscall. The ring 0 handler **deep-clones** the
+definition into the kernel heap — so the registry never holds pointers into the
+user heap — and inserts it. This grants ring 3 no new privilege: the registered
+function is guest code that itself runs in ring 3 when later dispatched.
+Guest-function *lookup* and parameter *verification* (which read the registry)
+stay in ring 0.
+
+Note that a function registered this way must, like any guest function, be
+safe to run in ring 3 — it must reach the host only through the runtime's
+CPL-aware entry points (which issue the mediating syscalls), not by directly
+dereferencing the supervisor `GUEST_HANDLE` or issuing a raw `out`.
 
 ### 3.9 Heaps and the CPL-routed allocator
 
@@ -379,9 +413,11 @@ The feature is complete enough to run real user code in ring 3 end to end:
 - **Privilege transitions.** Ring 0 → ring 3 via `iretq`, ring 3 → ring 0 via
   `syscall`, with `sysret` for returning syscalls. The GDT user descriptors, the
   TSS, and the `syscall`/`sysret` MSRs are programmed at guest init.
-- **User code in ring 3.** Registered guest functions run their body in ring 3,
-  with arguments and results marshalled across the boundary (§3.8). Function
-  lookup and parameter verification stay in ring 0.
+- **User code in ring 3.** Both `hyperlight_main` and the registered guest
+  functions run their bodies in ring 3, with arguments and results marshalled
+  across the boundary (§3.8). Function lookup and parameter verification stay in
+  ring 0. Registration performed by `hyperlight_main` is mediated to the
+  supervisor registry by the `SYS_REGISTER` syscall.
 - **Privileged services from ring 3.** Host calls, logging, and abort are
   mediated by syscalls (`SYS_HOST_CALL`, `SYS_LOG`, `SYS_OUTB`); ring 3 never
   executes a privileged instruction or touches a shared buffer directly.
@@ -405,8 +441,10 @@ The feature is complete enough to run real user code in ring 3 end to end:
 - **Integration tests on a hypervisor** (`userspace_test`, KVM/mshv/WHP) cover
   the end-to-end path: a guest boots and passes its boot-time transition
   self-tests; guest functions echo typed values (string, `f64`, `f32`); a guest
-  function calls a host function; logging and abort work; and repeated calls,
-  call/restore cycles, and a configurable heap size all behave.
+  function calls a host function; logging and abort work; `hyperlight_main` runs
+  in ring 3 and registers a guest function through `SYS_REGISTER` that is then
+  dispatched and run; and repeated calls, call/restore cycles, and a configurable
+  heap size all behave.
 - **Negative security tests** (same suite) prove the isolation holds — see §2.
 
 The boot-time self-test (`ring3::selftest`) performs a ring 0 → ring 3 → ring 0
@@ -551,9 +589,6 @@ currently backs it. The user heap already grows lazily.
 
 ### 9.3 Other
 
-- **`hyperlight_main` in ring 3.** The one-time initialisation entry point
-  currently runs in ring 0 (§3.8); running it in ring 3 as well would extend the
-  privilege drop to all user code, not just registered guest functions.
 - **Benchmark integration.** Add the `GuestMode { Ring0, Ring3 }` axis to the
   Criterion suite (§7), including a sandbox-creation benchmark to capture the
   one-time startup cost, and wire the userspace guest build into `just guests`
