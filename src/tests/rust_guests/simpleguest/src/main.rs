@@ -560,6 +560,28 @@ mod ring3_isolation {
     fn ring3_write_kernel_memory() {
         unsafe { core::ptr::write_volatile(KERNEL_SUPERVISOR_ADDR as *mut u64, 0xdead_beef) };
     }
+
+    /// Attempt to read the runtime's ring-0-only critical data section
+    /// (`.kdata`) from ring 3.
+    ///
+    /// That section holds the guest function pointer table, the PEB handle and
+    /// the exception handler table — all of which ring 0 dereferences. It shares
+    /// the user-accessible guest image, so without the `userspace` hardening
+    /// ring 3 could read it (and, via a copy-on-write fault, overwrite the
+    /// function pointers ring 0 later calls). `protect_kernel_data` re-protects
+    /// it supervisor-only at boot, so this read must raise a page fault. The
+    /// `__kdata_start` bound is emitted by the guest linker script.
+    #[guest_function("Ring3ReadKernelData")]
+    fn ring3_read_kernel_data() -> u64 {
+        extern "C" {
+            static __kdata_start: u8;
+        }
+        let v = unsafe {
+            let addr = core::ptr::addr_of!(__kdata_start) as u64;
+            core::ptr::read_volatile(addr as *const u64)
+        };
+        black_box(v)
+    }
 }
 
 // =============================================================================

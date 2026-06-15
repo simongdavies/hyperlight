@@ -199,6 +199,49 @@ pub(crate) unsafe fn init() {
     }
 }
 
+/// Move the runtime's ring-0-only critical data out of ring 3's reach.
+///
+/// Under the `userspace` feature the guest image is mapped user-accessible so
+/// that ring 3 can execute it. That would otherwise also let ring 3 read — and,
+/// via a copy-on-write fault, even overwrite — security-critical statics that
+/// share the image, most importantly the guest function pointer table that
+/// ring 0 dereferences when dispatching a call. The guest's linker script
+/// gathers those statics (tagged `#[link_section = ".kdata"]`) into a single
+/// page-aligned section bounded by `__kdata_start` / `__kdata_end`; here we
+/// re-protect every one of its pages supervisor-only, closing that escalation
+/// path.
+///
+/// Must run in ring 0 during initialisation, before any ring 3 code executes
+/// (see [`crate::generic_init`]). The protection is established before any
+/// guest call, so it is captured by — and therefore survives — snapshot and
+/// restore.
+///
+/// # Safety
+/// Mutates live page tables (see [`crate::paging::reprotect_page_supervisor`]);
+/// must not run concurrently with other page-table operations. Relies on the
+/// guest linker script page-aligning the `.kdata` bounds.
+pub(crate) unsafe fn protect_kernel_data() {
+    // Bounds defined by the guest linker script (see `simpleguest/userspace.ld`),
+    // which page-aligns both ends of the `.kdata` section.
+    unsafe extern "C" {
+        static __kdata_start: u8;
+        static __kdata_end: u8;
+    }
+    let start = (&raw const __kdata_start) as u64;
+    let end = (&raw const __kdata_end) as u64;
+    debug_assert_eq!(
+        start % PAGE_SIZE as u64,
+        0,
+        ".kdata start must be page aligned"
+    );
+    debug_assert_eq!(end % PAGE_SIZE as u64, 0, ".kdata end must be page aligned");
+    let mut va = start;
+    while va < end {
+        unsafe { crate::paging::reprotect_page_supervisor(va) };
+        va += PAGE_SIZE as u64;
+    }
+}
+
 /// Run `f` in ring 3, returning the value it passes to `SYS_RETURN`.
 ///
 /// `f` is an `extern "C"` function that receives `arg` and must not return

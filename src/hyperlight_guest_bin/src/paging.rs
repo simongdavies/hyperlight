@@ -168,6 +168,56 @@ pub fn phys_to_virt(gpa: vmem::PhysAddr) -> Option<*mut u8> {
     GuestMappingOperations::new().try_phys_to_virt(gpa)
 }
 
+/// Re-protect a currently user-accessible page so that it becomes a private,
+/// supervisor-only (ring 0) read/write page that ring 3 can neither read nor
+/// write.
+///
+/// This backs the `userspace` hardening that moves the runtime's ring-0-only
+/// critical statics (the guest function table, the PEB handle, the exception
+/// handler table — collected by the linker into the `.kdata` section) out of
+/// ring 3's reach. The page is given its *own* freshly allocated physical
+/// backing, seeded with a copy of the current contents, so that a later ring-3
+/// copy-on-write fault on a neighbouring shared page of the (user-accessible)
+/// guest image cannot resurrect access to this one. The new mapping is
+/// read/write but non-executable: this is data, never code.
+///
+/// `va` must be page-aligned. Intended to run in ring 0 during initialisation,
+/// before any ring 3 code executes.
+///
+/// # Safety
+/// Same caveats as [`map_region`]: it mutates live page tables with no locking
+/// and must not run concurrently with any other page-table operation.
+#[cfg(all(feature = "userspace", target_arch = "x86_64"))]
+pub(crate) unsafe fn reprotect_page_supervisor(va: u64) {
+    unsafe {
+        let target = va as *mut u8;
+        let new_page = alloc_phys_pages(1);
+        let scratch = phys_to_virt(new_page).expect(
+            "reprotect_page_supervisor: freshly allocated phys page not mapped into scratch",
+        );
+        // Seed the private page with the current contents: these statics may
+        // already be populated (e.g. the guest function table after
+        // registration), and we must preserve them.
+        core::ptr::copy(target, scratch, vmem::PAGE_SIZE);
+        map_region_with_access(
+            new_page,
+            target,
+            vmem::PAGE_SIZE as u64,
+            vmem::MappingKind::Basic(vmem::BasicMapping {
+                readable: true,
+                writable: true,
+                // data, not code: keep it non-executable
+                executable: false,
+            }),
+            // supervisor-only: deny ring 3 both read and write
+            false,
+        );
+        // We changed the output address of an entry that was already valid, so
+        // the stale TLB entry for this VA must be invalidated.
+        asm!("invlpg [{}]", in(reg) target, options(readonly, nostack, preserves_flags));
+    }
+}
+
 /// Barriers that other code may need to use when updating page tables
 pub mod barrier {
     /// Call this function when a virtual address has just been made

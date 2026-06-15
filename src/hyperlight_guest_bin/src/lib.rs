@@ -146,7 +146,32 @@ pub(crate) static HEAP_ALLOCATOR: ProfiledLockedHeap<32> =
 #[global_allocator]
 pub(crate) static HEAP_ALLOCATOR: userspace_heap::RoutedHeap = userspace_heap::RoutedHeap::new();
 
+/// The guest handle, carrying the pointer to the Process Environment Block the
+/// runtime dereferences to reach the host.
+///
+/// Under the `userspace` feature this is ring-0-only critical state, so it is
+/// emitted into the page-aligned `.kdata` section that
+/// [`arch::ring3::protect_kernel_data`] re-protects supervisor-only at boot —
+/// ring 3 must not be able to read it or, via a copy-on-write fault, redirect
+/// it. (Without the feature it stays in `.bss` as before.)
+#[cfg_attr(
+    all(feature = "userspace", target_arch = "x86_64"),
+    unsafe(link_section = ".kdata")
+)]
 pub static mut GUEST_HANDLE: GuestHandle = GuestHandle::new();
+/// The registered guest function table.
+///
+/// Ring 0 looks up and **calls** these function pointers when dispatching a
+/// guest call, which makes this table the primary privilege-escalation target
+/// under the `userspace` feature: a ring 3 write (directly, or by faulting a
+/// copy-on-write of the shared, user-accessible guest image) would otherwise
+/// be observed by ring 0 on its next dispatch. It is therefore emitted into the
+/// supervisor-only `.kdata` section (see [`arch::ring3::protect_kernel_data`]);
+/// without the feature it stays in `.bss` as before.
+#[cfg_attr(
+    all(feature = "userspace", target_arch = "x86_64"),
+    unsafe(link_section = ".kdata")
+)]
 pub(crate) static mut REGISTERED_GUEST_FUNCTIONS: GuestFunctionRegister<GuestFunc> =
     GuestFunctionRegister::new();
 
@@ -323,6 +348,15 @@ pub(crate) extern "C" fn generic_init(
     #[cfg(feature = "macros")]
     for registration in __private::GUEST_FUNCTION_INIT {
         registration();
+    }
+
+    // Now that the runtime's ring-0-only critical statics are fully populated
+    // (the guest function table was just filled above), move them out of ring
+    // 3's reach before any user code runs. See
+    // [`arch::ring3::protect_kernel_data`].
+    #[cfg(all(feature = "userspace", target_arch = "x86_64"))]
+    unsafe {
+        arch::ring3::protect_kernel_data();
     }
 
     // Verify the ring 0 -> ring 3 -> ring 0 transition machinery works before

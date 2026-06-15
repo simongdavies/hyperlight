@@ -307,6 +307,45 @@ fn userspace_ring3_cannot_write_kernel_memory() {
     assert_aborted_with_fault(&err, "PageFault");
 }
 
+/// Ring 3 must not be able to reach the runtime's ring-0-only critical data
+/// section (`.kdata`: the guest function pointer table, the PEB handle and the
+/// exception handler table). Those statics share the user-accessible guest
+/// image, so without the `userspace` data-partition hardening ring 3 could read
+/// them and — via a copy-on-write fault on the shared image — overwrite the
+/// function pointers that ring 0 dereferences when dispatching a call, a direct
+/// ring 0 code-execution escalation. `protect_kernel_data` re-protects the
+/// section supervisor-only at boot, so the read raises a page fault. Because
+/// the protection is established during initialisation, it is captured by the
+/// snapshot baseline and so still holds after a restore.
+#[test]
+fn userspace_ring3_cannot_read_kernel_data_section() {
+    let mut sandbox = new_userspace_sandbox();
+    let err = sandbox.call::<u64>("Ring3ReadKernelData", ()).unwrap_err();
+    assert_aborted_with_fault(&err, "PageFault");
+}
+
+/// The `.kdata` supervisor protection is established during initialisation, so
+/// it is part of every snapshot baseline and must still hold after a restore.
+/// A guest-side re-protection that did not survive restore would silently
+/// reopen the escalation on the next call — this guards against that.
+#[test]
+fn userspace_ring3_kernel_data_protection_survives_restore() {
+    let mut sandbox = new_userspace_sandbox();
+    let snapshot = sandbox.snapshot().unwrap();
+
+    // First attempt faults because `.kdata` is supervisor-only.
+    let err = sandbox.call::<u64>("Ring3ReadKernelData", ()).unwrap_err();
+    assert_aborted_with_fault(&err, "PageFault");
+
+    // Restore clears the poison the abort left behind.
+    sandbox.restore(snapshot).unwrap();
+    assert!(!sandbox.poisoned(), "restore should clear the poison");
+
+    // The protection must still be in force after the restore.
+    let err = sandbox.call::<u64>("Ring3ReadKernelData", ()).unwrap_err();
+    assert_aborted_with_fault(&err, "PageFault");
+}
+
 /// A ring 3 isolation violation aborts the *guest* without corrupting the host:
 /// after the abort the sandbox is poisoned, and restoring from a snapshot
 /// recovers it so ordinary guest calls work again. This proves the fault is

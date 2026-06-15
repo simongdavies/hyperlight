@@ -30,6 +30,19 @@ use crate::{ErrorCode, HyperlightAbortWriter};
 /// Array of installed exception handlers for vectors 0-30.
 ///
 /// TODO: This will eventually need to be part of a per-thread context when threading is implemented.
+///
+/// These are function pointers that ring 0 invokes when a fault occurs, so
+/// under the `userspace` feature the table is emitted into the supervisor-only
+/// `.kdata` section (see [`crate::arch::ring3::protect_kernel_data`]). Ring 0
+/// exception *delivery* still reads it normally; what the protection denies is
+/// ring 3 installing or corrupting a handler that ring 0 would then call. As a
+/// result, installing exception handlers (e.g. the `InstallHandler` guest
+/// function) is a ring-0-only operation under this feature. Without the feature
+/// the table stays in `.bss` and behaves exactly as before.
+#[cfg_attr(
+    all(feature = "userspace", target_arch = "x86_64"),
+    unsafe(link_section = ".kdata")
+)]
 pub static HANDLERS: [core::sync::atomic::AtomicU64; 31] =
     [const { core::sync::atomic::AtomicU64::new(0) }; 31];
 
