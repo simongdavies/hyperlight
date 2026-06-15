@@ -98,30 +98,15 @@ const FMASK_VALUE: u64 = RFLAGS_TF | RFLAGS_IF | RFLAGS_DF | RFLAGS_NT | RFLAGS_
 const USER_RFLAGS: u64 = RFLAGS_RESERVED1 | RFLAGS_IF;
 
 // ===== Syscall numbers =====
-// Passed in RAX by ring 3 code. Two kinds of syscall exist:
+// The canonical ABI numbers live in `hyperlight_guest::syscall` (the single
+// source of truth shared with the ring 3 issuers in that crate). There are two
+// kinds of syscall:
 //
 // * *Non-returning* syscalls unwind the kernel stack back into [`enter_user`]'s
 //   caller and never resume the ring 3 code (`SYS_RETURN`).
 // * *Returning* syscalls run a ring 0 handler ([`hl_syscall_dispatch`]) and then
 //   `sysretq` back into the ring 3 code with a result in RAX.
-//
-// Privileged services (host calls, logging, abort) are added on top of the
-// returning-syscall mechanism in later phases.
-/// Return from a ring 3 user function back into [`enter_user`]'s caller. The
-/// 64-bit return value is passed in RDI. Non-returning.
-pub(crate) const SYS_RETURN: u64 = 0;
-
-/// Self-test syscall used to validate the returning-syscall (`sysretq`) path at
-/// boot. Takes two scalar arguments and returns their XOR, computed in ring 0.
-/// Pointer-free by design, so it exercises the transition mechanism in
-/// isolation from user-pointer handling. Returning.
-const SYS_SELFTEST: u64 = 1;
-
-/// Perform a host function call on behalf of ring 3 code. `a0` is a pointer to a
-/// [`HostCallDescriptor`] in user memory describing the (already-serialised)
-/// request; the ring 0 handler performs the privileged push/`out`/pop and writes
-/// the encoded result back into the descriptor. Returning.
-const SYS_HOST_CALL: u64 = 2;
+use hyperlight_guest::syscall::{SYS_HOST_CALL, SYS_OUTB, SYS_RETURN, SYS_SELFTEST};
 
 /// True if the CPU is currently executing in ring 3 (user mode), determined from
 /// the current code segment selector's requested privilege level. Reading CS is
@@ -382,6 +367,12 @@ extern "C" fn hl_syscall_dispatch(num: u64, a0: u64, a1: u64, _a2: u64) -> u64 {
     match num {
         SYS_SELFTEST => a0 ^ a1,
         SYS_HOST_CALL => unsafe { sys_host_call_handler(a0) },
+        SYS_OUTB => {
+            // Perform the ring 3 caller's privileged `out dx, eax` in ring 0.
+            // a0 = port, a1 = value.
+            unsafe { hyperlight_guest::exit::raw_out32(a0 as u16, a1 as u32) };
+            0
+        }
         _ => panic!("ring 3 issued an unknown syscall: {num:#x}"),
     }
 }

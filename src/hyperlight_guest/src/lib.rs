@@ -25,6 +25,9 @@ pub mod error;
 pub mod exit;
 pub mod layout;
 pub mod prim_alloc;
+/// Syscall ABI numbers for the `userspace` feature (x86-64).
+#[cfg(all(feature = "userspace", target_arch = "x86_64"))]
+pub mod syscall;
 pub mod types;
 
 pub mod guest_handle {

@@ -20,6 +20,12 @@ use core::arch::asm;
 use hyperlight_common::outb::OutBAction;
 
 /// OUT function for sending a 32-bit value to the host.
+///
+/// With the `userspace` feature, a ring 3 caller cannot execute the privileged
+/// `out` instruction, so the call is routed through a `SYS_OUTB` syscall and the
+/// real `out` is performed in ring 0 by [`raw_out32`]. Ring 0 callers (including
+/// exception handlers, which always run in ring 0) go straight to [`raw_out32`].
+///
 /// `out32` can be called from an exception context, so we must be careful
 /// with the tracing state that might be locked at that time.
 /// The tracing state calls `try_lock` internally to avoid deadlocks.
@@ -27,6 +33,34 @@ use hyperlight_common::outb::OutBAction;
 /// in exception contexts. Because if the trace state is already locked, trying to create a span
 /// would cause a panic, which is undesirable in exception handling.
 pub(crate) unsafe fn out32(port: u16, val: u32) {
+    #[cfg(all(feature = "userspace", target_arch = "x86_64"))]
+    if in_ring3() {
+        // Ring 3 cannot execute `out`; trap into ring 0, which performs the real
+        // OUT. (Tracing batches are not forwarded from ring 3 yet.)
+        unsafe {
+            asm!(
+                "syscall",
+                in("rax") crate::syscall::SYS_OUTB,
+                in("rdi") port as u64,
+                in("rsi") val as u64,
+                lateout("rax") _,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack),
+            );
+        }
+        return;
+    }
+    unsafe { raw_out32(port, val) }
+}
+
+/// Execute the privileged `out dx, eax` (plus any pending trace batch). Must run
+/// in ring 0; the `userspace` ring 0 syscall dispatcher calls this on behalf of
+/// ring 3.
+///
+/// # Safety
+/// Issues a privileged I/O instruction; must be called from ring 0.
+pub unsafe fn raw_out32(port: u16, val: u32) {
     #[cfg(feature = "trace_guest")]
     {
         if let Some((ptr, len)) = hyperlight_guest_tracing::serialized_data() {
@@ -57,4 +91,17 @@ pub(crate) unsafe fn out32(port: u16, val: u32) {
     unsafe {
         asm!("out dx, eax", in("dx") port, in("eax") val, options(preserves_flags, nomem, nostack));
     }
+}
+
+/// True if the CPU is currently executing in ring 3 (user mode), determined from
+/// the current code segment selector's requested privilege level. Reading CS is
+/// unprivileged and cheap.
+#[cfg(all(feature = "userspace", target_arch = "x86_64"))]
+#[inline(always)]
+fn in_ring3() -> bool {
+    let cs: u16;
+    unsafe {
+        asm!("mov {0:x}, cs", out(reg) cs, options(nomem, nostack, preserves_flags));
+    }
+    (cs & 3) == 3
 }

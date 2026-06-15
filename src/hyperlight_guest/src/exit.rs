@@ -23,6 +23,10 @@ use hyperlight_common::outb::OutBAction;
 #[cfg_attr(target_arch = "aarch64", path = "arch/aarch64/exit.rs")]
 mod arch;
 pub(crate) use arch::out32;
+/// Privileged ring 0 OUT, exposed so the `userspace` ring 0 syscall dispatcher
+/// can perform a ring 3 caller's `out` on its behalf.
+#[cfg(all(feature = "userspace", target_arch = "x86_64"))]
+pub use arch::raw_out32;
 
 /// Exits the VM with an Abort OUT action and code 0.
 #[unsafe(no_mangle)]

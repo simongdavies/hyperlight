@@ -19,6 +19,7 @@ limitations under the License.
 //! `userspace` feature, so the whole file is gated on it.
 #![cfg(feature = "userspace")]
 
+use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
 use hyperlight_host::sandbox::SandboxConfiguration;
 use hyperlight_host::{GuestBinary, HyperlightError, MultiUseSandbox, UninitializedSandbox};
 use hyperlight_testing::simple_guest_userspace_as_string;
@@ -153,6 +154,43 @@ fn userspace_guest_repeated_host_calls() {
     }
 }
 
+/// A ring 3 guest function that calls `abort_with_code` aborts cleanly: the
+/// abort is raised in ring 3 and routed to the host through the SYS_OUTB syscall
+/// (ring 3 cannot execute `out` itself), so it surfaces as a normal
+/// GuestAborted with the requested code rather than a protection fault.
+#[test]
+fn userspace_guest_abort_with_code() {
+    const ABORT_CODE: i32 = 42;
+    let mut sandbox = new_userspace_sandbox();
+    let err = sandbox
+        .call::<()>("GuestAbortWithCode", ABORT_CODE)
+        .unwrap_err();
+    assert!(
+        matches!(&err, HyperlightError::GuestAborted(code, _) if *code == ABORT_CODE as u8),
+        "expected GuestAborted({ABORT_CODE}), got {err:?}"
+    );
+}
+
+/// A panic inside a ring 3 guest function reaches the host: the panic handler
+/// streams the (variable-length) message to the host through repeated SYS_OUTB
+/// syscalls, exercising the multi-`out` abort path from ring 3.
+#[test]
+fn userspace_guest_panic() {
+    let mut sandbox = new_userspace_sandbox();
+    let err = sandbox
+        .call::<()>("guest_panic", "boom from ring 3".to_string())
+        .unwrap_err();
+    match err {
+        HyperlightError::GuestAborted(_, msg) => {
+            assert!(
+                msg.contains("boom from ring 3"),
+                "panic message should reach the host, got {msg:?}"
+            );
+        }
+        other => panic!("expected GuestAborted from a ring 3 panic, got {other:?}"),
+    }
+}
+
 /// The ring 3 user heap is backed by the user slice of the *configured* guest
 /// heap, so it scales with `heap_size` rather than being a fixed size. With a
 /// large enough heap, a ring 3 allocation far bigger than the historical
@@ -173,15 +211,14 @@ fn userspace_guest_user_heap_scales_with_config() {
     );
 
     // Default (small) heap: the user slice is only tens of KiB, so the same
-    // allocation cannot be satisfied and the guest aborts rather than
-    // succeeding or corrupting memory. (Today the ring 3 abort path itself
-    // faults on the privileged `out` instruction, so this currently surfaces as
-    // a general-protection fault rather than a clean MallocFailed; routing abort
-    // through a syscall is future work. Either way the call fails safely.)
+    // allocation cannot be satisfied. The guest aborts with MallocFailed; the
+    // abort is raised from ring 3 and routed to the host through the SYS_OUTB
+    // syscall, so it surfaces as a clean GuestAborted(MallocFailed) rather than
+    // a fault.
     let mut small = new_userspace_sandbox();
     let err = small.call::<i32>("TestMalloc", BIG_ALLOC).unwrap_err();
     assert!(
-        matches!(&err, HyperlightError::GuestAborted(_, _)),
-        "expected the oversized ring 3 allocation to abort, got {err:?}"
+        matches!(&err, HyperlightError::GuestAborted(code, _) if *code == ErrorCode::MallocFailed as u8),
+        "expected a clean MallocFailed abort on the default heap, got {err:?}"
     );
 }
