@@ -345,13 +345,18 @@ impl Snapshot {
                 virt_base: rgn.guest_region.start as u64,
                 len: rgn.guest_region.len() as u64,
                 kind,
-                // With the userspace feature, read-only regions (guest code and
-                // rodata) are made accessible to ring 3 so user code can execute
-                // and read constants. Writable regions (data/bss/heap/PEB) stay
-                // supervisor-only, keeping the runtime's mutable state out of
-                // reach of ring 3. The page tables and scratch region are mapped
-                // elsewhere and remain supervisor-only regardless.
-                user_accessible: cfg!(feature = "userspace") && !writable,
+                // With the userspace feature, ring 3 must be able to fetch
+                // instructions from the guest code region, so executable
+                // regions are made user-accessible; read-only regions (e.g.
+                // rodata/init-data blobs) are safe to expose too. Purely
+                // writable data regions (the heap) stay supervisor-only.
+                //
+                // Note the guest image (code + rodata + data + bss) is loaded
+                // as a single RWX region, so exposing it for execution also
+                // exposes the runtime's writable data that shares it. Splitting
+                // that data into its own supervisor-only section is the job of
+                // the hardened data partition phase; see docs/userspace-ring3.md.
+                user_accessible: cfg!(feature = "userspace") && (executable || !writable),
             };
             unsafe { vmem::map(&pt_buf, mapping) };
         }
