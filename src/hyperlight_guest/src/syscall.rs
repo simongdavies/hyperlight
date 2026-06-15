@@ -37,3 +37,8 @@ pub const SYS_OUTB: u64 = 3;
 /// Push a serialized guest log record to the host on behalf of ring 3 (RDI
 /// points to a descriptor in user memory; returning).
 pub const SYS_LOG: u64 = 4;
+/// Register a guest function whose definition was built by ring 3 (e.g. in
+/// `hyperlight_main`). RDI points to a `GuestFunctionDefinition` in user memory;
+/// the ring 0 handler deep-clones it into the kernel heap and inserts it into
+/// the supervisor-only registry (returning).
+pub const SYS_REGISTER: u64 = 5;

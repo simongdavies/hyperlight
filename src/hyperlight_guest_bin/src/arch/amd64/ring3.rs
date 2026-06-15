@@ -49,7 +49,7 @@ use hyperlight_guest::error::Result;
 use hyperlight_guest::prim_alloc::alloc_phys_pages;
 
 use super::layout::{USER_STACK_SIZE, USER_STACK_TOP_GVA};
-use crate::guest_function::definition::GuestFunc;
+use crate::guest_function::definition::{GuestFunc, GuestFunctionDefinition};
 use crate::userspace_heap::{user_alloc, user_dealloc};
 
 // ===== Model-specific registers =====
@@ -106,7 +106,9 @@ const USER_RFLAGS: u64 = RFLAGS_RESERVED1 | RFLAGS_IF;
 //   caller and never resume the ring 3 code (`SYS_RETURN`).
 // * *Returning* syscalls run a ring 0 handler ([`hl_syscall_dispatch`]) and then
 //   `sysretq` back into the ring 3 code with a result in RAX.
-use hyperlight_guest::syscall::{SYS_HOST_CALL, SYS_LOG, SYS_OUTB, SYS_RETURN, SYS_SELFTEST};
+use hyperlight_guest::syscall::{
+    SYS_HOST_CALL, SYS_LOG, SYS_OUTB, SYS_REGISTER, SYS_RETURN, SYS_SELFTEST,
+};
 
 /// True if the CPU is currently executing in ring 3 (user mode), determined from
 /// the current code segment selector's requested privilege level. Reading CS is
@@ -253,6 +255,32 @@ pub(crate) unsafe fn protect_kernel_data() {
 /// executable, and must only touch user-accessible memory while in ring 3.
 pub(crate) unsafe fn enter_user_fn(f: extern "C" fn(u64) -> !, arg: u64) -> u64 {
     unsafe { enter_user(f as usize as u64, arg) }
+}
+
+/// Run the guest's `hyperlight_main` entry point in ring 3.
+///
+/// `hyperlight_main` is user-provided initialisation, so under the userspace
+/// feature it runs in ring 3 like every other piece of guest code. Anything
+/// privileged it does — registering guest functions ([`SYS_REGISTER`]), logging,
+/// host calls — is mediated by the corresponding syscall, so the runtime's
+/// supervisor state stays out of its reach.
+///
+/// # Safety
+/// [`init`] and the user heap must be initialised, and the critical-data
+/// partition must already be in force (see [`protect_kernel_data`]), since
+/// `hyperlight_main` may register guest functions via [`SYS_REGISTER`].
+pub(crate) unsafe fn run_hyperlight_main() {
+    unsafe { enter_user(hyperlight_main_trampoline as usize as u64, 0) };
+}
+
+/// Ring 3 trampoline that runs `hyperlight_main` and returns to ring 0 via
+/// `SYS_RETURN`.
+extern "C" fn hyperlight_main_trampoline(_arg: u64) -> ! {
+    // SAFETY: `hyperlight_main` is the guest's init entry point; its body runs
+    // in ring 3, and any privileged action it takes is syscall-mediated.
+    unsafe { crate::hyperlight_main() };
+    // SAFETY: reached only from enter_user, in ring 3.
+    unsafe { sys_return(0) };
 }
 
 /// Issue a `SYS_RETURN` syscall from ring 3, returning `value` to the ring 0
@@ -417,6 +445,7 @@ extern "C" fn hl_syscall_dispatch(num: u64, a0: u64, a1: u64, _a2: u64) -> u64 {
             0
         }
         SYS_LOG => unsafe { sys_log_handler(a0) },
+        SYS_REGISTER => unsafe { sys_register_handler(a0) },
         _ => panic!("ring 3 issued an unknown syscall: {num:#x}"),
     }
 }
@@ -558,6 +587,48 @@ pub(crate) unsafe fn sys_log(record: &[u8]) {
     };
     unsafe {
         syscall2(SYS_LOG, &raw const desc as u64, 0);
+    }
+}
+
+/// Ring 0 handler for [`SYS_REGISTER`]: register a guest function whose
+/// definition was built by ring 3 (e.g. in `hyperlight_main`).
+///
+/// The definition's owned fields (its name `String` and parameter `Vec`) live in
+/// the ring 3 user heap. The handler deep-clones the definition — running in
+/// ring 0, so the clones land in the supervisor kernel heap — and inserts the
+/// kernel-owned copy into the supervisor-only registry, so the registry never
+/// holds pointers into the user heap. This grants ring 3 no new privilege: the
+/// registered function pointer is guest code that still runs in ring 3 when it
+/// is later dispatched; ring 3 only gets to *ask* the runtime to record an
+/// entry, exactly as the host/guest contract intends.
+///
+/// # Safety
+/// `def_ptr` must point to a valid `GuestFunctionDefinition<GuestFunc>` in user
+/// memory.
+unsafe fn sys_register_handler(def_ptr: u64) -> u64 {
+    unsafe {
+        let def = &*(def_ptr as *const GuestFunctionDefinition<GuestFunc>);
+        // We are in ring 0, so the deep clone's allocations are routed to the
+        // kernel heap.
+        let owned = def.clone();
+        crate::guest_function::register::register_function(owned);
+    }
+    0
+}
+
+/// Issue a [`SYS_REGISTER`] from ring 3 to register `def` in the supervisor-only
+/// registry. The definition is passed by reference; the ring 0 handler clones
+/// its contents into the kernel heap, so `def` may be dropped on return.
+///
+/// # Safety
+/// Must only be called from ring 3 code entered via [`enter_user`].
+pub(crate) unsafe fn sys_register(def: &GuestFunctionDefinition<GuestFunc>) {
+    unsafe {
+        syscall2(
+            SYS_REGISTER,
+            def as *const GuestFunctionDefinition<GuestFunc> as u64,
+            0,
+        );
     }
 }
 

@@ -79,6 +79,18 @@ impl GuestFunctionRegister<GuestFunc> {
 }
 
 pub fn register_function(function_definition: GuestFunctionDefinition<GuestFunc>) {
+    // With the userspace feature, guest code — including `hyperlight_main`, which
+    // is where manual registration happens — runs in ring 3, where the registry
+    // is supervisor-only. Mediate the write through a syscall: the runtime, in
+    // ring 0, deep-clones the definition into the kernel heap and performs the
+    // insert, so the registry never holds ring 3 pointers. The macro-generated
+    // registrations run in ring 0 during early init (before the registry is
+    // locked) and take the direct path below.
+    #[cfg(all(feature = "userspace", target_arch = "x86_64"))]
+    if crate::arch::ring3::in_ring3() {
+        unsafe { crate::arch::ring3::sys_register(&function_definition) };
+        return;
+    }
     unsafe {
         // This is currently safe, because we are single threaded, but we
         // should find a better way to do this, see issue #808

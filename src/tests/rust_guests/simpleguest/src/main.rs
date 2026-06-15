@@ -950,6 +950,37 @@ fn main() {
         print_output_with_host_print,
     );
     register_function(print_output_def);
+
+    // Under the userspace feature, `hyperlight_main` runs in ring 3, so this
+    // registration is performed from ring 3 and mediated to the supervisor-only
+    // registry in ring 0 by the `SYS_REGISTER` syscall. The registered function
+    // is pure (no privileged work), so it is safe to run in ring 3 when called.
+    #[cfg(feature = "userspace")]
+    {
+        let dyn_def = GuestFunctionDefinition::<GuestFunc>::new(
+            "Ring3DynamicallyRegistered".to_string(),
+            Vec::from(&[ParameterType::Int]),
+            ReturnType::Int,
+            ring3_dynamically_registered,
+        );
+        register_function(dyn_def);
+    }
+}
+
+/// A pure, ring-3-safe guest function registered dynamically from
+/// `hyperlight_main` (rather than via the `#[guest_function]` macro) to exercise
+/// the userspace `SYS_REGISTER` path end to end. It doubles its `i32` argument
+/// and does no privileged work.
+#[cfg(feature = "userspace")]
+fn ring3_dynamically_registered(function_call: FunctionCall) -> Result<Vec<u8>> {
+    if let ParameterValue::Int(x) = function_call.parameters.unwrap().remove(0) {
+        Ok(get_flatbuffer_result(x.wrapping_mul(2)))
+    } else {
+        Err(HyperlightGuestError::new(
+            ErrorCode::GuestError,
+            "Ring3DynamicallyRegistered expects a single Int".to_string(),
+        ))
+    }
 }
 
 #[host_function("HostMethod")]

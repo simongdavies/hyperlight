@@ -135,6 +135,23 @@ fn userspace_guest_host_call() {
     assert_eq!(result, 42);
 }
 
+/// `hyperlight_main` runs in ring 3, and the function registration it performs
+/// (which writes the supervisor-only registry) is mediated back to ring 0 by the
+/// `SYS_REGISTER` syscall. This exercises that path end to end:
+/// `Ring3DynamicallyRegistered` is **not** registered by the `#[guest_function]`
+/// macro — the guest's `hyperlight_main` builds its definition and calls
+/// `register_function` at boot, from ring 3. Calling it here proves the
+/// definition reached the registry (so `SYS_REGISTER` worked) and that the
+/// registered function then dispatches and runs in ring 3.
+#[test]
+fn userspace_guest_ring3_main_registers_function() {
+    let mut sandbox = new_userspace_sandbox();
+    let doubled = sandbox
+        .call::<i32>("Ring3DynamicallyRegistered", 21_i32)
+        .unwrap();
+    assert_eq!(doubled, 42);
+}
+
 /// Repeated ring 3 host calls must keep working: the per-call request/result
 /// user buffers have to be freed cleanly each time, and the nested
 /// syscall-within-ring-3 stack switching must not corrupt the parked guest-call

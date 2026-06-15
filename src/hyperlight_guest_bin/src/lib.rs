@@ -368,6 +368,15 @@ pub(crate) extern "C" fn generic_init(
         arch::ring3::selftest_returning_syscall();
     }
 
+    // Run the guest's `hyperlight_main` initialisation entry point. With the
+    // userspace feature it runs in ring 3 like all other guest code, so any
+    // function registration it performs is mediated back to ring 0 by a syscall
+    // (see `arch::ring3::run_hyperlight_main`).
+    #[cfg(all(feature = "userspace", target_arch = "x86_64"))]
+    unsafe {
+        arch::ring3::run_hyperlight_main();
+    }
+    #[cfg(not(all(feature = "userspace", target_arch = "x86_64")))]
     unsafe {
         hyperlight_main();
     }
