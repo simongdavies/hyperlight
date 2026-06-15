@@ -36,8 +36,73 @@ pub fn call_host_function<T>(
 where
     T: TryFrom<ReturnValue>,
 {
+    // With the userspace feature, a guest function calling a host function may
+    // be running in ring 3, where the PEB, shared I/O buffers and the `out`
+    // instruction are all inaccessible. Route the call through a syscall so the
+    // privileged work happens in ring 0; the request is serialised and the
+    // result deserialised here, in user memory.
+    #[cfg(all(feature = "userspace", target_arch = "x86_64"))]
+    if crate::arch::ring3::in_ring3() {
+        return call_host_function_ring3::<T>(function_name, parameters, return_type);
+    }
+
     let handle = unsafe { GUEST_HANDLE };
     handle.call_host_function::<T>(function_name, parameters, return_type)
+}
+
+/// Ring 3 path for [`call_host_function`]: serialise the call, hand it to ring 0
+/// via [`SYS_HOST_CALL`](crate::arch::ring3), and deserialise the result. Mirrors
+/// the conversion `GuestHandle::get_host_return_value` performs in ring 0.
+#[cfg(all(feature = "userspace", target_arch = "x86_64"))]
+fn call_host_function_ring3<T>(
+    function_name: &str,
+    parameters: Option<Vec<ParameterValue>>,
+    return_type: ReturnType,
+) -> Result<T>
+where
+    T: TryFrom<ReturnValue>,
+{
+    use hyperlight_common::flatbuffer_wrappers::function_call::FunctionCallType;
+    use hyperlight_common::flatbuffer_wrappers::function_types::FunctionCallResult;
+
+    // Serialise the host call into user-heap memory.
+    let call = FunctionCall::new(
+        function_name.to_string(),
+        parameters,
+        FunctionCallType::Host,
+        return_type,
+    );
+    let mut builder = flatbuffers::FlatBufferBuilder::new();
+    let request = call.encode(&mut builder);
+
+    // Ring 0 performs the privileged push/out/pop and returns the encoded result.
+    let result_bytes = unsafe { crate::arch::ring3::sys_host_call(request) }.ok_or_else(|| {
+        HyperlightGuestError::new(
+            ErrorCode::GuestError,
+            "ring 3 host call failed to obtain a result".to_string(),
+        )
+    })?;
+
+    let result = FunctionCallResult::try_from(result_bytes.as_slice()).map_err(|e| {
+        HyperlightGuestError::new(
+            ErrorCode::GuestError,
+            alloc::format!("failed to decode host return value: {e}"),
+        )
+    })?;
+
+    match result.into_inner() {
+        Ok(ret) => T::try_from(ret).map_err(|_| {
+            let expected = core::any::type_name::<T>();
+            HyperlightGuestError::new(
+                ErrorCode::UnsupportedParameterType,
+                alloc::format!("Host return value could not be converted to expected {expected}"),
+            )
+        }),
+        Err(e) => Err(HyperlightGuestError {
+            kind: e.code,
+            message: e.message,
+        }),
+    }
 }
 
 pub fn call_host<T>(function_name: impl AsRef<str>, args: impl ParameterTuple) -> Result<T>

@@ -117,6 +117,24 @@ pub(crate) const SYS_RETURN: u64 = 0;
 /// isolation from user-pointer handling. Returning.
 const SYS_SELFTEST: u64 = 1;
 
+/// Perform a host function call on behalf of ring 3 code. `a0` is a pointer to a
+/// [`HostCallDescriptor`] in user memory describing the (already-serialised)
+/// request; the ring 0 handler performs the privileged push/`out`/pop and writes
+/// the encoded result back into the descriptor. Returning.
+const SYS_HOST_CALL: u64 = 2;
+
+/// True if the CPU is currently executing in ring 3 (user mode), determined from
+/// the current code segment selector's requested privilege level. Reading CS is
+/// unprivileged and cheap.
+#[inline(always)]
+pub(crate) fn in_ring3() -> bool {
+    let cs: u16;
+    unsafe {
+        asm!("mov {0:x}, cs", out(reg) cs, options(nomem, nostack, preserves_flags));
+    }
+    (cs & 3) == 3
+}
+
 unsafe extern "C" {
     /// Drop into ring 3 and run `entry(arg)` on the user stack. Returns the
     /// value the user code passes to `SYS_RETURN`. Defined in `global_asm!`
@@ -363,8 +381,106 @@ global_asm!(
 extern "C" fn hl_syscall_dispatch(num: u64, a0: u64, a1: u64, _a2: u64) -> u64 {
     match num {
         SYS_SELFTEST => a0 ^ a1,
+        SYS_HOST_CALL => unsafe { sys_host_call_handler(a0) },
         _ => panic!("ring 3 issued an unknown syscall: {num:#x}"),
     }
+}
+
+/// Descriptor for a ring 3 host function call, shared between the ring 3 issuer
+/// ([`sys_host_call`]) and the ring 0 handler ([`sys_host_call_handler`]). Lives
+/// in user memory so both sides can read and write it.
+#[repr(C)]
+struct HostCallDescriptor {
+    /// User buffer holding the encoded host `FunctionCall` request (input).
+    request_ptr: u64,
+    request_len: u64,
+    /// User buffer (a leaked `Vec<u8>`) holding the encoded
+    /// `FunctionCallResult`, written by the ring 0 handler (output). A null
+    /// `result_ptr` signals the call failed before producing a result.
+    result_ptr: u64,
+    result_len: u64,
+    result_cap: u64,
+}
+
+/// Ring 0 handler for [`SYS_HOST_CALL`].
+///
+/// Reads the request bytes the ring 3 caller staged in user memory, performs the
+/// privileged host call (push to the shared output buffer, `out`, pop the result
+/// from the shared input buffer) via the supervisor-only guest handle, copies
+/// the encoded result into a fresh user buffer, and records it in the
+/// descriptor. All access to the PEB, shared buffers, and the `out` instruction
+/// stays in ring 0; ring 3 only ever sees its own user buffers.
+///
+/// # Safety
+/// `desc_ptr` must point to a valid [`HostCallDescriptor`] in user memory whose
+/// `request_ptr`/`request_len` describe a readable user buffer.
+unsafe fn sys_host_call_handler(desc_ptr: u64) -> u64 {
+    unsafe {
+        let desc = &mut *(desc_ptr as *mut HostCallDescriptor);
+        let request =
+            core::slice::from_raw_parts(desc.request_ptr as *const u8, desc.request_len as usize);
+
+        let handle = crate::GUEST_HANDLE;
+        match handle.dispatch_host_call_raw(request) {
+            Ok(result) => {
+                // Stage the encoded result in a user buffer for ring 3 to read.
+                let layout = layout_for(result.len());
+                let buf = user_alloc(layout);
+                if buf.is_null() {
+                    desc.result_ptr = 0;
+                    desc.result_len = 0;
+                    desc.result_cap = 0;
+                } else {
+                    core::ptr::copy_nonoverlapping(result.as_ptr(), buf, result.len());
+                    desc.result_ptr = buf as u64;
+                    desc.result_len = result.len() as u64;
+                    desc.result_cap = layout.size() as u64;
+                }
+            }
+            Err(_) => {
+                desc.result_ptr = 0;
+                desc.result_len = 0;
+                desc.result_cap = 0;
+            }
+        }
+        0
+    }
+}
+
+/// Issue a [`SYS_HOST_CALL`] from ring 3, returning the encoded
+/// `FunctionCallResult` bytes the host produced (in a user-heap `Vec`).
+///
+/// The request bytes are already in user-accessible memory (the caller
+/// serialised them on the user heap); the descriptor lives on the ring 3 stack.
+/// Returns `None` if the host call failed to produce a result.
+///
+/// # Safety
+/// Must only be called from ring 3 code entered via [`enter_user`].
+pub(crate) unsafe fn sys_host_call(request: &[u8]) -> Option<Vec<u8>> {
+    let mut desc = HostCallDescriptor {
+        request_ptr: request.as_ptr() as u64,
+        request_len: request.len() as u64,
+        result_ptr: 0,
+        result_len: 0,
+        result_cap: 0,
+    };
+    unsafe {
+        syscall2(SYS_HOST_CALL, &raw mut desc as u64, 0);
+    }
+    if desc.result_ptr == 0 {
+        return None;
+    }
+    // Reconstruct the Vec the ring 0 handler allocated on the user heap so it is
+    // owned (and freed) here; the routed allocator sends the free to the user
+    // heap by address.
+    let v = unsafe {
+        Vec::from_raw_parts(
+            desc.result_ptr as *mut u8,
+            desc.result_len as usize,
+            desc.result_cap as usize,
+        )
+    };
+    Some(v)
 }
 
 /// Self-test the ring 0 -> ring 3 -> ring 0 round-trip.

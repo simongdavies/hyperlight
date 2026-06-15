@@ -117,6 +117,42 @@ fn userspace_guest_call_with_restore() {
     }
 }
 
+/// A guest function running in ring 3 can call back into a host function. The
+/// host call is mediated by a syscall: ring 3 serialises the request, ring 0
+/// performs the privileged push/`out`/pop, and the result is marshalled back to
+/// ring 3. `Add` is a guest function that calls the `HostAdd` host function.
+#[test]
+fn userspace_guest_host_call() {
+    let path = simple_guest_userspace_as_string().expect("userspace guest binary should exist");
+    let mut uninit = UninitializedSandbox::new(GuestBinary::FilePath(path), None).unwrap();
+    uninit
+        .register("HostAdd", |a: i32, b: i32| Ok(a + b))
+        .unwrap();
+    let mut sandbox: MultiUseSandbox = uninit.evolve().unwrap();
+
+    let result = sandbox.call::<i32>("Add", (17_i32, 25_i32)).unwrap();
+    assert_eq!(result, 42);
+}
+
+/// Repeated ring 3 host calls must keep working: the per-call request/result
+/// user buffers have to be freed cleanly each time, and the nested
+/// syscall-within-ring-3 stack switching must not corrupt the parked guest-call
+/// frame.
+#[test]
+fn userspace_guest_repeated_host_calls() {
+    let path = simple_guest_userspace_as_string().expect("userspace guest binary should exist");
+    let mut uninit = UninitializedSandbox::new(GuestBinary::FilePath(path), None).unwrap();
+    uninit
+        .register("HostAdd", |a: i32, b: i32| Ok(a + b))
+        .unwrap();
+    let mut sandbox: MultiUseSandbox = uninit.evolve().unwrap();
+
+    for i in 0..32 {
+        let result = sandbox.call::<i32>("Add", (i, 1_i32)).unwrap();
+        assert_eq!(result, i + 1);
+    }
+}
+
 /// The ring 3 user heap is backed by the user slice of the *configured* guest
 /// heap, so it scales with `heap_size` rather than being a fixed size. With a
 /// large enough heap, a ring 3 allocation far bigger than the historical

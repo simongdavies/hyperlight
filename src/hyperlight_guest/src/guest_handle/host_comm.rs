@@ -152,6 +152,25 @@ impl GuestHandle {
         self.get_host_return_value::<T>()
     }
 
+    /// Perform a host function call from a pre-serialized request, returning the
+    /// raw encoded `FunctionCallResult` bytes.
+    ///
+    /// This is the ring 0 worker behind a ring 3 host call (`userspace`
+    /// feature): the ring 3 side serialises the [`FunctionCall`] into a user
+    /// buffer and hands the bytes here via a syscall, so all access to the
+    /// supervisor-only PEB, shared I/O buffers, and the privileged `out`
+    /// instruction stays in ring 0. The caller (in ring 3) deserialises the
+    /// returned bytes into the desired type.
+    #[cfg(feature = "userspace")]
+    #[instrument(skip_all, level = "Trace")]
+    pub fn dispatch_host_call_raw(&self, request: &[u8]) -> Result<Vec<u8>> {
+        self.push_shared_output_data(request)?;
+        unsafe {
+            out32(OutBAction::CallFunction as u16, 0);
+        }
+        self.try_pop_shared_input_data_raw()
+    }
+
     /// Log a message with the specified log level, source, caller, source file, and line number.
     pub fn log_message(
         &self,
