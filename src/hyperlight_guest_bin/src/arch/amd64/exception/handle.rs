@@ -85,7 +85,7 @@ fn handle_stack_pagefault(gva: u64) {
     }
 }
 
-fn handle_cow_pagefault(_phys: PhysAddr, virt: VirtAddr, perms: CowMapping) {
+fn handle_cow_pagefault(_phys: PhysAddr, virt: VirtAddr, perms: CowMapping, user_accessible: bool) {
     unsafe {
         let new_page = hyperlight_guest::prim_alloc::alloc_phys_pages(1);
         let target_virt = virt as *mut u8;
@@ -105,7 +105,7 @@ fn handle_cow_pagefault(_phys: PhysAddr, virt: VirtAddr, perms: CowMapping) {
         // will likely need to (at least in some situations) do a
         // break-before-make sequence here to avoid any possible
         // issues with incoherent TLBs.
-        crate::paging::map_region(
+        crate::paging::map_region_with_access(
             new_page,
             target_virt,
             PAGE_SIZE as u64,
@@ -118,6 +118,11 @@ fn handle_cow_pagefault(_phys: PhysAddr, virt: VirtAddr, perms: CowMapping) {
                 writable: true,
                 executable: perms.executable,
             }),
+            // Preserve the original page's ring 3 accessibility. Without this a
+            // CoW of a user page (e.g. the ring 3 stack/heap after a snapshot
+            // restore) would be re-mapped supervisor-only, and ring 3 would
+            // fault on its very next access.
+            user_accessible,
         );
         // This is updating an entry that was already valid, changing
         // its OA, so we need to actually invalidate the TLB for it.
@@ -151,15 +156,28 @@ fn try_handle_internal_pagefault(
     let access_was_write = (error_code & (1 << 1)) != 0;
     let access_was_user = (error_code & (1 << 2)) != 0;
     let access_was_insn = (error_code & (1 << 4)) != 0;
-    if access_was_write && !access_was_user && !access_was_insn {
+    if access_was_write && !access_was_insn {
         // The fault was probably caused by a lack of write
         // permission. Check if that's because the page needs to be
-        // CoW'd
+        // CoW'd.
+        //
+        // For a user-mode (ring 3) write we additionally require the page to be
+        // user-accessible: a ring 3 write to a supervisor-only page is a
+        // genuine protection violation and must abort rather than being
+        // silently copied. (In a non-userspace build no page is user-accessible
+        // and no access is ever user-mode, so this is equivalent to the
+        // historical supervisor-only CoW behaviour.)
         if let Some(mapping) = orig_mappings.next()
-            && let None = orig_mappings.next()
+            && orig_mappings.next().is_none()
             && let MappingKind::Cow(cm) = mapping.kind
+            && (!access_was_user || mapping.user_accessible)
         {
-            handle_cow_pagefault(mapping.phys_base, mapping.virt_base, cm);
+            handle_cow_pagefault(
+                mapping.phys_base,
+                mapping.virt_base,
+                cm,
+                mapping.user_accessible,
+            );
             return true;
         }
 

@@ -85,3 +85,21 @@ fn userspace_guest_repeated_calls() {
         assert_eq!(result, msg);
     }
 }
+
+/// Snapshot restore must work with ring 3 guests. Restore is copy-on-write, so
+/// after a restore the first ring 3 write to a page dirtied during the previous
+/// call (the user stack and user heap) takes a CoW fault from ring 3. The fault
+/// handler has to copy the page *and preserve its ring 3 accessibility*;
+/// otherwise the page would become supervisor-only and ring 3 would fault on
+/// its next access. This exercises a call/restore cycle several times.
+#[test]
+fn userspace_guest_call_with_restore() {
+    let mut sandbox = new_userspace_sandbox();
+    let snapshot = sandbox.snapshot().unwrap();
+    for i in 0..8 {
+        let msg = format!("restore {i}");
+        let result = sandbox.call::<String>("Echo", msg.clone()).unwrap();
+        assert_eq!(result, msg);
+        sandbox.restore(snapshot.clone()).unwrap();
+    }
+}
