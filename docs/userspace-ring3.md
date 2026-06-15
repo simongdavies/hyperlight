@@ -1,9 +1,11 @@
 # Running guest code in ring 3 (the `userspace` feature)
 
-> Status: **in development**, behind the default-off `userspace` cargo feature,
-> x86-64 only. This document describes the design, the current implementation
-> status, how to validate it, the benchmark plan, and the future work. It is
-> the living "report" for the ring 3 effort and is updated as the work lands.
+> This document records the design and implementation of the `userspace`
+> feature, which runs user-provided guest code in ring 3 while the Hyperlight
+> runtime stays in ring 0. The feature is x86-64 only and lives behind a
+> default-off cargo feature. The document covers the architecture, the isolation
+> guarantees, the measured performance, the current limitations, and the potential
+> future work.
 
 ## 1. Overview and goal
 
@@ -24,6 +26,19 @@ the existing VM boundary, so that a bug or exploit in user guest code cannot
 directly tamper with the runtime's privileged state (page tables, descriptor
 tables, the I/O instructions used to talk to the host, and the runtime's own
 mutable data).
+
+This is **defense in depth**, not a replacement for any existing boundary.
+Hyperlight's primary security boundary is and remains the VM boundary: the
+hypervisor (KVM/mshv/WHP) and second-level address translation confine the guest
+and trap its attempts to reach the host. Ring 3 isolation adds a *second,
+independent* hardware-enforced layer *inside* that boundary. An attacker who
+subverts user code must now defeat the CPU's ring 0/3 protection before they can
+reach the runtime at all — and even then is still contained by the VM boundary.
+The layer is itself composed of several independent mechanisms, each of which
+must hold on its own (enumerated in §2): privileged-instruction trapping,
+supervisor-only page protection, a single narrow syscall entry point, and the
+critical-data partition — overlapping barriers rather than one all-or-nothing
+check.
 
 This is x86-64 only. i686 and aarch64 are out of scope (see
 [Future work](#9-future-work)).
@@ -64,8 +79,8 @@ the `.kdata` protection still holds *after* a restore.
 > which ring 3 must be able to read) remains ring-3-accessible. The `.kdata`
 > partition removes the statics whose corruption gives a *direct* ring 0
 > code-execution escalation; sweeping *all* runtime writable data into
-> supervisor memory (the full archive-keyed partition) is tracked as future work
-> (see §9).
+> supervisor memory is potential future work (see
+> [Future work](#9-future-work)).
 
 
 ## 3. Architecture
@@ -132,8 +147,8 @@ The guest image (code + rodata + data + bss) is currently loaded as a single
 `READ|WRITE|EXECUTE` region, so exposing it for execution also exposes the
 runtime's writable data that shares it. The most security-critical statics are
 carved out of that exposure into a supervisor-only `.kdata` section (§3.7);
-sweeping the *remaining* runtime writable data into supervisor memory (the full
-archive-keyed partition) is tracked as future work (see [Future work](#9-future-work)).
+sweeping the *remaining* runtime writable data into supervisor memory is
+potential future work (see [Future work](#9-future-work)).
 
 ### 3.3 syscall / sysret MSRs
 
@@ -168,12 +183,13 @@ Source: [`src/hyperlight_guest_bin/src/arch/amd64/ring3.rs`](../src/hyperlight_g
 4. move `arg` into `rdi` (the user function's first parameter), scrub all other
    GP registers so no ring 0 state leaks into ring 3, and `iretq`.
 
-`hl_syscall_entry` is the `syscall` entry point. For the `SYS_RETURN` syscall it
-unwinds straight back into `enter_user`'s caller: restore `RSP` from
-`HL_KERNEL_RETURN_RSP`, put the return value in `rax`, pop the callee-saved
-registers, and `ret`. Other syscall numbers are not yet implemented (they trap);
-the privileged-service dispatcher is added when host calls are wired through
-ring 3.
+`hl_syscall_entry` is the `syscall` entry point and handles both kinds of
+syscall (§3.6). For the non-returning `SYS_RETURN` it unwinds straight back into
+`enter_user`'s caller: restore `RSP` from `HL_KERNEL_RETURN_RSP`, put the return
+value in `rax`, pop the callee-saved registers, and `ret`. For a returning
+syscall it stashes the user `RSP`, switches onto the kernel stack (growing down
+below the parked `enter_user` frame), dispatches the requested service in
+ring 0, and `sysretq`s back into ring 3 with the result in `rax`.
 
 ### 3.5 The stack-switching contract
 
@@ -197,7 +213,7 @@ so `RSP0` is belt-and-braces.
 Syscall number in `rax`, arguments in `rdi`, `rsi`, `rdx`. There are two kinds:
 *non-returning* syscalls unwind the kernel stack back into the `enter_user`
 caller, and *returning* syscalls run a ring 0 handler and `sysretq` back into the
-ring 3 code with a result in `rax`. Implemented so far:
+ring 3 code with a result in `rax`. The complete set is:
 
 | # | Name | Kind | Meaning |
 |---|------|------|---------|
@@ -256,15 +272,57 @@ captured by — and therefore survives — every snapshot and restore (the same
 mechanism the user heap already relies on). A negative test reads `__kdata_start`
 from ring 3 and asserts a page fault both before and after a restore.
 
-**Scope and limitation.** This is the *critical-statics* slice of the hardened
-data partition, deliberately chosen over a blanket sweep of all runtime writable
-data because the CPL-routed allocator (§4c) keeps dispatch state that ring 3 must
-be able to read; a blanket sweep would fault ring 3's own allocator. It closes
-the *escalation* (ring 0 honouring ring-3-controlled pointers) but not every
-*information leak* from shared runtime data. It is also wired up via a
-`build.rs` + linker script in the *binary* crate (`simpleguest`), so it is **not
-yet automatic** for other guests — folding the script into the shared guest build
-tooling (`cargo hyperlight`) is tracked as future work (§9).
+**Scope and limitation.** This is the *critical-statics* slice of the data
+partition, deliberately chosen over a blanket sweep of all runtime writable data
+because the CPL-routed allocator (§3.9) keeps dispatch state that ring 3 must be
+able to read; a blanket sweep would fault ring 3's own allocator. It closes the
+*escalation* (ring 0 honouring ring-3-controlled pointers) but not every
+*information leak* from shared runtime data. It is also wired up via a `build.rs`
++ linker script in the *binary* crate (`simpleguest`), so it is **not yet
+automatic** for other guests. Both are tracked as [future work](#9-future-work).
+
+### 3.8 Running guest functions in ring 3
+
+With the feature enabled, the guest-function dispatch path runs the user function
+*body* in ring 3. The function *lookup* and parameter *verification* stay in
+ring 0, because they read the supervisor-only function registry; only the body
+runs in ring 3. Three things cross the privilege boundary, all because ring 3
+cannot touch supervisor memory or execute privileged instructions:
+
+1. **Input marshalling.** The `FunctionCall` arrives in the supervisor input
+   buffer. Its already-encoded bytes are copied verbatim into a user-accessible
+   buffer before entering ring 3, where the body deserialises its arguments from
+   the user copy. (Forwarding the raw bytes avoids re-encoding the call.)
+2. **Output marshalling.** The body returns a `Vec<u8>` in the user heap; after
+   `SYS_RETURN` the ring 0 side copies it into the supervisor output buffer.
+3. **Privileged services.** Everything a guest function does that reaches the
+   host funnels through the guest's `out32` chokepoint — host calls, logging, and
+   abort all ultimately execute `out`, which faults in ring 3. `out32` gains a
+   ring-3 branch (chosen by reading `CS & 3`) that issues a syscall instead:
+   `SYS_OUTB` for the inline abort/log/debug values, and `SYS_HOST_CALL` for host
+   calls, whose request and result are marshalled through user buffers while the
+   privileged `out` and the shared-buffer access stay in ring 0.
+
+The one-time initialisation entry point, `hyperlight_main`, currently runs in
+**ring 0** (it executes once during guest init, before any ring 3 call). Running
+it in ring 3 as well is a possible refinement (see [Future work](#9-future-work)).
+
+### 3.9 Heaps and the CPL-routed allocator
+
+The guest has two heaps: a supervisor-only **kernel heap** for the runtime, and a
+user-accessible **user heap** for ring 3 code. A single global allocator routes
+between them: allocations are directed by the current privilege level (it reads
+`CS & 3`, so ring 3 allocations come from the user heap and ring 0 allocations
+from the kernel heap), and frees are routed by address range. The user heap's
+control structure lives in user memory so ring 3 can manage it without a syscall.
+
+The configured guest heap is the total budget. A small, configurable slice
+(`SandboxConfiguration::set_kernel_heap_size`, default 64 KiB) backs the kernel
+heap and the remainder backs the user heap, so the user heap scales with
+`heap_size`. Both slices are copy-on-write from the configured heap, so the user
+heap is reset correctly on snapshot restore. The dispatch state this allocator
+reads on every allocation is why the user heap is deliberately *not* part of the
+supervisor `.kdata` partition (§3.7).
 
 ## 4. Feature gating and the host/guest contract
 
@@ -279,146 +337,73 @@ drops to ring 3 when *it* is built with `userspace`. A mismatch fails fast — a
 ring 3 guest on a non-`userspace` host would fault on the first user instruction
 because its code pages would be supervisor-only.
 
-## 5. Implementation status
+## 5. What is implemented
 
-| Phase | Scope | Status |
-|-------|-------|--------|
-| 0 | `userspace` cargo feature scaffolding (4 crates) | **done**, validated |
-| 4a | Linker-script injection spike (de-risk) | **done** (proven, reverted) |
-| 1 | Page-table U/S plumbing (shared vmem, guest, host) | **done**, unit-tested |
-| 2 | GDT user segments + TSS.rsp0 | **done**, asserts + build |
-| 3 | Transition core (`enter_user`, syscall stub, MSRs, self-test) | **done**, runtime-validated on KVM |
-| 4c | Split kernel/user heaps + CPL-routed allocator | **done**, runtime-validated on KVM |
-| 5a | Returning syscall (`sysretq`) dispatch path | **done**, runtime-validated on KVM |
-| 5b | Run registered guest functions in ring 3 (arg/result marshalling) | **done**, runtime-validated on KVM |
-| 5c | Host calls / logging / abort from ring 3 (`SYS_HOST_CALL`/`SYS_LOG`/`SYS_OUTB`) | **done**, runtime-validated on KVM |
-| 6 | Negative security tests (isolation enforcement) | **done**, runtime-validated on KVM |
-| 4b | Critical-data partition (`.kdata`: function table, PEB handle, handler table → supervisor-only) | **done**, runtime-validated on KVM |
-| 7 | Benchmarks (ring 0 vs ring 3) | **partial** (Echo + restore measured) |
+The feature is complete enough to run real user code in ring 3 end to end:
 
-### What is validated, and how
+- **Privilege transitions.** Ring 0 → ring 3 via `iretq`, ring 3 → ring 0 via
+  `syscall`, with `sysret` for returning syscalls. The GDT user descriptors, the
+  TSS, and the `syscall`/`sysret` MSRs are programmed at guest init.
+- **User code in ring 3.** Registered guest functions run their body in ring 3,
+  with arguments and results marshalled across the boundary (§3.8). Function
+  lookup and parameter verification stay in ring 0.
+- **Privileged services from ring 3.** Host calls, logging, and abort are
+  mediated by syscalls (`SYS_HOST_CALL`, `SYS_LOG`, `SYS_OUTB`); ring 3 never
+  executes a privileged instruction or touches a shared buffer directly.
+- **Two heaps with a CPL-routed allocator** (§3.9): a supervisor kernel heap and
+  a user-accessible user heap, both copy-on-write from the configured guest heap
+  and reset correctly on snapshot restore.
+- **The critical-data partition** (§3.7): the runtime statics that ring 0
+  dereferences (the guest function table, the PEB handle, the exception-handler
+  table) are supervisor-only and re-protected at boot, surviving snapshot/restore.
+- **Snapshot and restore** work with ring 3 guests, including the copy-on-write
+  re-fault of the user stack and user heap after a restore.
 
-Everything through Phase 4c is validated by unit tests
-(`cargo test -p hyperlight-common --features userspace`), compile-time
-assertions, clean builds/clippy in **both** feature states, and — for the parts
-that only run inside a VM — the `userspace_test` integration test on KVM. The
-default (non-`userspace`) build is byte-identical.
+### How it is validated
 
-Today, ring 3 is exercised by three boot-time self-tests (a pure transition
-round-trip, a user-heap allocation, and a returning-syscall round-trip) and,
-more importantly, by **real registered guest functions**: with the `userspace`
-feature the guest-function dispatch path runs the function body in ring 3, with
-its argument and result marshalled across the privilege boundary. The function
-*lookup* and parameter *verification* stay in ring 0 (they read the supervisor
-function registry). `hyperlight_main` and host calls from within a guest function
-are not yet routed through ring 3 (Phase 5c); a guest function that calls a host
-function faults in ring 3 today.
+- **Unit tests** for the page-table U/S plumbing
+  (`cargo test -p hyperlight-common --features userspace`), plus compile-time
+  `offset_of!` assertions that pin the GDT and selector layout the
+  `syscall`/`sysret` arithmetic depends on.
+- **Both feature states build and lint clean**, and the default
+  (non-`userspace`) build is byte-identical to mainline.
+- **Integration tests on a hypervisor** (`userspace_test`, KVM/mshv/WHP) cover
+  the end-to-end path: a guest boots and passes its boot-time transition
+  self-tests; guest functions echo typed values (string, `f64`, `f32`); a guest
+  function calls a host function; logging and abort work; and repeated calls,
+  call/restore cycles, and a configurable heap size all behave.
+- **Negative security tests** (same suite) prove the isolation holds — see §2.
 
-Phase 3's hand-written assembly (`enter_user`, `hl_syscall_entry`, the MSR
-programming) has been verified both by **disassembling** the built ring 3 guest
-and checking it instruction-by-instruction against the AMD64 manual, and by
-**running it on KVM**: the `userspace_test` integration test performs a ring 0 →
-ring 3 → ring 0 round-trip (an `iretq` into ring 3, a transform in ring 3, and a
-`syscall` back) and an end-to-end guest function call, and both pass.
+The boot-time self-test (`ring3::selftest`) performs a ring 0 → ring 3 → ring 0
+round-trip during guest initialisation and aborts the guest if it fails, so every
+ring 3 guest is self-checking on its first run.
 
-- `enter_user` builds the `iretq` frame in the correct order (`SS=0x33`,
-  `RSP=user_top-8`, `RFLAGS=0x202`, `CS=0x3b`, `RIP=entry`), preserves
-  callee-saved registers, records the kernel `RSP`, and scrubs registers;
-- `hl_syscall_entry` restores the kernel `RSP`, returns the value in `rax`, and
-  pops callee-saved registers symmetrically;
-- the MSRs are programmed with `STAR=0x0028_0008_0000_0000`, `LSTAR` pointing at
-  `hl_syscall_entry`, and the expected `FMASK`.
+## 6. How to build and run it
 
-The boot-time self-test (`ring3::selftest`) performs the same ring 0 → ring 3 →
-ring 0 round-trip during guest initialisation and aborts the guest if it fails,
-so every ring 3 guest is self-checking on its first run.
+The ring 3 path runs only inside a VM, so validating it needs a hypervisor: KVM
+or mshv on Linux, or WHP on Windows.
 
-### 5.1 Phase 5 design: running user code in ring 3
-
-The remaining keystone is to actually run `hyperlight_main` and registered guest
-functions in ring 3. The boundary functions are already known: guest-function
-lookup and parameter verification (which read the supervisor-only
-`REGISTERED_GUEST_FUNCTIONS`) stay in ring 0, and only the user function *body*
-runs in ring 3. Three problems must be solved, all stemming from the fact that
-ring 3 cannot touch supervisor memory or execute privileged instructions:
-
-1. **Input marshaling.** The `FunctionCall` arrives in the supervisor input
-   buffer and is deserialised into the kernel heap. Before entering ring 3 the
-   raw bytes are copied into a user-accessible buffer and re-deserialised into
-   the user heap, so the function body (running in ring 3) can read its
-   arguments.
-2. **Output marshaling.** The function returns a `Vec<u8>` in the user heap; the
-   ring 0 side copies it into the supervisor output buffer after `SYS_RETURN`.
-3. **Privileged services.** Everything a guest function might do that touches the
-   host funnels through the guest's `out32` chokepoint: host calls, logging, and
-   abort all call `out`, which faults in ring 3. The plan mediates this with a
-   small set of returning syscalls:
-   - `SYS_OUTB(port, val)` — performs a single `out32` on the caller's behalf in
-     ring 0. Because abort and log messages are streamed *inline* through the
-     `out32` value (not via a shared buffer), this one syscall covers both. The
-     guest's `out32` gains a ring-3 branch (chosen by reading `CS & 3`) that
-     issues `SYS_OUTB` instead of `out`.
-   - `SYS_HOST_CALL(user_ptr, len)` — host calls *do* use the shared (supervisor)
-     output buffer, so this syscall copies the serialised call from a user buffer
-     into the supervisor buffer, performs the real `out`, and copies the result
-     back to the user buffer.
-
-This needs a returning-syscall path in `hl_syscall_entry` (save the user
-context, switch to the kernel stack, dispatch in ring 0, then `sysretq` back to
-ring 3) in addition to the existing non-returning `SYS_RETURN`. It is best built
-and reviewed as one cohesive unit, since the pieces are interdependent and are
-naturally validated together by a real guest function that allocates, logs, and
-calls a host function from ring 3.
-
-## 6. How to validate (requires a hypervisor)
-
-The ring 3 path runs only inside a VM, so it needs KVM (Linux), mshv (Linux), or
-WHP (Windows). On a development box where `/dev/kvm` exists but is owned by the
-wrong group (a common WSL2 quirk), grant the `kvm` group access:
+Build the guests (including the ring 3 variant, see §8) and run the userspace
+integration tests:
 
 ```bash
-# /dev/kvm should be root:kvm, not root:uuidd
-sudo chown root:kvm /dev/kvm     # you must already be a member of the kvm group
-ls -l /dev/kvm                   # crw-rw---- root kvm
-```
-
-Then build the ring 3 guest and run the userspace integration tests:
-
-```bash
-just guests                        # (plus the userspace guest variant, see §8)
+just guests        # builds the guests, including the userspace variant (§8)
 cargo test -p hyperlight-host --features userspace --test userspace_test
 ```
 
 `userspace_guest_boots_and_selftests` passing proves the round-trip works end to
-end (evolving the sandbox runs the guest's boot-time self-test).
+end: evolving the sandbox runs the guest's boot-time transition self-test, which
+aborts the guest if the machinery is broken.
 
-## 7. Benchmarks: methodology and plan
+## 7. Performance
 
-Performance is a primary concern: dropping to ring 3 adds a privilege transition
-to guest entry and turns each host call into a syscall plus a marshaling copy.
-The plan measures that cost directly.
-
-**Methodology.** Reuse the existing Criterion harness in
-[`src/hyperlight_host/benches/benchmarks.rs`](../src/hyperlight_host/benches/benchmarks.rs)
-and add a `GuestMode { Ring0, Ring3 }` axis so the **same** workload is measured
-in both modes on the **same** hardware in one `just bench` run. The ring 3 mode
-loads the `userspace` build of `simpleguest`.
-
-**Workloads.**
-
-- `guest_calls/call/{ring0,ring3}` — a minimal guest function call.
-- `guest_calls/call_with_restore/{ring0,ring3}` — call plus snapshot restore.
-- `guest_calls/call_with_host_function/{ring0,ring3}` — a guest call that calls
-  back into a host function (exercises the syscall + marshaling path).
-- Micro-benchmarks isolating each cost: a no-op guest function (pure
-  `iretq` + `sysret` round-trip), an N-host-call function (per-call marshaling),
-  and a guest-heap allocation (the CPL-routed allocator).
-
-**Reporting.** `just bench` prints the ring 0 vs ring 3 delta per workload. A
-lightweight A/B harness also exists in
+Dropping to ring 3 adds a privilege transition to each guest call and turns each
+host call, log, and abort into a syscall plus a marshalling copy. The cost is
+measured directly with a lightweight A/B harness in
 [`src/hyperlight_host/tests/userspace_bench.rs`](../src/hyperlight_host/tests/userspace_bench.rs),
 which loads the ring 0 and ring 3 builds of `simpleguest` and times identical
-`Echo` calls against each on the same host:
+workloads against each in the same process, so the reported delta is a controlled
+A/B:
 
 ```text
 cargo test -p hyperlight-host --features userspace --test userspace_bench \
@@ -427,45 +412,44 @@ cargo test -p hyperlight-host --features userspace --test userspace_bench \
 
 ### Results (KVM, release host + release guests)
 
-Medians over repeated runs; the harness times the ring 0 and ring 3 builds in
-the same process under identical conditions, so the reported delta is a
-controlled A/B:
+Representative medians over repeated runs on a developer machine. The absolute
+figures are dominated by VM entry/exit and move with the host, so the **delta**
+is the figure of interest.
 
-| Workload | ring 0 | ring 3 | overhead |
-|----------|-------:|-------:|---------:|
-| `Echo` guest call (per call) | ~24-26 µs | ~25-26 µs | **~0.6-2.0 µs (2.5-8%)** |
-| `Echo` + snapshot restore (per cycle) | ~50-65 µs | ~60-78 µs | **~10-12 µs (18-24%)** |
+| Workload | ring 0 | ring 3 delta | what it isolates |
+|----------|-------:|-------------:|------------------|
+| `GetStatic` — minimal call, no payload | ~22-23 µs | **~0-0.7 µs** | the bare transition; usually within noise |
+| `CallMalloc` — 1 KiB allocate/free | ~24-26 µs | **~1 µs** | the CPL-routed allocator |
+| `Echo` — string round-trip | ~25-26 µs | **~1.4-1.6 µs** | payload marshalling both ways |
+| `Add` → `HostAdd` — host call from guest | ~45-49 µs | **~1-4.5 µs** | the nested ring 3 → ring 0 host-call path |
+| `Echo` + snapshot restore | ~55-57 µs | **~2.5-7 µs** | copy-on-write re-fault of user pages |
 
 Interpretation:
 
-- The plain-`Echo` ring 3 cost is a small **fixed per-call** amount, dominated
-  by the cross-privilege **marshalling** (copying the encoded `FunctionCall`
-  into a user buffer and the result back, plus the user-heap allocations), not
-  the raw privilege transition (the `iretq`/`syscall`/`sysretq` instructions are
-  sub-microsecond). Forwarding the raw call bytes to ring 3 instead of
-  re-encoding them (the "double-marshalling" optimisation, since implemented)
-  roughly halved this, from ~3-4 µs to ~0.6-2.0 µs.
-- `Echo` is close to the **cheapest possible** guest function, so its overhead
-  is near the worst-case *relative* figure. Because the cost is fixed per call,
-  any guest function that does real work amortises it toward zero.
-- **Page-fault overhead shows up under snapshot restore, not in the plain loop.**
-  The user stack is mapped eagerly once at guest init, and the user heap is
-  copy-on-write from the configured guest heap, so a steady-state call loop
-  faults pages in only on first touch and then runs fault-free. Restore is
-  copy-on-write, so each restore cycle re-faults the user pages that ring 3
-  dirtied during the call — the **~10-12 µs per cycle** on top of ring 0's
-  restore cost. (Handling those ring 3 CoW faults correctly is itself a fix;
-  see §6.)
-- **The `.kdata` critical-data partition (§3.7) adds no measurable runtime cost.**
-  A controlled A/B against the pre-partition guest binary (built from the parent
-  commit in a throwaway worktree, benchmarked under identical conditions) put the
-  restore delta at ~9.4-12.9 µs *without* the partition and ~9.6-12.5 µs *with*
-  it — statistically identical. This matches the design: the supervisor `.kdata`
-  page is re-protected once at boot (captured in the snapshot baseline) and is
-  never written on the `Echo` hot path, so it adds neither a per-call cost nor an
-  extra restore re-fault.
+- **The raw privilege transition is essentially free.** The minimal `GetStatic`
+  call adds well under a microsecond, usually within measurement noise: the
+  `iretq`/`syscall`/`sysretq` instructions are sub-microsecond, and the per-call
+  baseline is dominated by VM entry/exit, which both modes pay equally.
+- **The ring 3 cost is cross-boundary marshalling, and it is fixed per call.**
+  Copying the call into a user buffer and the result back (and, for host calls,
+  the request and result), plus the user-heap allocations, is what the `Echo`,
+  `CallMalloc`, and host-call deltas measure. Because the cost is fixed, any
+  guest function that does real work amortises it toward zero; `Echo` is close to
+  the cheapest possible function, so its *relative* overhead is near worst case.
+- **The largest cost is snapshot restore.** Restore is copy-on-write, so each
+  cycle re-faults the user stack and user-heap pages that ring 3 dirtied during
+  the call — the one place the extra ring 3 writable regions show up.
+- **The critical-data partition (§3.7) adds no measurable cost.** A controlled
+  A/B against a build *without* the partition, measured under identical
+  conditions, showed a statistically identical restore delta with and without it.
+  This matches the design: the supervisor `.kdata` page is re-protected once at
+  boot (captured in the snapshot baseline) and is never written on the hot path,
+  so it adds neither a per-call cost nor an extra restore re-fault.
 
-Still to measure: host calls from ring 3 and an allocation micro-benchmark.
+A Criterion-based `GuestMode { Ring0, Ring3 }` axis on the main
+[`benchmarks.rs`](../src/hyperlight_host/benches/benchmarks.rs) suite, so the same
+workloads run in both modes under `just bench`, is planned (see
+[Future work](#9-future-work)).
 
 
 
@@ -475,7 +459,8 @@ The `userspace` build of `simpleguest` is a separate artifact
 (`simpleguest-userspace`) so the ring 0 and ring 3 variants can be compared
 directly. It is produced from the same source with the `userspace` feature and
 resolved by the `simple_guest_userspace_as_string()` testing helper. Wiring this
-into `just guests` and CI is part of Phase 7.
+build into `just guests` and CI is a remaining task (see
+[Future work](#9-future-work)).
 
 ## 9. Future work
 
@@ -497,56 +482,39 @@ and lifting it is the largest follow-up:
   needs proper locking, and dynamic mapping needs break-before-make / TLB
   shoot-down across CPUs.
 
-### 9.2 Full data partition (remaining after Phase 4b)
+### 9.2 Completing the data partition
 
-Two layers of the hardened data partition are **done**:
+The critical-data partition (§3.7) and the split kernel/user heap (§3.9) are in
+place. Two things remain to make the data partition *complete* rather than
+*escalation-safe*:
 
-- the split kernel/user heap (Phase 4c): ring 3 code allocates from a
-  user-accessible heap whose control structure lives in user memory, while the
-  runtime keeps its supervisor-only kernel heap. The configured guest heap is the
-  total budget: a small, configurable slice (`SandboxConfiguration::
-  set_kernel_heap_size`, default 64 KiB) backs the kernel heap and the remainder
-  backs the user heap, so the user heap scales with `heap_size` rather than being
-  a fixed size. Both slices are copy-on-write from the configured heap, so the
-  user heap is reset correctly on snapshot restore;
-- the **critical-data partition** (Phase 4b, §3.7): the statics whose corruption
-  gives a *direct* ring 0 code-execution escalation (the guest function table,
-  the PEB handle, the exception-handler table) are gathered into a page-aligned
-  supervisor-only `.kdata` section and re-protected at boot, with restore-safety
-  proven by test.
+- **A full sweep of runtime writable data.** Today only the escalation-critical
+  statics are carved into supervisor `.kdata`; the rest of the runtime crates'
+  `.data`/`.bss` still shares the user-accessible guest image, leaving a residual
+  *information-leak* surface. A linker script that places all of it into
+  supervisor sections would close this, but must special-case the CPL-routed
+  allocator's control state, which ring 3 legitimately reads.
+- **Automatic application to every guest.** The `.kdata` section is currently
+  wired via a `build.rs` + linker script in the binary crate (`simpleguest`), so
+  it is opt-in per guest. Folding the script into the shared guest build tooling
+  (`cargo hyperlight`), or into a `hyperlight-guest-bin` build script whose link
+  arguments propagate downstream, would make it automatic.
 
-What remains to make the partition *complete* rather than *escalation-safe*:
-
-- a **full archive-keyed linker script** that also places the runtime crates'
-  *remaining* writable data (`.data`/`.bss` of `hyperlight-guest-bin`,
-  `hyperlight-guest`, `hyperlight-common`) into supervisor sections, closing the
-  residual *information-leak* surface (today only the escalation-critical statics
-  are carved out; the rest of the runtime's writable data still shares the
-  user-accessible image). This must special-case the CPL-routed allocator's
-  control state, which ring 3 legitimately reads — the reason the blanket sweep
-  was not done as part of Phase 4b;
-- **automatic application to every guest.** Phase 4b wires the `.kdata` section
-  via a `build.rs` + linker script in the *binary* crate (`simpleguest`), so the
-  hardening is opt-in per guest rather than inherited. Folding the script into
-  the shared guest build tooling (`cargo hyperlight`) — or into a
-  `hyperlight-guest-bin` build script whose link args propagate downstream —
-  would make it automatic. The Phase 4a spike proved a guest `build.rs` can
-  inject `-T <script>` through `cargo-hyperlight` and that an `INSERT AFTER`
-  script augments lld's default layout;
-- **on-demand growth** of the user stack via the page-fault handler, removing
-  the eager mapping (and the enlarged default scratch size) that currently backs
-  it. The user heap already grows lazily (it is copy-on-write from the
-  configured heap rather than eagerly mapped from scratch).
+A further refinement is **on-demand growth of the user stack** via the page-fault
+handler, removing the eager mapping (and the enlarged default scratch size) that
+currently backs it. The user heap already grows lazily.
 
 ### 9.3 Other
 
+- **`hyperlight_main` in ring 3.** The one-time initialisation entry point
+  currently runs in ring 0 (§3.8); running it in ring 3 as well would extend the
+  privilege drop to all user code, not just registered guest functions.
+- **Benchmark integration.** Add the `GuestMode { Ring0, Ring3 }` axis to the
+  Criterion suite (§7) and wire the userspace guest build into `just guests` and
+  CI. A perf gate on ring 3 overhead can follow once baselines are stable;
+  initially the ring 3 benchmarks run informationally.
 - **i686 / aarch64.** The i686 page-table backend already honours
   `user_accessible`; a full ring 3 story for either architecture is unscoped.
-- **Benchmark perf gate.** Once baselines are stable, consider a CI threshold on
-  ring 3 overhead. Initially the ring 3 benchmarks run informationally.
-- **`cargo-hyperlight`.** The Phase 4a spike confirmed no changes are required to
-  inject the linker script; if that ever changes, the script injection would need
-  upstreaming.
 
 ## 10. References
 
