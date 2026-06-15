@@ -29,16 +29,51 @@ mutable data).
 
 This is **defense in depth**, not a replacement for any existing boundary.
 Hyperlight's primary security boundary is and remains the VM boundary: the
-hypervisor (KVM/mshv/WHP) and second-level address translation confine the guest
-and trap its attempts to reach the host. Ring 3 isolation adds a *second,
-independent* hardware-enforced layer *inside* that boundary. An attacker who
-subverts user code must now defeat the CPU's ring 0/3 protection before they can
-reach the runtime at all — and even then is still contained by the VM boundary.
-The layer is itself composed of several independent mechanisms, each of which
-must hold on its own (enumerated in §2): privileged-instruction trapping,
+hypervisor (KVM/mshv/WHP) and second-level address translation confine the
+guest. Ring 3 isolation adds a *second, independent* hardware-enforced layer
+*inside* the guest, and the gap it closes is two-fold — because a compromised
+guest is the launch point for attacking the host's trust base, and that base is
+not bug-free:
+
+- **Hypervisor bugs and escapes.** The host trusts the hypervisor to confine the
+  guest, but hypervisors do have bugs — rare, but real and demonstrated (e.g.
+  [V4bel/ITScape](https://github.com/V4bel/ITScape)). Untrusted code running at
+  ring 0 in the guest has the *entire* hypervisor-facing surface at its disposal
+  — every VM exit, MSR access, and instruction- or device-emulation path — to
+  probe for and trigger such a bug. Confining user code to ring 3 means it no
+  longer drives that surface directly; the small, trusted runtime does, through a
+  narrow and predictable set of interactions.
+- **Layered attacks on the host through the guest interface.** Even with the
+  hypervisor intact, a malicious guest can attack *the host's handling* of the
+  legitimate guest/host interface — corrupting the shared-memory structures the
+  host parses, deliberately forcing exits, or malforming the request framing to
+  hit a bug in the host's transport/deserialization code. At ring 0, user code
+  crafts those raw interactions directly. In ring 3 the shared buffers are
+  supervisor-only and every interaction is mediated by the runtime through the
+  narrow syscall ABI (§3.6), so the host only ever sees well-formed,
+  runtime-produced requests. (This protects the *transport*; the *values* inside
+  a well-formed request remain the application's responsibility.)
+
+In both cases the principle is the same: shrink the surface that *untrusted user
+code* can reach, and keep the hypervisor- and host-facing interfaces under the
+sole control of the small, trusted runtime rather than of arbitrary user code.
+
+This second layer is itself composed of several independent mechanisms, each of
+which must hold on its own (enumerated in §2): privileged-instruction trapping,
 supervisor-only page protection, a single narrow syscall entry point, and the
 critical-data partition — overlapping barriers rather than one all-or-nothing
 check.
+
+**Performance is a primary consideration, not an afterthought.** Hyperlight's
+value lies in creating sandboxes and running guest functions with very low
+latency, so a boundary that taxes **startup** or **per-call execution** has to
+earn its place. Dropping to ring 3 adds work in both: at guest startup
+(programming the GDT and `syscall`/`sysret` MSRs, mapping the user stack and
+heap, the boot-time transition self-test, and the one-time critical-data
+re-protection), and on every call (the privilege transition plus a marshalling
+copy for each guest call, host call, log, and abort). That cost is the reason the
+feature is default-off and byte-identical to mainline when disabled, and the
+reason its overhead is **measured directly** rather than assumed — see §7.
 
 This is x86-64 only. i686 and aarch64 are out of scope (see
 [Future work](#9-future-work)).
@@ -397,9 +432,14 @@ aborts the guest if the machinery is broken.
 
 ## 7. Performance
 
-Dropping to ring 3 adds a privilege transition to each guest call and turns each
-host call, log, and abort into a syscall plus a marshalling copy. The cost is
-measured directly with a lightweight A/B harness in
+Because low-latency startup and guest-function execution are central to what
+Hyperlight is for, the overhead of this boundary is a primary design
+consideration, and is measured directly rather than assumed. Dropping to ring 3
+adds a one-time cost at guest startup (the GDT/MSR programming, user stack/heap
+mapping, boot self-test, and critical-data re-protection) and a per-call cost
+(the privilege transition, plus a marshalling copy for each guest call, host
+call, log, and abort). The per-call cost is measured with a lightweight A/B
+harness in
 [`src/hyperlight_host/tests/userspace_bench.rs`](../src/hyperlight_host/tests/userspace_bench.rs),
 which loads the ring 0 and ring 3 builds of `simpleguest` and times identical
 workloads against each in the same process, so the reported delta is a controlled
@@ -445,11 +485,16 @@ Interpretation:
   This matches the design: the supervisor `.kdata` page is re-protected once at
   boot (captured in the snapshot baseline) and is never written on the hot path,
   so it adds neither a per-call cost nor an extra restore re-fault.
+- **Startup cost is one-time and not yet separately benchmarked.** The GDT/MSR
+  programming, user stack/heap mapping, boot self-test, and critical-data
+  re-protection happen once per sandbox, so they are amortised across all of its
+  calls. A direct ring 0 vs ring 3 measurement of sandbox creation is part of the
+  planned Criterion integration below.
 
 A Criterion-based `GuestMode { Ring0, Ring3 }` axis on the main
 [`benchmarks.rs`](../src/hyperlight_host/benches/benchmarks.rs) suite, so the same
-workloads run in both modes under `just bench`, is planned (see
-[Future work](#9-future-work)).
+workloads (including sandbox creation, to capture the one-time startup cost) run
+in both modes under `just bench`, is planned (see [Future work](#9-future-work)).
 
 
 
@@ -510,8 +555,9 @@ currently backs it. The user heap already grows lazily.
   currently runs in ring 0 (§3.8); running it in ring 3 as well would extend the
   privilege drop to all user code, not just registered guest functions.
 - **Benchmark integration.** Add the `GuestMode { Ring0, Ring3 }` axis to the
-  Criterion suite (§7) and wire the userspace guest build into `just guests` and
-  CI. A perf gate on ring 3 overhead can follow once baselines are stable;
+  Criterion suite (§7), including a sandbox-creation benchmark to capture the
+  one-time startup cost, and wire the userspace guest build into `just guests`
+  and CI. A perf gate on ring 3 overhead can follow once baselines are stable;
   initially the ring 3 benchmarks run informationally.
 - **i686 / aarch64.** The i686 page-table backend already honours
   `user_accessible`; a full ring 3 story for either architecture is unscoped.
