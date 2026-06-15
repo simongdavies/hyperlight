@@ -112,7 +112,12 @@ pub(super) struct GdtPointer {
 #[repr(C, packed)]
 pub(super) struct TSS {
     _rsvd0: [u8; 4],
-    _rsp0: u64,
+    /// Ring 0 stack pointer (RSP0). The CPU loads this into RSP when an
+    /// interrupt or exception transitions from ring 3 to ring 0 (and no IST is
+    /// selected for that vector). Only populated with the `userspace` feature;
+    /// otherwise nothing runs in ring 3 and the IST mechanism handles every
+    /// exception stack switch.
+    pub(super) rsp0: u64,
     _rsp1: u64,
     _rsp2: u64,
     _rsvd1: [u8; 8],
@@ -181,7 +186,16 @@ pub(super) struct IdtPointer {
 const _: () = assert!(mem::size_of::<IdtPointer>() == 10);
 
 #[allow(clippy::upper_case_acronyms)]
+#[cfg(not(feature = "userspace"))]
 pub(super) type GDT = [GdtEntry; 5];
+/// With the `userspace` feature the GDT additionally carries the three
+/// user-mode segment descriptors (32-bit code, data, 64-bit code) required by
+/// the `syscall`/`sysret` selector layout. They are appended after the TSS
+/// descriptor so that the null/kernel-code/kernel-data/TSS prefix - and hence
+/// every existing selector, including the TSS selector 0x18 - is unchanged.
+#[allow(clippy::upper_case_acronyms)]
+#[cfg(feature = "userspace")]
+pub(super) type GDT = [GdtEntry; 8];
 #[allow(clippy::upper_case_acronyms)]
 #[repr(align(0x1000))]
 pub(super) struct IDT {

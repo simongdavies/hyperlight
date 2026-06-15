@@ -37,12 +37,30 @@ struct HyperlightGDT {
     kernel_code: GdtEntry,
     kernel_data: GdtEntry,
     tss: [GdtEntry; 2],
+    /// User-mode 32-bit code descriptor. Only loaded by a compatibility-mode
+    /// `sysret`, which we never issue, but it occupies the `sysret` selector
+    /// base (0x28) so that the user data and 64-bit user code descriptors land
+    /// at base+8 and base+16 as required by `sysretq`.
+    #[cfg(feature = "userspace")]
+    user_code32: GdtEntry,
+    /// User-mode data descriptor (ring 3 SS/DS). Selector 0x30 | RPL 3 = 0x33.
+    #[cfg(feature = "userspace")]
+    user_data: GdtEntry,
+    /// User-mode 64-bit code descriptor (ring 3 CS). Selector 0x38 | RPL 3 = 0x3b.
+    #[cfg(feature = "userspace")]
+    user_code: GdtEntry,
 }
 const _: () = assert!(mem::size_of::<HyperlightGDT>() == mem::size_of::<GDT>());
 const _: () = assert!(mem::offset_of!(HyperlightGDT, null) == 0x00);
 const _: () = assert!(mem::offset_of!(HyperlightGDT, kernel_code) == 0x08);
 const _: () = assert!(mem::offset_of!(HyperlightGDT, kernel_data) == 0x10);
 const _: () = assert!(mem::offset_of!(HyperlightGDT, tss) == 0x18);
+#[cfg(feature = "userspace")]
+const _: () = assert!(mem::offset_of!(HyperlightGDT, user_code32) == 0x28);
+#[cfg(feature = "userspace")]
+const _: () = assert!(mem::offset_of!(HyperlightGDT, user_data) == 0x30);
+#[cfg(feature = "userspace")]
+const _: () = assert!(mem::offset_of!(HyperlightGDT, user_code) == 0x38);
 
 unsafe fn init_gdt(pc: *mut ProcCtrl) {
     unsafe {
@@ -54,8 +72,19 @@ unsafe fn init_gdt(pc: *mut ProcCtrl) {
             &raw mut (*pc).tss as u64,
             mem::size_of::<TSS>() as u32,
         ));
+        // User-mode segment descriptors for syscall/sysret. Access bytes are
+        // P|DPL3|S|type: 0xFA = executable/readable code, 0xF2 = writable data.
+        // Flags: 0xA = G,L (64-bit), 0xC = G,D/B (32-bit). Limits are ignored
+        // for these segments in long mode (and user_code32 is never actually
+        // loaded), matching the limit-0 convention of the kernel descriptors.
+        #[cfg(feature = "userspace")]
+        {
+            (&raw mut (*gdt_ptr).user_code32).write_volatile(GdtEntry::new(0, 0, 0xFA, 0xC));
+            (&raw mut (*gdt_ptr).user_data).write_volatile(GdtEntry::new(0, 0, 0xF2, 0xC));
+            (&raw mut (*gdt_ptr).user_code).write_volatile(GdtEntry::new(0, 0, 0xFA, 0xA));
+        }
         let gdtr = GdtPointer {
-            limit: (core::mem::size_of::<[GdtEntry; 5]>() - 1) as u16,
+            limit: (core::mem::size_of::<GDT>() - 1) as u16,
             base: gdt_ptr as u64,
         };
         asm!(
