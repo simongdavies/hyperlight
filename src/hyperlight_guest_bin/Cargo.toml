@@ -18,6 +18,11 @@ libc = ["dep:hyperlight-libc"] # compile libc from picolibc
 trace_guest = ["hyperlight-common/trace_guest", "hyperlight-guest/trace_guest", "hyperlight-guest-tracing/trace"]
 mem_profile = ["hyperlight-common/mem_profile"]
 macros = ["dep:hyperlight-guest-macro", "dep:linkme"]
+# Run user-provided guest code in ring 3 (x86_64 only). Default off.
+# Enables the ring 0/ring 3 privilege split: user code (hyperlight_main and
+# registered guest functions) executes in ring 3, while the runtime stays in
+# ring 0. See docs/userspace-ring3.md.
+userspace = ["hyperlight-common/userspace", "hyperlight-guest/userspace"]
 
 [dependencies]
 hyperlight-guest = { workspace = true, default-features = false }

@@ -140,6 +140,10 @@ build-metadata = ["dep:built"]
 i686-guest = ["hyperlight-common/i686-guest"]
 nanvix-unstable = ["i686-guest", "hyperlight-common/nanvix-unstable"]
 guest-counter = ["hyperlight-common/guest-counter"]
+# Run user-provided guest code in ring 3 (x86_64 only). Default off.
+# The host marks the appropriate guest memory regions user-accessible so a
+# ring 3 guest can run. Host and guest must agree on this feature.
+userspace = ["hyperlight-common/userspace"]
 
 [[bench]]
 name = "benchmarks"

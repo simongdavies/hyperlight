@@ -37,6 +37,11 @@ std = ["thiserror/std", "log/std", "tracing/std"]
 i686-guest = []
 nanvix-unstable = ["i686-guest"]
 guest-counter = []
+# Run user-provided guest code in ring 3 (x86_64 only). Default off.
+# Gates the page-table User/Supervisor (U/S) plumbing in the shared vmem code.
+# NOTE: host and guest must agree on this feature; a mismatch will fault the
+# guest early (see docs/userspace-ring3.md).
+userspace = []
 
 [dev-dependencies]
 quickcheck = "1.0.3"

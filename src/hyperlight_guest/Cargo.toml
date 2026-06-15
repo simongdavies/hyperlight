@@ -26,3 +26,5 @@ default = []
 trace_guest = ["dep:hyperlight-guest-tracing", "hyperlight-guest-tracing?/trace"]
 i686-guest = ["hyperlight-common/i686-guest"]
 guest-counter = ["hyperlight-common/guest-counter"]
+# Run user-provided guest code in ring 3 (x86_64 only). Default off.
+userspace = ["hyperlight-common/userspace"]
