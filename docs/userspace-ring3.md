@@ -171,11 +171,15 @@ so `RSP0` is belt-and-braces.
 
 ### 3.6 Syscall ABI
 
-Syscall number in `rax`, arguments in `rdi`, `rsi`, `rdx`. Implemented so far:
+Syscall number in `rax`, arguments in `rdi`, `rsi`, `rdx`. There are two kinds:
+*non-returning* syscalls unwind the kernel stack back into the `enter_user`
+caller, and *returning* syscalls run a ring 0 handler and `sysretq` back into the
+ring 3 code with a result in `rax`. Implemented so far:
 
-| # | Name | Meaning |
-|---|------|---------|
-| 0 | `SYS_RETURN` | return a 64-bit value (in `rdi`) from the user function to the `enter_user` caller |
+| # | Name | Kind | Meaning |
+|---|------|------|---------|
+| 0 | `SYS_RETURN` | non-returning | return a 64-bit value (in `rdi`) from the user function to the `enter_user` caller |
+| 1 | `SYS_SELFTEST` | returning | XOR two scalars in ring 0 (validates the `sysretq` path) |
 
 Planned (when host calls / logging / abort move through ring 3):
 `SYS_HOST_CALL`, `SYS_LOG`, `SYS_TRACE`, `SYS_ABORT`.
@@ -203,7 +207,9 @@ because its code pages would be supervisor-only.
 | 2 | GDT user segments + TSS.rsp0 | **done**, asserts + build |
 | 3 | Transition core (`enter_user`, syscall stub, MSRs, self-test) | **done**, runtime-validated on KVM |
 | 4c | Split kernel/user heaps + CPL-routed allocator | **done**, runtime-validated on KVM |
-| 5 | Wire `hyperlight_main` / guest functions / host calls through ring 3 | **next** (design below) |
+| 5a | Returning syscall (`sysretq`) dispatch path | **done**, runtime-validated on KVM |
+| 5b | Run registered guest functions in ring 3 (arg/result marshalling) | **done**, runtime-validated on KVM |
+| 5c | Host calls / logging / abort from ring 3 (`SYS_HOST_CALL` etc.) | **next** (design below) |
 | 4b | Archive-keyed data partition (full data isolation) | designed, not implemented |
 | 6 | Exception robustness from ring 3 + negative security tests | designed, not implemented |
 | 7 | Benchmarks (ring 0 vs ring 3) | harness designed, not implemented |
@@ -216,10 +222,15 @@ assertions, clean builds/clippy in **both** feature states, and — for the part
 that only run inside a VM — the `userspace_test` integration test on KVM. The
 default (non-`userspace`) build is byte-identical.
 
-Today, ring 3 is exercised by two boot-time self-tests: a pure transition
-round-trip and a user-heap allocation. User-provided code (`hyperlight_main` and
-registered guest functions) **still runs in ring 0**; moving it to ring 3 is
-Phase 5 (see §5.1).
+Today, ring 3 is exercised by three boot-time self-tests (a pure transition
+round-trip, a user-heap allocation, and a returning-syscall round-trip) and,
+more importantly, by **real registered guest functions**: with the `userspace`
+feature the guest-function dispatch path runs the function body in ring 3, with
+its argument and result marshalled across the privilege boundary. The function
+*lookup* and parameter *verification* stay in ring 0 (they read the supervisor
+function registry). `hyperlight_main` and host calls from within a guest function
+are not yet routed through ring 3 (Phase 5c); a guest function that calls a host
+function faults in ring 3 today.
 
 Phase 3's hand-written assembly (`enter_user`, `hl_syscall_entry`, the MSR
 programming) has been verified both by **disassembling** the built ring 3 guest
