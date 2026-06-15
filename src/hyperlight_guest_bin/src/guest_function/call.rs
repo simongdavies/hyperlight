@@ -106,7 +106,23 @@ pub(crate) fn call_guest_function(
             fn guest_dispatch_function(function_call: FunctionCall) -> Result<Vec<u8>>;
         }
 
-        unsafe { guest_dispatch_function(function_call) }
+        // `guest_dispatch_function` is user-provided code, so under the userspace
+        // feature it must run in ring 3 like every other piece of guest code —
+        // never at ring 0. It has the same signature as a registered guest
+        // function (`fn(FunctionCall) -> Result<Vec<u8>>`), so it goes through
+        // the same ring 3 trampoline, with the original encoded call forwarded
+        // unchanged.
+        #[cfg(all(feature = "userspace", target_arch = "x86_64"))]
+        {
+            let _ = &function_call; // consumed in ring 3 from `raw`
+            let f: crate::guest_function::definition::GuestFunc =
+                unsafe { core::mem::transmute(guest_dispatch_function as *const ()) };
+            unsafe { crate::arch::ring3::run_registered_guest_fn(f, raw) }
+        }
+        #[cfg(not(all(feature = "userspace", target_arch = "x86_64")))]
+        unsafe {
+            guest_dispatch_function(function_call)
+        }
     }
 }
 

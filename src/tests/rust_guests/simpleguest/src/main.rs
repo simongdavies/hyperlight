@@ -1186,6 +1186,19 @@ fn fuzz_host_function(func: FunctionCall) -> Result<Vec<u8>> {
 #[hyperlight_guest_bin::dispatch]
 #[instrument(skip_all, parent = Span::current(), level= "Trace")]
 fn dispatch(function_call: FunctionCall) -> Result<Vec<u8>> {
+    // Under the userspace feature this dispatch fallback is user-provided code
+    // that runs in ring 3, never ring 0. Report the current privilege level
+    // (`CS & 3`) for the unregistered `ReportCpl` name so a host test can prove
+    // it. `mov reg, cs` is unprivileged, so it is safe in ring 3.
+    #[cfg(feature = "userspace")]
+    if function_call.function_name == "ReportCpl" {
+        let cs: u16;
+        unsafe {
+            core::arch::asm!("mov {0:x}, cs", out(reg) cs, options(nomem, nostack, preserves_flags))
+        };
+        return Ok(get_flatbuffer_result((cs & 3) as i32));
+    }
+
     // This test checks the stack behavior of the input/output buffer
     // by calling the host before serializing the function call.
     // If the stack is not working correctly, the input or output buffer will be

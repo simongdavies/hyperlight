@@ -152,6 +152,18 @@ fn userspace_guest_ring3_main_registers_function() {
     assert_eq!(doubled, 42);
 }
 
+/// The `guest_dispatch_function` fallback for unregistered calls is
+/// user-provided code, so it too must run in ring 3 — never at ring 0. The
+/// fallback reports the current privilege level (`CS & 3`); calling an
+/// unregistered name (`ReportCpl`) routes through it and must return 3 (CPL 3),
+/// proving no user code runs at ring 0 on this path.
+#[test]
+fn userspace_guest_dispatch_fallback_runs_in_ring3() {
+    let mut sandbox = new_userspace_sandbox();
+    let cpl = sandbox.call::<i32>("ReportCpl", ()).unwrap();
+    assert_eq!(cpl, 3, "guest_dispatch_function must run in ring 3 (CPL 3)");
+}
+
 /// Repeated ring 3 host calls must keep working: the per-call request/result
 /// user buffers have to be freed cleanly each time, and the nested
 /// syscall-within-ring-3 stack switching must not corrupt the parked guest-call
