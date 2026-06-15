@@ -427,10 +427,14 @@ cargo test -p hyperlight-host --features userspace --test userspace_bench \
 
 ### Results (KVM, release host + release guests)
 
+Medians over repeated runs; the harness times the ring 0 and ring 3 builds in
+the same process under identical conditions, so the reported delta is a
+controlled A/B:
+
 | Workload | ring 0 | ring 3 | overhead |
 |----------|-------:|-------:|---------:|
-| `Echo` guest call (per call) | ~24-26 µs | ~25-26 µs | **~0.6-1.7 µs (2.5-7%)** |
-| `Echo` + snapshot restore (per cycle) | ~100 µs | ~107 µs | **~7 µs (7.3%)** |
+| `Echo` guest call (per call) | ~24-26 µs | ~25-26 µs | **~0.6-2.0 µs (2.5-8%)** |
+| `Echo` + snapshot restore (per cycle) | ~50-65 µs | ~60-78 µs | **~10-12 µs (18-24%)** |
 
 Interpretation:
 
@@ -440,7 +444,7 @@ Interpretation:
   the raw privilege transition (the `iretq`/`syscall`/`sysretq` instructions are
   sub-microsecond). Forwarding the raw call bytes to ring 3 instead of
   re-encoding them (the "double-marshalling" optimisation, since implemented)
-  roughly halved this, from ~3-4 µs to ~0.6-1.7 µs.
+  roughly halved this, from ~3-4 µs to ~0.6-2.0 µs.
 - `Echo` is close to the **cheapest possible** guest function, so its overhead
   is near the worst-case *relative* figure. Because the cost is fixed per call,
   any guest function that does real work amortises it toward zero.
@@ -449,12 +453,20 @@ Interpretation:
   copy-on-write from the configured guest heap, so a steady-state call loop
   faults pages in only on first touch and then runs fault-free. Restore is
   copy-on-write, so each restore cycle re-faults the user pages that ring 3
-  dirtied during the call — about **+7 µs per cycle** on top of ring 0's
-  (already ~100 µs) restore cost. (Handling those ring 3 CoW faults correctly is
-  itself a fix; see §6.)
+  dirtied during the call — the **~10-12 µs per cycle** on top of ring 0's
+  restore cost. (Handling those ring 3 CoW faults correctly is itself a fix;
+  see §6.)
+- **The `.kdata` critical-data partition (§3.7) adds no measurable runtime cost.**
+  A controlled A/B against the pre-partition guest binary (built from the parent
+  commit in a throwaway worktree, benchmarked under identical conditions) put the
+  restore delta at ~9.4-12.9 µs *without* the partition and ~9.6-12.5 µs *with*
+  it — statistically identical. This matches the design: the supervisor `.kdata`
+  page is re-protected once at boot (captured in the snapshot baseline) and is
+  never written on the `Echo` hot path, so it adds neither a per-call cost nor an
+  extra restore re-fault.
 
-Still to measure: host calls from ring 3 (once Phase 5c lands) and an allocation
-micro-benchmark.
+Still to measure: host calls from ring 3 and an allocation micro-benchmark.
+
 
 
 ## 8. Building the ring 3 guest
