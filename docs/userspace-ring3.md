@@ -343,30 +343,36 @@ cargo test -p hyperlight-host --features userspace --test userspace_bench \
     -- --ignored --nocapture
 ```
 
-### First results (KVM, release host + release guests)
+### Results (KVM, release host + release guests)
 
 | Workload | ring 0 | ring 3 | overhead |
 |----------|-------:|-------:|---------:|
-| `Echo` guest call (per call) | ~24-25 µs | ~27-29 µs | **~3-4 µs (12-16%)** |
+| `Echo` guest call (per call) | ~24-26 µs | ~25-26 µs | **~0.6-1.7 µs (2.5-7%)** |
+| `Echo` + snapshot restore (per cycle) | ~100 µs | ~107 µs | **~7 µs (7.3%)** |
 
 Interpretation:
 
-- The ring 3 cost is a **fixed ~3-4 µs per call**, dominated by the
-  cross-privilege **marshalling** (re-encoding the `FunctionCall` into a user
-  buffer and copying the result back, plus the user-heap allocations), not the
-  raw privilege transition (the `iretq`/`syscall`/`sysretq` instructions are
-  sub-microsecond).
-- `Echo` is close to the **cheapest possible** guest function, so its ~16% is
-  near the worst-case *relative* overhead. Because the cost is fixed per call,
+- The plain-`Echo` ring 3 cost is a small **fixed per-call** amount, dominated
+  by the cross-privilege **marshalling** (copying the encoded `FunctionCall`
+  into a user buffer and the result back, plus the user-heap allocations), not
+  the raw privilege transition (the `iretq`/`syscall`/`sysretq` instructions are
+  sub-microsecond). Forwarding the raw call bytes to ring 3 instead of
+  re-encoding them (the "double-marshalling" optimisation, since implemented)
+  roughly halved this, from ~3-4 µs to ~0.6-1.7 µs.
+- `Echo` is close to the **cheapest possible** guest function, so its overhead
+  is near the worst-case *relative* figure. Because the cost is fixed per call,
   any guest function that does real work amortises it toward zero.
-- A known optimisation is to avoid the **double-marshalling**: the runtime
-  currently decodes the `FunctionCall` in ring 0 (for parameter verification),
-  re-encodes it into a user buffer, and re-decodes it in ring 3. Passing the raw
-  request bytes through (decoding only once, in ring 3) would remove the
-  re-encode. This is tracked as a follow-up.
+- **Page-fault overhead shows up under snapshot restore, not in the plain loop.**
+  The user stack is mapped eagerly once at guest init, and the user heap is
+  copy-on-write from the configured guest heap, so a steady-state call loop
+  faults pages in only on first touch and then runs fault-free. Restore is
+  copy-on-write, so each restore cycle re-faults the user pages that ring 3
+  dirtied during the call — about **+7 µs per cycle** on top of ring 0's
+  (already ~100 µs) restore cost. (Handling those ring 3 CoW faults correctly is
+  itself a fix; see §6.)
 
-Still to measure: `call_with_restore`, host calls from ring 3 (once Phase 5c
-lands), and the allocation micro-benchmark.
+Still to measure: host calls from ring 3 (once Phase 5c lands) and an allocation
+micro-benchmark.
 
 
 ## 8. Building the ring 3 guest
@@ -401,7 +407,12 @@ and lifting it is the largest follow-up:
 
 The split kernel/user heap (Phase 4c) is **done**: ring 3 code allocates from a
 user-accessible heap whose control structure lives in user memory, while the
-runtime keeps its supervisor-only kernel heap. Combined with the host marking all
+runtime keeps its supervisor-only kernel heap. The configured guest heap is the
+total budget: a small, configurable slice (`SandboxConfiguration::
+set_kernel_heap_size`, default 64 KiB) backs the kernel heap and the remainder
+backs the user heap, so the user heap scales with `heap_size` rather than being a
+fixed size. Both slices are copy-on-write from the configured heap, so the user
+heap is reset correctly on snapshot restore. Combined with the host marking all
 **writable** guest memory supervisor-only, the runtime's mutable data is already
 out of ring 3's reach. What remains to make the split fully explicit and robust:
 
@@ -412,9 +423,10 @@ out of ring 3's reach. What remains to make the split fully explicit and robust:
   Today the guest image (code + rodata + data + bss) is a single RWX region that
   is exposed to ring 3 for execution, so the runtime's `.data`/`.bss` that share
   it are technically reachable; the linker partition carves them out;
-- **on-demand growth** of the user stack and user heap via the page-fault
-  handler, removing the eager mappings (and the enlarged default scratch size)
-  that currently back them.
+- **on-demand growth** of the user stack via the page-fault handler, removing
+  the eager mapping (and the enlarged default scratch size) that currently backs
+  it. The user heap already grows lazily (it is copy-on-write from the
+  configured heap rather than eagerly mapped from scratch).
 
 ### 9.3 Other
 
