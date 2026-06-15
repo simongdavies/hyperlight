@@ -36,10 +36,13 @@ With the feature enabled, ring 3 user code:
   `cli`/`hlt`, `mov crN`, `wrmsr`, `lgdt`/`lidt`/`ltr`, etc. all `#GP` in ring 3;
 - **cannot read or write the page tables**, the GDT/IDT/TSS, or the kernel
   (runtime) stack — these are mapped supervisor-only (U/S = 0);
-- **cannot read or write the runtime's mutable data** — writable guest memory is
-  mapped supervisor-only;
+- **cannot reach the runtime's most security-critical statics** — the guest
+  function pointer table (which ring 0 dereferences to dispatch a call), the PEB
+  handle, and the exception-handler table are gathered into a supervisor-only
+  `.kdata` section, closing the primary privilege-escalation path (a ring 3
+  write that ring 0 would later honour — see §3.7);
 - **can** execute guest code, read constants (`.rodata`), use its own user
-  stack, and (once the user heap lands) allocate user-accessible memory;
+  stack, and allocate from its own user heap;
 - reaches the runtime only through a **narrow syscall ABI** (see §3.6), so the
   runtime mediates every privileged action on the user's behalf.
 
@@ -49,10 +52,21 @@ code and regains control via a controlled `syscall` trap.
 These guarantees are **enforced by hardware and proven by negative tests**
 (`userspace_test`): a ring 3 guest function that attempts a privileged
 instruction (`cli`, a raw `out`) faults with a general-protection fault, and one
-that reads or writes the runtime's supervisor-only memory (the kernel stack)
-faults with a page fault. In every case the guest aborts cleanly; a further test
-confirms the abort poisons the sandbox without corrupting the host and that a
-snapshot restore recovers it.
+that reads or writes the runtime's supervisor-only memory (the kernel stack, or
+the `.kdata` critical-statics section) faults with a page fault. In every case
+the guest aborts cleanly; further tests confirm the abort poisons the sandbox
+without corrupting the host and that a snapshot restore recovers it — and that
+the `.kdata` protection still holds *after* a restore.
+
+> **Known limitation.** The guest image is loaded as a single read/write/execute
+> region, so general runtime *writable* data that shares it (`.data`/`.bss` of
+> the runtime crates, including the CPL-routed allocator's own control state,
+> which ring 3 must be able to read) remains ring-3-accessible. The `.kdata`
+> partition removes the statics whose corruption gives a *direct* ring 0
+> code-execution escalation; sweeping *all* runtime writable data into
+> supervisor memory (the full archive-keyed partition) is tracked as future work
+> (see §9).
+
 
 ## 3. Architecture
 
@@ -116,9 +130,10 @@ tables, and the scratch region supervisor-only.
 
 The guest image (code + rodata + data + bss) is currently loaded as a single
 `READ|WRITE|EXECUTE` region, so exposing it for execution also exposes the
-runtime's writable data that shares it. Carving that data into its own
-supervisor-only section is the job of the hardened data partition (Phases 4b/4c,
-see [Future work](#9-future-work)).
+runtime's writable data that shares it. The most security-critical statics are
+carved out of that exposure into a supervisor-only `.kdata` section (§3.7);
+sweeping the *remaining* runtime writable data into supervisor memory (the full
+archive-keyed partition) is tracked as future work (see [Future work](#9-future-work)).
 
 ### 3.3 syscall / sysret MSRs
 
@@ -197,6 +212,60 @@ ring 3 issuers and the ring 0 dispatcher. Each privileged service keeps all PEB,
 shared-buffer and `out` access in ring 0: ring 3 only ever serialises into, and
 reads results from, its own user-accessible buffers.
 
+### 3.7 The critical-data partition (`.kdata`)
+
+Because the guest image is mapped user-accessible so ring 3 can execute it, the
+runtime's writable statics that share the image would also be reachable from
+ring 3. Most are merely *readable* (an information leak at worst), but a few are
+**function pointers and handles that ring 0 itself dereferences**, which makes
+them a direct privilege-escalation target:
+
+| Static | Why it is dangerous |
+|--------|---------------------|
+| `REGISTERED_GUEST_FUNCTIONS` | ring 0 looks up and **calls** these pointers when dispatching a guest call |
+| `HANDLERS` | exception-handler pointers ring 0 **calls** on a fault |
+| `GUEST_HANDLE` | the PEB pointer ring 0 **dereferences** to reach the host |
+
+The danger is not hypothetical. There is a single address space (one `CR3`;
+neither `iretq` nor `syscall`/`sysret` switches it), and the shared image is
+mapped copy-on-write *and* user-accessible. So a ring 3 **write** to the function
+table would take the page-fault handler's CoW path, which — seeing a
+user-accessible page — remaps that virtual address to a fresh **writable user**
+page. Because the page-table entry is global, ring 0 would then dereference the
+attacker-controlled copy on its next dispatch: ring 0 code execution.
+
+The fix moves these statics out of ring 3's reach:
+
+1. each is tagged `#[link_section = ".kdata"]` (only under the feature; in the
+   default build they stay in `.bss`, byte-identical to mainline);
+2. the guest's linker script gathers `.kdata` into a single **page-aligned**
+   output section bounded by `__kdata_start` / `__kdata_end` (so it never shares
+   a page with anything ring 3 still needs, such as the CPL-routed allocator's
+   control state);
+3. at boot, **after** the function table is populated but **before** any ring 3
+   code runs, `ring3::protect_kernel_data` walks `[__kdata_start, __kdata_end)`
+   and re-protects every page supervisor-only, read/write, non-executable, with
+   its own private physical backing (`paging::reprotect_page_supervisor`).
+
+Giving each page private backing matters: it severs the CoW relationship with the
+shared image, so a later ring 3 fault on a neighbouring image page cannot
+resurrect access to a `.kdata` page.
+
+Crucially, this protection is established **during initialisation**, so it is
+captured by — and therefore survives — every snapshot and restore (the same
+mechanism the user heap already relies on). A negative test reads `__kdata_start`
+from ring 3 and asserts a page fault both before and after a restore.
+
+**Scope and limitation.** This is the *critical-statics* slice of the hardened
+data partition, deliberately chosen over a blanket sweep of all runtime writable
+data because the CPL-routed allocator (§4c) keeps dispatch state that ring 3 must
+be able to read; a blanket sweep would fault ring 3's own allocator. It closes
+the *escalation* (ring 0 honouring ring-3-controlled pointers) but not every
+*information leak* from shared runtime data. It is also wired up via a
+`build.rs` + linker script in the *binary* crate (`simpleguest`), so it is **not
+yet automatic** for other guests — folding the script into the shared guest build
+tooling (`cargo hyperlight`) is tracked as future work (§9).
+
 ## 4. Feature gating and the host/guest contract
 
 `userspace` is a cargo feature on `hyperlight-common`, `hyperlight-guest`,
@@ -224,7 +293,7 @@ because its code pages would be supervisor-only.
 | 5b | Run registered guest functions in ring 3 (arg/result marshalling) | **done**, runtime-validated on KVM |
 | 5c | Host calls / logging / abort from ring 3 (`SYS_HOST_CALL`/`SYS_LOG`/`SYS_OUTB`) | **done**, runtime-validated on KVM |
 | 6 | Negative security tests (isolation enforcement) | **done**, runtime-validated on KVM |
-| 4b | Archive-keyed data partition (full data isolation) | designed, not implemented |
+| 4b | Critical-data partition (`.kdata`: function table, PEB handle, handler table → supervisor-only) | **done**, runtime-validated on KVM |
 | 7 | Benchmarks (ring 0 vs ring 3) | **partial** (Echo + restore measured) |
 
 ### What is validated, and how
@@ -416,26 +485,42 @@ and lifting it is the largest follow-up:
   needs proper locking, and dynamic mapping needs break-before-make / TLB
   shoot-down across CPUs.
 
-### 9.2 Hardened data partition (Phase 4b)
+### 9.2 Full data partition (remaining after Phase 4b)
 
-The split kernel/user heap (Phase 4c) is **done**: ring 3 code allocates from a
-user-accessible heap whose control structure lives in user memory, while the
-runtime keeps its supervisor-only kernel heap. The configured guest heap is the
-total budget: a small, configurable slice (`SandboxConfiguration::
-set_kernel_heap_size`, default 64 KiB) backs the kernel heap and the remainder
-backs the user heap, so the user heap scales with `heap_size` rather than being a
-fixed size. Both slices are copy-on-write from the configured heap, so the user
-heap is reset correctly on snapshot restore. Combined with the host marking all
-**writable** guest memory supervisor-only, the runtime's mutable data is already
-out of ring 3's reach. What remains to make the split fully explicit and robust:
+Two layers of the hardened data partition are **done**:
 
-- an **archive-keyed linker script** (the Phase 4a spike proved a guest
-  `build.rs` can inject `-T <script>` through `cargo-hyperlight`, and that an
-  `INSERT AFTER` script augments lld's default layout) that places the runtime
-  crates' writable data into page-aligned supervisor `.kdata`/`.kbss` sections.
-  Today the guest image (code + rodata + data + bss) is a single RWX region that
-  is exposed to ring 3 for execution, so the runtime's `.data`/`.bss` that share
-  it are technically reachable; the linker partition carves them out;
+- the split kernel/user heap (Phase 4c): ring 3 code allocates from a
+  user-accessible heap whose control structure lives in user memory, while the
+  runtime keeps its supervisor-only kernel heap. The configured guest heap is the
+  total budget: a small, configurable slice (`SandboxConfiguration::
+  set_kernel_heap_size`, default 64 KiB) backs the kernel heap and the remainder
+  backs the user heap, so the user heap scales with `heap_size` rather than being
+  a fixed size. Both slices are copy-on-write from the configured heap, so the
+  user heap is reset correctly on snapshot restore;
+- the **critical-data partition** (Phase 4b, §3.7): the statics whose corruption
+  gives a *direct* ring 0 code-execution escalation (the guest function table,
+  the PEB handle, the exception-handler table) are gathered into a page-aligned
+  supervisor-only `.kdata` section and re-protected at boot, with restore-safety
+  proven by test.
+
+What remains to make the partition *complete* rather than *escalation-safe*:
+
+- a **full archive-keyed linker script** that also places the runtime crates'
+  *remaining* writable data (`.data`/`.bss` of `hyperlight-guest-bin`,
+  `hyperlight-guest`, `hyperlight-common`) into supervisor sections, closing the
+  residual *information-leak* surface (today only the escalation-critical statics
+  are carved out; the rest of the runtime's writable data still shares the
+  user-accessible image). This must special-case the CPL-routed allocator's
+  control state, which ring 3 legitimately reads — the reason the blanket sweep
+  was not done as part of Phase 4b;
+- **automatic application to every guest.** Phase 4b wires the `.kdata` section
+  via a `build.rs` + linker script in the *binary* crate (`simpleguest`), so the
+  hardening is opt-in per guest rather than inherited. Folding the script into
+  the shared guest build tooling (`cargo hyperlight`) — or into a
+  `hyperlight-guest-bin` build script whose link args propagate downstream —
+  would make it automatic. The Phase 4a spike proved a guest `build.rs` can
+  inject `-T <script>` through `cargo-hyperlight` and that an `INSERT AFTER`
+  script augments lld's default layout;
 - **on-demand growth** of the user stack via the page-fault handler, removing
   the eager mapping (and the enlarged default scratch size) that currently backs
   it. The user heap already grows lazily (it is copy-on-write from the
