@@ -116,6 +116,30 @@ unsafe fn user_heap() -> &'static LockedHeap<HEAP_ORDER> {
     unsafe { &*USER_HEAP_CONTROL }
 }
 
+/// Allocate `layout` bytes from the **user** heap explicitly, regardless of the
+/// current privilege level.
+///
+/// This is how ring 0 marshalling code stages buffers in user-accessible memory
+/// for ring 3 to read or write (the routed [`GlobalAlloc`] would otherwise send
+/// a ring 0 allocation to the kernel heap). Returns null on failure.
+///
+/// # Safety
+/// [`init_user_heap`] must have run first. The returned pointer must be freed
+/// with [`user_dealloc`] using the same `layout`.
+pub(crate) unsafe fn user_alloc(layout: Layout) -> *mut u8 {
+    unsafe { user_heap().alloc(layout) }
+}
+
+/// Free a pointer previously returned by [`user_alloc`].
+///
+/// # Safety
+/// `ptr`/`layout` must come from a prior [`user_alloc`] call, and `ptr` must lie
+/// within the user heap region (see [`is_user_ptr`]).
+pub(crate) unsafe fn user_dealloc(ptr: *mut u8, layout: Layout) {
+    debug_assert!(is_user_ptr(ptr), "user_dealloc on non-user pointer");
+    unsafe { user_heap().dealloc(ptr, layout) }
+}
+
 // Only `alloc` and `dealloc` are implemented: `GlobalAlloc`'s default
 // `alloc_zeroed` and `realloc` are written in terms of them, so they inherit
 // the routing automatically.

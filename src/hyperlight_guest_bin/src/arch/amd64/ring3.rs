@@ -36,12 +36,21 @@ limitations under the License.
 //! that same kernel stack (growing down, below the saved frame) for the
 //! duration of the call.
 
+use alloc::vec::Vec;
+use core::alloc::Layout;
 use core::arch::{asm, global_asm};
 
+use flatbuffers::FlatBufferBuilder;
+use hyperlight_common::flatbuffer_wrappers::function_call::FunctionCall;
+use hyperlight_common::flatbuffer_wrappers::function_types::FunctionCallResult;
+use hyperlight_common::flatbuffer_wrappers::guest_error::{ErrorCode, GuestError};
 use hyperlight_common::vmem::{BasicMapping, MappingKind, PAGE_SIZE};
+use hyperlight_guest::error::Result;
 use hyperlight_guest::prim_alloc::alloc_phys_pages;
 
 use super::layout::{USER_STACK_SIZE, USER_STACK_TOP_GVA};
+use crate::guest_function::definition::GuestFunc;
+use crate::userspace_heap::{user_alloc, user_dealloc};
 
 // ===== Model-specific registers =====
 /// Extended Feature Enable Register; bit 0 (SCE) enables `syscall`/`sysret`.
@@ -128,7 +137,6 @@ static mut HL_KERNEL_RETURN_RSP: u64 = 0;
 /// kernel stack, so it can be restored before `sysretq`. Single-vCPU,
 /// single-threaded: one slot is sufficient.
 static mut HL_USER_RSP_SCRATCH: u64 = 0;
-
 
 /// Read a model-specific register.
 #[inline]
@@ -362,7 +370,6 @@ extern "C" fn hl_syscall_dispatch(num: u64, a0: u64, a1: u64, _a2: u64) -> u64 {
     }
 }
 
-
 /// Self-test the ring 0 -> ring 3 -> ring 0 round-trip.
 ///
 /// Drops into ring 3, runs a trivial user function that transforms its
@@ -451,3 +458,148 @@ pub(crate) fn selftest_returning_syscall() {
     }
 }
 
+// ===== Running registered guest functions in ring 3 =====
+
+/// Shared descriptor for a guest-function call marshalled into ring 3.
+///
+/// Lives in user-accessible memory so both the ring 0 caller and the ring 3
+/// trampoline can read and write it. The ring 0 side fills in the inputs
+/// (`fn_ptr`, `input_*`); the ring 3 side fills in the outputs (`output_*`)
+/// with the bytes to push to the host's shared output buffer.
+#[repr(C)]
+struct GuestCallDescriptor {
+    /// Address of the registered guest function (`GuestFunc`).
+    fn_ptr: u64,
+    /// User buffer holding the encoded `FunctionCall`.
+    input_ptr: u64,
+    input_len: u64,
+    /// User buffer (a leaked `Vec<u8>`) holding the encoded result to return to
+    /// the host. Written by the ring 3 trampoline.
+    output_ptr: u64,
+    output_len: u64,
+    output_cap: u64,
+}
+
+/// Run a registered guest function `f` in ring 3 and return the bytes to push
+/// to the host's shared output buffer.
+///
+/// The `FunctionCall` is re-encoded into a user buffer, the function runs in
+/// ring 3 (so its allocations land on the user heap and a bug cannot touch the
+/// runtime's supervisor state), and the encoded result is copied back. Any
+/// error raised by the guest function is encoded into a `FunctionCallResult` in
+/// ring 3, exactly as the ring 0 dispatch path would, so the returned bytes are
+/// always the final bytes to hand to the host.
+///
+/// Returned as `Result` only to match the non-userspace call site; it is always
+/// `Ok` (guest-function errors are encoded into the returned bytes).
+///
+/// Note: a guest function that itself calls a host function will fault in
+/// ring 3 until the host-call syscall is wired up; pure guest functions work
+/// today.
+///
+/// # Safety
+/// [`init`] and the user heap must be initialised, and `f` must be a valid
+/// registered guest-function pointer.
+pub(crate) unsafe fn run_registered_guest_fn(f: GuestFunc, fc: FunctionCall) -> Result<Vec<u8>> {
+    // Encode the FunctionCall and stage it, plus the descriptor, in
+    // user-accessible memory for ring 3 to read.
+    let mut builder = FlatBufferBuilder::new();
+    let encoded = fc.encode(&mut builder);
+
+    let input_layout = layout_for(encoded.len());
+    let desc_layout = Layout::new::<GuestCallDescriptor>();
+    unsafe {
+        let input_buf = user_alloc(input_layout);
+        let desc_buf = user_alloc(desc_layout) as *mut GuestCallDescriptor;
+        assert!(
+            !input_buf.is_null() && !desc_buf.is_null(),
+            "user heap exhausted while marshalling a guest call into ring 3"
+        );
+        core::ptr::copy_nonoverlapping(encoded.as_ptr(), input_buf, encoded.len());
+        desc_buf.write(GuestCallDescriptor {
+            fn_ptr: f as usize as u64,
+            input_ptr: input_buf as u64,
+            input_len: encoded.len() as u64,
+            output_ptr: 0,
+            output_len: 0,
+            output_cap: 0,
+        });
+
+        // Run the guest function in ring 3.
+        enter_user(guest_call_trampoline as usize as u64, desc_buf as u64);
+
+        // Copy the result out of user memory into a kernel-heap Vec, then free
+        // the user buffers.
+        let desc = &*desc_buf;
+        let out =
+            core::slice::from_raw_parts(desc.output_ptr as *const u8, desc.output_len as usize)
+                .to_vec();
+        if desc.output_cap != 0 {
+            user_dealloc(
+                desc.output_ptr as *mut u8,
+                layout_for(desc.output_cap as usize),
+            );
+        }
+        user_dealloc(input_buf, input_layout);
+        user_dealloc(desc_buf as *mut u8, desc_layout);
+        Ok(out)
+    }
+}
+
+/// `Layout` for a `len`-byte, byte-aligned user buffer (matching `Vec<u8>`).
+#[inline]
+fn layout_for(len: usize) -> Layout {
+    // align 1 matches Vec<u8>'s allocation; len is clamped to at least 1 so the
+    // allocator never sees a zero-size request.
+    Layout::from_size_align(len.max(1), 1).expect("valid byte-buffer layout")
+}
+
+/// Ring 3 trampoline: decode the `FunctionCall`, run the guest function, and
+/// stage the encoded result back in user memory for ring 0 to collect.
+///
+/// Runs entirely in ring 3. All allocations (decoding, the result `Vec`, error
+/// encoding) land on the user heap. The result `Vec` is leaked into the
+/// descriptor; ring 0 copies it out and frees it.
+extern "C" fn guest_call_trampoline(desc_ptr: u64) -> ! {
+    // SAFETY: ring 0 passed a valid descriptor pointer in user memory.
+    let desc = unsafe { &mut *(desc_ptr as *mut GuestCallDescriptor) };
+    // SAFETY: fn_ptr is a registered guest function; input_* describe the
+    // encoded FunctionCall staged by ring 0.
+    let f: GuestFunc = unsafe { core::mem::transmute::<usize, GuestFunc>(desc.fn_ptr as usize) };
+    let input = unsafe {
+        core::slice::from_raw_parts(desc.input_ptr as *const u8, desc.input_len as usize)
+    };
+
+    // Decode, call, and turn the outcome into the final bytes to hand the host.
+    // A guest-function error is encoded into a FunctionCallResult here, mirroring
+    // the ring 0 dispatch path, so ring 0 can push the bytes unconditionally.
+    let result_bytes: Vec<u8> = match FunctionCall::try_from(input) {
+        Ok(call) => match f(call) {
+            Ok(bytes) => bytes,
+            Err(err) => encode_guest_error(err.kind, &err.message),
+        },
+        // The input was just re-encoded from a valid FunctionCall by ring 0, so
+        // this is effectively unreachable; encode a generic error if it ever
+        // happens rather than faulting in ring 3.
+        Err(err) => encode_guest_error(ErrorCode::GuestError, &alloc::format!("{err}")),
+    };
+
+    // Leak the Vec into the descriptor; ring 0 copies it out and frees it.
+    let mut v = result_bytes;
+    desc.output_ptr = v.as_mut_ptr() as u64;
+    desc.output_len = v.len() as u64;
+    desc.output_cap = v.capacity() as u64;
+    core::mem::forget(v);
+
+    // SAFETY: reached only from enter_user, in ring 3.
+    unsafe { sys_return(0) }
+}
+
+/// Encode a guest error into the `FunctionCallResult` flatbuffer the host
+/// expects, identically to the ring 0 dispatch path.
+fn encode_guest_error(kind: ErrorCode, message: &str) -> Vec<u8> {
+    let guest_error = Err(GuestError::new(kind, message.into()));
+    let fcr = FunctionCallResult::new(guest_error);
+    let mut builder = FlatBufferBuilder::new();
+    fcr.encode(&mut builder).to_vec()
+}

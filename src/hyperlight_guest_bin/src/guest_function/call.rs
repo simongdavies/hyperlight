@@ -69,7 +69,25 @@ pub(crate) fn call_guest_function(function_call: FunctionCall) -> Result<Vec<u8>
         // Verify that the function call has the correct parameter types and length.
         registered_function_definition.verify_parameters(&function_call_parameter_types)?;
 
-        (registered_function_definition.function_pointer)(function_call)
+        // With the userspace feature, run the registered function in ring 3 so a
+        // bug in user code cannot tamper with the runtime's supervisor state.
+        // The function lookup and parameter verification above stay in ring 0
+        // (they read the supervisor function registry); only the function body
+        // runs in ring 3, with its arguments and result marshalled across the
+        // privilege boundary.
+        #[cfg(all(feature = "userspace", target_arch = "x86_64"))]
+        {
+            unsafe {
+                crate::arch::ring3::run_registered_guest_fn(
+                    registered_function_definition.function_pointer,
+                    function_call,
+                )
+            }
+        }
+        #[cfg(not(all(feature = "userspace", target_arch = "x86_64")))]
+        {
+            (registered_function_definition.function_pointer)(function_call)
+        }
     } else {
         // The given function is not registered. The guest should implement a function called
         // guest_dispatch_function to handle this.

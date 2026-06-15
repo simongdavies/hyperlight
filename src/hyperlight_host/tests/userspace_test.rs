@@ -40,6 +40,8 @@ fn userspace_guest_boots_and_selftests() {
 }
 
 /// A userspace guest still services ordinary guest-function calls end-to-end.
+/// The guest function runs in ring 3 with its argument and result marshalled
+/// across the privilege boundary.
 #[test]
 fn userspace_guest_echo() {
     let mut sandbox = new_userspace_sandbox();
@@ -47,4 +49,39 @@ fn userspace_guest_echo() {
         .call::<String>("Echo", "hello ring 3".to_string())
         .unwrap();
     assert_eq!(result, "hello ring 3");
+}
+
+/// Exercise the ring 3 marshalling across several parameter/return shapes
+/// (string, f64, f32) to confirm it is not specific to one type. Each call
+/// re-enters ring 3, runs the guest function on the user stack/heap, and
+/// marshals the result back.
+#[test]
+fn userspace_guest_typed_round_trips() {
+    let mut sandbox = new_userspace_sandbox();
+
+    let s = sandbox
+        .call::<String>("Echo", "ring three".to_string())
+        .unwrap();
+    assert_eq!(s, "ring three");
+
+    let d = sandbox
+        .call::<f64>("EchoDouble", 1.617_281_828_45_f64)
+        .unwrap();
+    assert_eq!(d, 1.617_281_828_45_f64);
+
+    let f = sandbox.call::<f32>("EchoFloat", 2.5_f32).unwrap();
+    assert_eq!(f, 2.5_f32);
+}
+
+/// Repeated calls must keep working: the ring 3 user heap and the marshalling
+/// buffers have to be freed cleanly after every call, otherwise the user heap
+/// would leak and eventually be exhausted.
+#[test]
+fn userspace_guest_repeated_calls() {
+    let mut sandbox = new_userspace_sandbox();
+    for i in 0..64 {
+        let msg = format!("iteration {i}");
+        let result = sandbox.call::<String>("Echo", msg.clone()).unwrap();
+        assert_eq!(result, msg);
+    }
 }
