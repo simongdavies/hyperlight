@@ -202,17 +202,24 @@ because its code pages would be supervisor-only.
 | 1 | Page-table U/S plumbing (shared vmem, guest, host) | **done**, unit-tested |
 | 2 | GDT user segments + TSS.rsp0 | **done**, asserts + build |
 | 3 | Transition core (`enter_user`, syscall stub, MSRs, self-test) | **done**, runtime-validated on KVM |
-| 4b/c | Hardened data partition + split kernel/user heaps | designed, not implemented |
-| 5 | Wire `hyperlight_main` / guest functions / host calls through ring 3 | designed, not implemented |
+| 4c | Split kernel/user heaps + CPL-routed allocator | **done**, runtime-validated on KVM |
+| 5 | Wire `hyperlight_main` / guest functions / host calls through ring 3 | **next** (design below) |
+| 4b | Archive-keyed data partition (full data isolation) | designed, not implemented |
 | 6 | Exception robustness from ring 3 + negative security tests | designed, not implemented |
 | 7 | Benchmarks (ring 0 vs ring 3) | harness designed, not implemented |
 
 ### What is validated, and how
 
-Everything through Phase 2, plus the page-table work, is validated by unit tests
+Everything through Phase 4c is validated by unit tests
 (`cargo test -p hyperlight-common --features userspace`), compile-time
-assertions, and clean builds/clippy in **both** feature states. The default
-build is byte-identical.
+assertions, clean builds/clippy in **both** feature states, and — for the parts
+that only run inside a VM — the `userspace_test` integration test on KVM. The
+default (non-`userspace`) build is byte-identical.
+
+Today, ring 3 is exercised by two boot-time self-tests: a pure transition
+round-trip and a user-heap allocation. User-provided code (`hyperlight_main` and
+registered guest functions) **still runs in ring 0**; moving it to ring 3 is
+Phase 5 (see §5.1).
 
 Phase 3's hand-written assembly (`enter_user`, `hl_syscall_entry`, the MSR
 programming) has been verified both by **disassembling** the built ring 3 guest
@@ -232,6 +239,43 @@ ring 3 → ring 0 round-trip (an `iretq` into ring 3, a transform in ring 3, and
 The boot-time self-test (`ring3::selftest`) performs the same ring 0 → ring 3 →
 ring 0 round-trip during guest initialisation and aborts the guest if it fails,
 so every ring 3 guest is self-checking on its first run.
+
+### 5.1 Phase 5 design: running user code in ring 3
+
+The remaining keystone is to actually run `hyperlight_main` and registered guest
+functions in ring 3. The boundary functions are already known: guest-function
+lookup and parameter verification (which read the supervisor-only
+`REGISTERED_GUEST_FUNCTIONS`) stay in ring 0, and only the user function *body*
+runs in ring 3. Three problems must be solved, all stemming from the fact that
+ring 3 cannot touch supervisor memory or execute privileged instructions:
+
+1. **Input marshaling.** The `FunctionCall` arrives in the supervisor input
+   buffer and is deserialised into the kernel heap. Before entering ring 3 the
+   raw bytes are copied into a user-accessible buffer and re-deserialised into
+   the user heap, so the function body (running in ring 3) can read its
+   arguments.
+2. **Output marshaling.** The function returns a `Vec<u8>` in the user heap; the
+   ring 0 side copies it into the supervisor output buffer after `SYS_RETURN`.
+3. **Privileged services.** Everything a guest function might do that touches the
+   host funnels through the guest's `out32` chokepoint: host calls, logging, and
+   abort all call `out`, which faults in ring 3. The plan mediates this with a
+   small set of returning syscalls:
+   - `SYS_OUTB(port, val)` — performs a single `out32` on the caller's behalf in
+     ring 0. Because abort and log messages are streamed *inline* through the
+     `out32` value (not via a shared buffer), this one syscall covers both. The
+     guest's `out32` gains a ring-3 branch (chosen by reading `CS & 3`) that
+     issues `SYS_OUTB` instead of `out`.
+   - `SYS_HOST_CALL(user_ptr, len)` — host calls *do* use the shared (supervisor)
+     output buffer, so this syscall copies the serialised call from a user buffer
+     into the supervisor buffer, performs the real `out`, and copies the result
+     back to the user buffer.
+
+This needs a returning-syscall path in `hl_syscall_entry` (save the user
+context, switch to the kernel stack, dispatch in ring 0, then `sysretq` back to
+ring 3) in addition to the existing non-returning `SYS_RETURN`. It is best built
+and reviewed as one cohesive unit, since the pieces are interdependent and are
+naturally validated together by a real guest function that allocates, logs, and
+calls a host function from ring 3.
 
 ## 6. How to validate (requires a hypervisor)
 
@@ -312,23 +356,24 @@ and lifting it is the largest follow-up:
   needs proper locking, and dynamic mapping needs break-before-make / TLB
   shoot-down across CPUs.
 
-### 9.2 Hardened data partition (Phases 4b/4c)
+### 9.2 Hardened data partition (Phase 4b)
 
-Today the host marks all **writable** guest memory supervisor-only, which already
-keeps the runtime's mutable data out of ring 3. The remaining work gives **user**
-code its own writable memory without weakening that:
+The split kernel/user heap (Phase 4c) is **done**: ring 3 code allocates from a
+user-accessible heap whose control structure lives in user memory, while the
+runtime keeps its supervisor-only kernel heap. Combined with the host marking all
+**writable** guest memory supervisor-only, the runtime's mutable data is already
+out of ring 3's reach. What remains to make the split fully explicit and robust:
 
-- a **user heap** region (user-accessible) plus a `#[global_allocator]` that
-  routes allocations to the kernel or user heap based on the current privilege
-  level (CS RPL);
 - an **archive-keyed linker script** (the Phase 4a spike proved a guest
   `build.rs` can inject `-T <script>` through `cargo-hyperlight`, and that an
   `INSERT AFTER` script augments lld's default layout) that places the runtime
-  crates' writable data into page-aligned supervisor `.kdata`/`.kbss` sections,
-  making the kernel/user data split explicit rather than relying solely on the
-  host's "writable ⇒ supervisor" rule;
-- on-demand **user stack** growth via the page-fault handler (a small user stack
-  is mapped eagerly today).
+  crates' writable data into page-aligned supervisor `.kdata`/`.kbss` sections.
+  Today the guest image (code + rodata + data + bss) is a single RWX region that
+  is exposed to ring 3 for execution, so the runtime's `.data`/`.bss` that share
+  it are technically reachable; the linker partition carves them out;
+- **on-demand growth** of the user stack and user heap via the page-fault
+  handler, removing the eager mappings (and the enlarged default scratch size)
+  that currently back them.
 
 ### 9.3 Other
 
