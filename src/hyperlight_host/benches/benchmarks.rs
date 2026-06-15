@@ -27,6 +27,8 @@ use hyperlight_host::GuestBinary;
 use hyperlight_host::mem::shared_mem::ExclusiveSharedMemory;
 use hyperlight_host::sandbox::{MultiUseSandbox, SandboxConfiguration, UninitializedSandbox};
 use hyperlight_testing::sandbox_sizes::{LARGE_HEAP_SIZE, MEDIUM_HEAP_SIZE, SMALL_HEAP_SIZE};
+#[cfg(feature = "userspace")]
+use hyperlight_testing::simple_guest_userspace_as_string;
 use hyperlight_testing::{c_simple_guest_as_string, simple_guest_as_string};
 
 /// Sandbox heap size configurations for benchmarking.
@@ -85,43 +87,85 @@ impl SandboxSize {
     }
 }
 
-fn create_uninit_sandbox_with_size(size: SandboxSize) -> UninitializedSandbox {
-    let path = simple_guest_as_string().unwrap();
-    UninitializedSandbox::new(GuestBinary::FilePath(path), size.config()).unwrap()
+/// Which privilege mode the guest runs in: ring 0 (mainline) or, under the
+/// `userspace` feature, ring 3 (the user code runs in CPL 3 — see
+/// `docs/userspace-ring3.md`). The `Ring3` arm only exists when the feature is
+/// enabled, so the default benchmark suite is unchanged.
+#[derive(Clone, Copy)]
+enum GuestMode {
+    Ring0,
+    #[cfg(feature = "userspace")]
+    Ring3,
 }
 
-fn create_multiuse_sandbox_with_size(size: SandboxSize) -> MultiUseSandbox {
-    create_uninit_sandbox_with_size(size).evolve().unwrap()
+impl GuestMode {
+    /// Path to the guest binary for this mode.
+    fn guest_path(self) -> String {
+        match self {
+            Self::Ring0 => simple_guest_as_string().unwrap(),
+            #[cfg(feature = "userspace")]
+            Self::Ring3 => simple_guest_userspace_as_string().unwrap(),
+        }
+    }
+
+    /// Benchmark-id suffix. Empty for ring 0, so existing benchmark IDs (and
+    /// their saved baselines) are unchanged; `/ring3` for the ring 3 variants
+    /// added under the feature, giving a direct A/B against the ring 0 IDs.
+    // Only referenced from `#[cfg(feature = "userspace")]` registration blocks.
+    #[cfg_attr(not(feature = "userspace"), allow(dead_code))]
+    fn id_suffix(self) -> &'static str {
+        match self {
+            Self::Ring0 => "",
+            #[cfg(feature = "userspace")]
+            Self::Ring3 => "/ring3",
+        }
+    }
+}
+
+fn create_uninit_sandbox(mode: GuestMode, size: SandboxSize) -> UninitializedSandbox {
+    UninitializedSandbox::new(GuestBinary::FilePath(mode.guest_path()), size.config()).unwrap()
+}
+
+fn create_multiuse_sandbox(mode: GuestMode, size: SandboxSize) -> MultiUseSandbox {
+    create_uninit_sandbox(mode, size).evolve().unwrap()
 }
 
 // ============================================================================
 // Benchmark Category: Sandbox Lifecycle
 // ============================================================================
 
-fn bench_create_uninitialized(b: &mut criterion::Bencher, size: SandboxSize) {
+fn bench_create_uninitialized(b: &mut criterion::Bencher, mode: GuestMode, size: SandboxSize) {
     // Ideally wanted to use b.iter_with_large_drop, but runs out of memory on windows runners: "The paging file is too small for this operation to complete."
     b.iter_batched(
         || (),
-        |_| create_uninit_sandbox_with_size(size),
+        |_| create_uninit_sandbox(mode, size),
         criterion::BatchSize::PerIteration,
     );
 }
 
-fn bench_create_uninitialized_and_drop(b: &mut criterion::Bencher, size: SandboxSize) {
-    b.iter(|| create_uninit_sandbox_with_size(size));
+fn bench_create_uninitialized_and_drop(
+    b: &mut criterion::Bencher,
+    mode: GuestMode,
+    size: SandboxSize,
+) {
+    b.iter(|| create_uninit_sandbox(mode, size));
 }
 
-fn bench_create_initialized(b: &mut criterion::Bencher, size: SandboxSize) {
+fn bench_create_initialized(b: &mut criterion::Bencher, mode: GuestMode, size: SandboxSize) {
     // Ideally wanted to use b.iter_with_large_drop, but runs out of memory on windows runners: "The paging file is too small for this operation to complete."
     b.iter_batched(
         || (),
-        |_| create_multiuse_sandbox_with_size(size),
+        |_| create_multiuse_sandbox(mode, size),
         criterion::BatchSize::PerIteration,
     );
 }
 
-fn bench_create_initialized_and_drop(b: &mut criterion::Bencher, size: SandboxSize) {
-    b.iter(|| create_multiuse_sandbox_with_size(size));
+fn bench_create_initialized_and_drop(
+    b: &mut criterion::Bencher,
+    mode: GuestMode,
+    size: SandboxSize,
+) {
+    b.iter(|| create_multiuse_sandbox(mode, size));
 }
 
 fn sandbox_lifecycle_benchmark(c: &mut Criterion) {
@@ -129,27 +173,51 @@ fn sandbox_lifecycle_benchmark(c: &mut Criterion) {
 
     for size in SandboxSize::all() {
         group.bench_function(format!("create_uninitialized/{}", size.name()), |b| {
-            bench_create_uninitialized(b, size)
+            bench_create_uninitialized(b, GuestMode::Ring0, size)
         });
     }
 
     for size in SandboxSize::all() {
         group.bench_function(
             format!("create_uninitialized_and_drop/{}", size.name()),
-            |b| bench_create_uninitialized_and_drop(b, size),
+            |b| bench_create_uninitialized_and_drop(b, GuestMode::Ring0, size),
         );
     }
 
     for size in SandboxSize::all() {
         group.bench_function(format!("create_initialized/{}", size.name()), |b| {
-            bench_create_initialized(b, size)
+            bench_create_initialized(b, GuestMode::Ring0, size)
         });
     }
 
     for size in SandboxSize::all() {
         group.bench_function(
             format!("create_initialized_and_drop/{}", size.name()),
-            |b| bench_create_initialized_and_drop(b, size),
+            |b| bench_create_initialized_and_drop(b, GuestMode::Ring0, size),
+        );
+    }
+
+    // Ring 3 comparison (default size only; the size configs above are tuned for
+    // ring 0). Adds `/default/ring3` IDs alongside the ring 0 ones above.
+    #[cfg(feature = "userspace")]
+    {
+        let m = GuestMode::Ring3;
+        let s = SandboxSize::Default;
+        group.bench_function(
+            format!("create_uninitialized/default{}", m.id_suffix()),
+            |b| bench_create_uninitialized(b, m, s),
+        );
+        group.bench_function(
+            format!("create_uninitialized_and_drop/default{}", m.id_suffix()),
+            |b| bench_create_uninitialized_and_drop(b, m, s),
+        );
+        group.bench_function(
+            format!("create_initialized/default{}", m.id_suffix()),
+            |b| bench_create_initialized(b, m, s),
+        );
+        group.bench_function(
+            format!("create_initialized_and_drop/default{}", m.id_suffix()),
+            |b| bench_create_initialized_and_drop(b, m, s),
         );
     }
 
@@ -160,13 +228,13 @@ fn sandbox_lifecycle_benchmark(c: &mut Criterion) {
 // Benchmark Category: Guest Calls
 // ============================================================================
 
-fn bench_guest_call(b: &mut criterion::Bencher, size: SandboxSize) {
-    let mut sbox = create_multiuse_sandbox_with_size(size);
+fn bench_guest_call(b: &mut criterion::Bencher, mode: GuestMode, size: SandboxSize) {
+    let mut sbox = create_multiuse_sandbox(mode, size);
     b.iter(|| sbox.call::<String>("Echo", "hello\n".to_string()).unwrap());
 }
 
-fn bench_guest_call_with_restore(b: &mut criterion::Bencher, size: SandboxSize) {
-    let mut sbox = create_multiuse_sandbox_with_size(size);
+fn bench_guest_call_with_restore(b: &mut criterion::Bencher, mode: GuestMode, size: SandboxSize) {
+    let mut sbox = create_multiuse_sandbox(mode, size);
     let snapshot = sbox.snapshot().unwrap();
 
     b.iter(|| {
@@ -175,8 +243,12 @@ fn bench_guest_call_with_restore(b: &mut criterion::Bencher, size: SandboxSize) 
     });
 }
 
-fn bench_guest_call_with_host_function(b: &mut criterion::Bencher, size: SandboxSize) {
-    let mut uninitialized_sandbox = create_uninit_sandbox_with_size(size);
+fn bench_guest_call_with_host_function(
+    b: &mut criterion::Bencher,
+    mode: GuestMode,
+    size: SandboxSize,
+) {
+    let mut uninitialized_sandbox = create_uninit_sandbox(mode, size);
 
     uninitialized_sandbox
         .register("HostAdd", |a: i32, b: i32| Ok(a + b))
@@ -194,7 +266,7 @@ fn bench_guest_call_with_host_function(b: &mut criterion::Bencher, size: Sandbox
 fn bench_guest_call_different_thread(b: &mut criterion::Bencher, size: SandboxSize) {
     b.iter_custom(|iters| {
         let mut total_duration = Duration::ZERO;
-        let sbox = Arc::new(Mutex::new(create_multiuse_sandbox_with_size(size)));
+        let sbox = Arc::new(Mutex::new(create_multiuse_sandbox(GuestMode::Ring0, size)));
 
         for _ in 0..iters {
             // Ensure vcpu is "bound" on this main thread
@@ -231,7 +303,7 @@ fn bench_guest_call_interrupt_latency(b: &mut criterion::Bencher, size: SandboxS
         let mut total_interrupt_latency = Duration::ZERO;
 
         for _ in 0..iters {
-            let mut sbox = create_multiuse_sandbox_with_size(size);
+            let mut sbox = create_multiuse_sandbox(GuestMode::Ring0, size);
             let interrupt_handle = sbox.interrupt_handle();
 
             let start_barrier = Arc::new(Barrier::new(2));
@@ -274,20 +346,38 @@ fn guest_calls_benchmark(c: &mut Criterion) {
 
     for size in SandboxSize::all() {
         group.bench_function(format!("call/{}", size.name()), |b| {
-            bench_guest_call(b, size)
+            bench_guest_call(b, GuestMode::Ring0, size)
         });
     }
 
     for size in SandboxSize::all() {
         group.bench_function(format!("call_with_restore/{}", size.name()), |b| {
-            bench_guest_call_with_restore(b, size)
+            bench_guest_call_with_restore(b, GuestMode::Ring0, size)
         });
     }
 
     for size in SandboxSize::all() {
         group.bench_function(format!("call_with_host_function/{}", size.name()), |b| {
-            bench_guest_call_with_host_function(b, size)
+            bench_guest_call_with_host_function(b, GuestMode::Ring0, size)
         });
+    }
+
+    // Ring 3 comparison (default size only). Adds `/default/ring3` IDs alongside
+    // the ring 0 ones above.
+    #[cfg(feature = "userspace")]
+    {
+        let m = GuestMode::Ring3;
+        let s = SandboxSize::Default;
+        group.bench_function(format!("call/default{}", m.id_suffix()), |b| {
+            bench_guest_call(b, m, s)
+        });
+        group.bench_function(format!("call_with_restore/default{}", m.id_suffix()), |b| {
+            bench_guest_call_with_restore(b, m, s)
+        });
+        group.bench_function(
+            format!("call_with_host_function/default{}", m.id_suffix()),
+            |b| bench_guest_call_with_host_function(b, m, s),
+        );
     }
 
     group.bench_function("different_thread".to_string(), |b| {
@@ -305,9 +395,9 @@ fn guest_calls_benchmark(c: &mut Criterion) {
 // Benchmark Category: Snapshots
 // ============================================================================
 
-fn bench_snapshot_create(b: &mut criterion::Bencher, size: SandboxSize) {
+fn bench_snapshot_create(b: &mut criterion::Bencher, mode: GuestMode, size: SandboxSize) {
     b.iter_custom(|iters| {
-        let mut sbox = create_multiuse_sandbox_with_size(size);
+        let mut sbox = create_multiuse_sandbox(mode, size);
         let mut total_duration = Duration::ZERO;
 
         for _ in 0..iters {
@@ -326,9 +416,9 @@ fn bench_snapshot_create(b: &mut criterion::Bencher, size: SandboxSize) {
     });
 }
 
-fn bench_snapshot_restore(b: &mut criterion::Bencher, size: SandboxSize) {
+fn bench_snapshot_restore(b: &mut criterion::Bencher, mode: GuestMode, size: SandboxSize) {
     b.iter_custom(|iters| {
-        let mut sbox = create_multiuse_sandbox_with_size(size);
+        let mut sbox = create_multiuse_sandbox(mode, size);
         // Create initial snapshot
         let snapshot = sbox.snapshot().unwrap();
         let mut total_duration = Duration::ZERO;
@@ -352,13 +442,27 @@ fn snapshots_benchmark(c: &mut Criterion) {
 
     for size in SandboxSize::all() {
         group.bench_function(format!("create/{}", size.name()), |b| {
-            bench_snapshot_create(b, size)
+            bench_snapshot_create(b, GuestMode::Ring0, size)
         });
     }
 
     for size in SandboxSize::all() {
         group.bench_function(format!("restore/{}", size.name()), |b| {
-            bench_snapshot_restore(b, size)
+            bench_snapshot_restore(b, GuestMode::Ring0, size)
+        });
+    }
+
+    // Ring 3 comparison (default size only). Adds `/default/ring3` IDs alongside
+    // the ring 0 ones above.
+    #[cfg(feature = "userspace")]
+    {
+        let m = GuestMode::Ring3;
+        let s = SandboxSize::Default;
+        group.bench_function(format!("create/default{}", m.id_suffix()), |b| {
+            bench_snapshot_create(b, m, s)
+        });
+        group.bench_function(format!("restore/default{}", m.id_suffix()), |b| {
+            bench_snapshot_restore(b, m, s)
         });
     }
 

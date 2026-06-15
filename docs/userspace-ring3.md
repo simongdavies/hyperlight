@@ -568,10 +568,20 @@ Interpretation:
   without it: the supervisor `.kdata` page is re-protected once at boot (captured
   in the snapshot baseline) and is never written on the hot path.
 
-A Criterion-based `GuestMode { Ring0, Ring3 }` axis on the main
-[`benchmarks.rs`](../src/hyperlight_host/benches/benchmarks.rs) suite, so these
-workloads also run under `just bench` (with a stable CI machine and a possible
-perf gate), is planned (see [Future work](#9-future-work)).
+A Criterion-based `GuestMode { Ring0, Ring3 }` axis is also wired into the main
+[`benchmarks.rs`](../src/hyperlight_host/benches/benchmarks.rs) suite, so the
+ring 0 vs ring 3 comparison runs under `just bench` too. Building it with
+`--features userspace` adds a `/ring3` variant alongside the default-size ring 0
+benchmark in the `sandboxes` (creation — the one-time startup cost), `guest_calls`
+(call, call-with-restore, call-with-host-function), and `snapshots`
+(create, restore) groups. The ring 0 benchmark IDs and their saved baselines are
+unchanged, so the ring 3 rows are purely additive. The `sample_workloads`
+`24K_in_8K_out` benchmark is deliberately left ring-0-only: it runs on an
+intentionally tight hand-tuned heap that does not translate cleanly to the ring 3
+split heap (§3.9), so a like-for-like ring 3 row there would measure heap pressure
+rather than the ring transition. Wiring the userspace guest build into
+`just guests`/CI and gating on the ring 3 overhead remain open (see
+[Future work](#9-future-work)).
 
 
 
@@ -621,11 +631,13 @@ make the data partition *complete* rather than *escalation-safe*:
 
 ### 9.3 Other
 
-- **Benchmark integration.** Add the `GuestMode { Ring0, Ring3 }` axis to the
-  Criterion suite (§7), including a sandbox-creation benchmark to capture the
-  one-time startup cost, and wire the userspace guest build into `just guests`
-  and CI. A perf gate on ring 3 overhead can follow once baselines are stable;
-  initially the ring 3 benchmarks run informationally.
+- **Benchmark CI integration.** The `GuestMode { Ring0, Ring3 }` axis is wired
+  into the Criterion suite (§7) — including sandbox creation, so the one-time
+  startup cost is captured — but the userspace guest build is not yet wired into
+  `just guests` and CI, so the ring 3 rows only appear when the suite is built
+  with `--features userspace`. A perf gate on ring 3 overhead can follow once
+  baselines are stable on a stable CI machine; initially the ring 3 benchmarks
+  run informationally.
 - **i686 / aarch64.** The i686 page-table backend already honours
   `user_accessible`; a full ring 3 story for either architecture is unscoped.
 
