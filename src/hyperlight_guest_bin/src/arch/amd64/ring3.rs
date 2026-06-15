@@ -89,11 +89,24 @@ const FMASK_VALUE: u64 = RFLAGS_TF | RFLAGS_IF | RFLAGS_DF | RFLAGS_NT | RFLAGS_
 const USER_RFLAGS: u64 = RFLAGS_RESERVED1 | RFLAGS_IF;
 
 // ===== Syscall numbers =====
-// Passed in RAX by ring 3 code. Only SYS_RETURN exists so far; privileged
-// services (host calls, logging, abort, tracing) are added in later phases.
+// Passed in RAX by ring 3 code. Two kinds of syscall exist:
+//
+// * *Non-returning* syscalls unwind the kernel stack back into [`enter_user`]'s
+//   caller and never resume the ring 3 code (`SYS_RETURN`).
+// * *Returning* syscalls run a ring 0 handler ([`hl_syscall_dispatch`]) and then
+//   `sysretq` back into the ring 3 code with a result in RAX.
+//
+// Privileged services (host calls, logging, abort) are added on top of the
+// returning-syscall mechanism in later phases.
 /// Return from a ring 3 user function back into [`enter_user`]'s caller. The
-/// 64-bit return value is passed in RDI.
+/// 64-bit return value is passed in RDI. Non-returning.
 pub(crate) const SYS_RETURN: u64 = 0;
+
+/// Self-test syscall used to validate the returning-syscall (`sysretq`) path at
+/// boot. Takes two scalar arguments and returns their XOR, computed in ring 0.
+/// Pointer-free by design, so it exercises the transition mechanism in
+/// isolation from user-pointer handling. Returning.
+const SYS_SELFTEST: u64 = 1;
 
 unsafe extern "C" {
     /// Drop into ring 3 and run `entry(arg)` on the user stack. Returns the
@@ -110,6 +123,12 @@ unsafe extern "C" {
 /// and returning syscalls use it as the base of their (downward-growing)
 /// kernel stack. Single-vCPU, single-threaded: one slot is sufficient.
 static mut HL_KERNEL_RETURN_RSP: u64 = 0;
+
+/// Scratch slot holding the ring 3 `RSP` while a returning syscall runs on the
+/// kernel stack, so it can be restored before `sysretq`. Single-vCPU,
+/// single-threaded: one slot is sufficient.
+static mut HL_USER_RSP_SCRATCH: u64 = 0;
+
 
 /// Read a model-specific register.
 #[inline]
@@ -201,6 +220,34 @@ pub(crate) unsafe fn sys_return(value: u64) -> ! {
     }
 }
 
+/// Issue a *returning* syscall from ring 3 with two scalar arguments, returning
+/// the `u64` the ring 0 handler produced.
+///
+/// `syscall` clobbers `rcx` and `r11`, and the ring 0 handler is an ordinary C
+/// function, so every caller-saved register is treated as clobbered.
+///
+/// # Safety
+/// Must only be called from ring 3 code entered via [`enter_user_fn`].
+unsafe fn syscall2(num: u64, a0: u64, a1: u64) -> u64 {
+    let ret: u64;
+    unsafe {
+        asm!(
+            "syscall",
+            inout("rax") num => ret,
+            inout("rdi") a0 => _,
+            inout("rsi") a1 => _,
+            out("rdx") _,
+            out("rcx") _,
+            out("r8") _,
+            out("r9") _,
+            out("r10") _,
+            out("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
 // The `enter_user` / `hl_syscall_entry` pair. See the module documentation for
 // the stack-switching contract.
 global_asm!(
@@ -263,17 +310,58 @@ global_asm!(
     "pop rbp",
     "pop rbx",
     "ret",
-    // Any other syscall number is not implemented yet; trap loudly. Replaced
-    // with a real dispatcher when privileged services are wired up.
+    // Returning syscall: run a ring 0 handler then sysretq back to ring 3.
     "2:",
-    "ud2",
+    // Stash the ring 3 RSP and switch to the kernel stack. The kernel stack
+    // grows downward from the parked enter_user frame, so it does not disturb
+    // the callee-saved registers SYS_RETURN will later pop.
+    "mov [rip + {user_rsp}], rsp",
+    "mov rsp, [rip + {kernel_rsp}]",
+    // Preserve the user return RIP (rcx) and RFLAGS (r11) across the call; both
+    // are needed by sysretq and would be clobbered by a C call.
+    "push rcx",
+    "push r11",
+    "sub rsp, 8", // keep rsp 16-byte aligned for the call
+    // Marshal into the System V argument registers: dispatch(num, a0, a1, a2).
+    // Cascade so no source register is clobbered before it is read.
+    "mov rcx, rdx", // a2 -> 4th arg
+    "mov rdx, rsi", // a1 -> 3rd arg
+    "mov rsi, rdi", // a0 -> 2nd arg
+    "mov rdi, rax", // syscall number -> 1st arg
+    "call {dispatch}",
+    // rax now holds the result to deliver to ring 3.
+    "add rsp, 8",
+    "pop r11", // user RFLAGS
+    "pop rcx", // user return RIP
+    "mov rsp, [rip + {user_rsp}]",
+    "sysretq",
     kernel_rsp = sym HL_KERNEL_RETURN_RSP,
+    user_rsp = sym HL_USER_RSP_SCRATCH,
+    dispatch = sym hl_syscall_dispatch,
     user_ss = const USER_SS,
     user_cs = const USER_CS,
     user_rflags = const USER_RFLAGS,
     user_stack_top = const USER_STACK_TOP_GVA,
     sys_return = const SYS_RETURN,
 );
+
+/// Ring 0 handler for *returning* syscalls from ring 3.
+///
+/// Runs on the kernel stack (set up by `hl_syscall_entry`); the `u64` return
+/// value is delivered to ring 3 in RAX after `sysretq`. An unknown syscall
+/// number indicates a broken or malicious ring 3, so the guest is aborted.
+///
+/// Pointer-taking syscalls added in later phases must validate that any
+/// user-supplied pointers refer to user-accessible memory before dereferencing
+/// them, so ring 3 cannot use the kernel to read or write supervisor memory.
+#[unsafe(no_mangle)]
+extern "C" fn hl_syscall_dispatch(num: u64, a0: u64, a1: u64, _a2: u64) -> u64 {
+    match num {
+        SYS_SELFTEST => a0 ^ a1,
+        _ => panic!("ring 3 issued an unknown syscall: {num:#x}"),
+    }
+}
+
 
 /// Self-test the ring 0 -> ring 3 -> ring 0 round-trip.
 ///
@@ -327,3 +415,39 @@ pub(crate) fn selftest_user_heap() {
         panic!("ring 3 user-heap self-test failed: got {got:#x}, expected {expected:#x}");
     }
 }
+
+/// Self-test the *returning* syscall (`sysretq`) path.
+///
+/// Drops into ring 3, issues a `SYS_SELFTEST` syscall (handled in ring 0 by
+/// [`hl_syscall_dispatch`]), verifies the ring 0 result is delivered back to
+/// ring 3, then returns it via `SYS_RETURN`. This exercises the full
+/// ring 3 -> ring 0 -> ring 3 -> ring 0 path, including the `sysretq` resume
+/// that the non-returning self-tests do not cover. Aborts the guest on
+/// mismatch.
+pub(crate) fn selftest_returning_syscall() {
+    /// Arbitrary operands whose XOR (computed in ring 0) is checked twice: once
+    /// in ring 3 after `sysretq`, and once in ring 0 after `SYS_RETURN`.
+    const A: u64 = 0xa5a5_a5a5_0000_1111;
+    const B: u64 = 0x1234_2222_5a5a_5a5a;
+
+    extern "C" fn user_fn(arg: u64) -> ! {
+        // Runs in ring 3. Issue a returning syscall, check the result came back
+        // across sysretq, then hand it to SYS_RETURN.
+        let got = unsafe { syscall2(SYS_SELFTEST, arg, B) };
+        if got != arg ^ B {
+            // Resumed in ring 3 but with the wrong value: report a sentinel the
+            // ring 0 checker below will reject.
+            unsafe { sys_return(0) }
+        }
+        unsafe { sys_return(got) }
+    }
+
+    let got = unsafe { enter_user_fn(user_fn, A) };
+    if got != A ^ B {
+        panic!(
+            "ring 3 returning-syscall self-test failed: got {got:#x}, expected {:#x}",
+            A ^ B
+        );
+    }
+}
+

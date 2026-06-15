@@ -318,6 +318,7 @@ pub(crate) extern "C" fn generic_init(
     {
         arch::ring3::selftest();
         arch::ring3::selftest_user_heap();
+        arch::ring3::selftest_returning_syscall();
     }
 
     unsafe {
