@@ -122,7 +122,11 @@ const PAGE_NX: u64 = 1 << 63;
 /// Mask to extract the physical address from a PTE (bits 51:12)
 /// This masks out the lower 12 flag bits AND the upper bits including NX (bit 63)
 pub const PTE_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
-const PAGE_USER_ACCESS_DISABLED: u64 = 0 << 2; // U/S bit not set - supervisor mode only (no code runs in user mode for now)
+/// U/S (User/Supervisor) bit. When set, the page is accessible from CPL 3
+/// (user mode); when clear, only from supervisor mode (CPL 0-2). Honoured only
+/// with the `userspace` feature; otherwise no guest code runs in ring 3 and
+/// every mapping stays supervisor-only (see [`page_user_flag`]).
+pub const PAGE_USER: u64 = 1 << 2;
 const PAGE_DIRTY_SET: u64 = 1 << 6; // D - dirty bit
 const PAGE_ACCESSED_SET: u64 = 1 << 5; // A - accessed bit
 const PAGE_CACHE_ENABLED: u64 = 0 << 4; // PCD - page cache disable bit not set (caching enabled)
@@ -146,6 +150,28 @@ const fn page_nx_flag(executable: bool) -> u64 {
     if executable { 0 } else { PAGE_NX }
 }
 
+/// Returns the U/S bit ([`PAGE_USER`]) to set on a page table entry.
+///
+/// Without the `userspace` feature, no guest code runs in ring 3, so this is
+/// always 0 and the emitted page tables are identical to a supervisor-only
+/// build. With the feature enabled, leaf entries are marked user-accessible
+/// according to `user_accessible`, while intermediate tables pass `true`: on
+/// x86-64 the U/S bit must be set at every level of the walk for a user access
+/// to succeed, so the leaf bit is authoritative and intermediate tables are
+/// kept permissive.
+#[inline(always)]
+const fn page_user_flag(user_accessible: bool) -> u64 {
+    #[cfg(feature = "userspace")]
+    {
+        if user_accessible { PAGE_USER } else { 0 }
+    }
+    #[cfg(not(feature = "userspace"))]
+    {
+        let _ = user_accessible;
+        0
+    }
+}
+
 /// Helper function to generate a page table entry that points to another table
 #[allow(clippy::identity_op)]
 #[allow(clippy::precedence)]
@@ -154,7 +180,7 @@ fn pte_for_table<Op: TableOps>(table_addr: Op::TableAddr) -> u64 {
         PAGE_ACCESSED_SET | // prevent the CPU writing to the access flag
         PAGE_CACHE_ENABLED | // leave caching enabled
         PAGE_WRITE_BACK | // use write-back caching
-        PAGE_USER_ACCESS_DISABLED |// dont allow user access (no code runs in user mode for now)
+        page_user_flag(true) | // U/S - permissive so user-accessible leaves below are reachable (leaf bit is authoritative)
         PAGE_RW | // R/W - we don't use block-level permissions
         PAGE_PRESENT // P   - this entry is present
 }
@@ -289,7 +315,7 @@ unsafe fn map_page<
                 PAGE_ACCESSED_SET | // prevent the CPU writing to the access flag
                 PAGE_CACHE_ENABLED | // leave caching enabled
                 PAGE_WRITE_BACK | // use write-back caching
-                PAGE_USER_ACCESS_DISABLED | // dont allow user access (no code runs in user mode for now)
+                page_user_flag(mapping.user_accessible) | // U/S - user-accessible iff requested (and userspace feature on)
                 page_rw_flag(bm.writable) | // R/W - set if writable
                 PAGE_PRESENT // P   - this entry is present
         }
@@ -302,7 +328,7 @@ unsafe fn map_page<
                 PAGE_ACCESSED_SET | // prevent the CPU writing to the access flag
                 PAGE_CACHE_ENABLED | // leave caching enabled
                 PAGE_WRITE_BACK | // use write-back caching
-                PAGE_USER_ACCESS_DISABLED | // dont allow user access (no code runs in user mode for now)
+                page_user_flag(mapping.user_accessible) | // U/S - user-accessible iff requested (and userspace feature on)
                 0 | // R/W - Cow page is never writable
                 PAGE_PRESENT // P   - this entry is present
         }
@@ -402,7 +428,7 @@ pub unsafe fn walk_va_spaces<Op: TableReadOps>(
                 virt_base: virt_addr,
                 len: PAGE_SIZE as u64,
                 kind,
-                user_accessible: false,
+                user_accessible: (pte & PAGE_USER) != 0,
             }));
         }
 
@@ -510,7 +536,7 @@ pub unsafe fn virt_to_phys<'a, Op: TableReadOps + 'a>(
             virt_base: virt_addr,
             len: PAGE_SIZE as u64,
             kind,
-            user_accessible: false,
+            user_accessible: (pte & PAGE_USER) != 0,
         })
     })
 }
@@ -736,6 +762,92 @@ mod tests {
         assert_ne!(pte & PAGE_PRESENT, 0, "PTE should be present");
         assert_eq!(pte & PAGE_RW, 0, "PTE should be read-only");
         assert_eq!(pte & PAGE_NX, 0, "PTE should NOT have NX set (executable)");
+    }
+
+    #[test]
+    fn test_page_user_flag() {
+        #[cfg(feature = "userspace")]
+        {
+            assert_eq!(page_user_flag(true), PAGE_USER);
+            assert_eq!(page_user_flag(false), 0);
+        }
+        #[cfg(not(feature = "userspace"))]
+        {
+            // Without the userspace feature no guest code runs in ring 3, so the
+            // U/S bit is never set regardless of the requested accessibility.
+            assert_eq!(page_user_flag(true), 0);
+            assert_eq!(page_user_flag(false), 0);
+        }
+    }
+
+    #[test]
+    fn test_map_supervisor_only_page_never_sets_user_bit() {
+        // A supervisor-only request must never set the U/S bit on the leaf,
+        // in either feature configuration.
+        let ops = MockTableOps::new();
+        let mapping = Mapping {
+            phys_base: 0x1000,
+            virt_base: 0x1000,
+            len: PAGE_SIZE as u64,
+            kind: MappingKind::Basic(BasicMapping {
+                readable: true,
+                writable: true,
+                executable: false,
+            }),
+            user_accessible: false,
+        };
+
+        unsafe { map(&ops, mapping) };
+
+        let pte = ops.get_entry(3, 1);
+        assert_eq!(
+            pte & PAGE_USER,
+            0,
+            "supervisor-only leaf must not set the U/S bit"
+        );
+    }
+
+    #[test]
+    fn test_map_user_accessible_page_sets_user_bit() {
+        // A user-accessible request sets the U/S bit on the leaf and, because
+        // x86-64 ANDs the U/S bit across every level of the walk, on each
+        // intermediate table as well - but only when the `userspace` feature
+        // is enabled. Without it the request is silently downgraded to
+        // supervisor-only.
+        let ops = MockTableOps::new();
+        let mapping = Mapping {
+            phys_base: 0x1000,
+            virt_base: 0x1000,
+            len: PAGE_SIZE as u64,
+            kind: MappingKind::Basic(BasicMapping {
+                readable: true,
+                writable: true,
+                executable: false,
+            }),
+            user_accessible: true,
+        };
+
+        unsafe { map(&ops, mapping) };
+
+        // Tables are allocated in walk order: 0=PML4, 1=PDPT, 2=PD, 3=PT.
+        let leaf = ops.get_entry(3, 1);
+        let pml4 = ops.get_entry(0, 0);
+        let pdpt = ops.get_entry(1, 0);
+        let pd = ops.get_entry(2, 0);
+
+        #[cfg(feature = "userspace")]
+        {
+            assert_ne!(leaf & PAGE_USER, 0, "leaf PTE should be user-accessible");
+            assert_ne!(pml4 & PAGE_USER, 0, "PML4 entry should be permissive");
+            assert_ne!(pdpt & PAGE_USER, 0, "PDPT entry should be permissive");
+            assert_ne!(pd & PAGE_USER, 0, "PD entry should be permissive");
+        }
+        #[cfg(not(feature = "userspace"))]
+        {
+            assert_eq!(leaf & PAGE_USER, 0, "leaf PTE must stay supervisor-only");
+            assert_eq!(pml4 & PAGE_USER, 0, "PML4 entry must stay supervisor-only");
+            let _ = (pdpt, pd);
+        }
     }
 
     #[test]

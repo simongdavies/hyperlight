@@ -124,6 +124,28 @@ impl vmem::TableOps for GuestMappingOperations {
 /// - TLB invalidation is not performed,
 ///   if previously-unmapped ranges are not being mapped, TLB invalidation may need to be performed afterwards.
 pub unsafe fn map_region(phys_base: u64, virt_base: *mut u8, len: u64, kind: vmem::MappingKind) {
+    // Supervisor-only mapping: the historical behaviour, and the only kind of
+    // mapping that exists unless the `userspace` feature drops guest code into
+    // ring 3.
+    unsafe { map_region_with_access(phys_base, virt_base, len, kind, false) }
+}
+
+/// As [`map_region`], but additionally controls whether the region is
+/// accessible from ring 3 (user mode) via `user_accessible`.
+///
+/// `user_accessible` only has an effect with the `userspace` feature enabled;
+/// without it no guest code runs in ring 3 and every mapping is supervisor-only
+/// regardless of this argument (see `page_user_flag` in the shared vmem code).
+///
+/// # Safety
+/// Same as [`map_region`].
+pub(crate) unsafe fn map_region_with_access(
+    phys_base: u64,
+    virt_base: *mut u8,
+    len: u64,
+    kind: vmem::MappingKind,
+    user_accessible: bool,
+) {
     unsafe {
         vmem::map(
             &GuestMappingOperations::new(),
@@ -132,7 +154,7 @@ pub unsafe fn map_region(phys_base: u64, virt_base: *mut u8, len: u64, kind: vme
                 virt_base: virt_base as u64,
                 len,
                 kind,
-                user_accessible: false,
+                user_accessible,
             },
         );
     }
