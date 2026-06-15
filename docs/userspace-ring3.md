@@ -100,6 +100,23 @@ hypervisor interfaces directly (§1). Containing an untrusted *binary* — one w
 author is the adversary — remains the job of the VM boundary, which confines the
 guest regardless of the ring its code runs in.
 
+For this to hold, **no author-provided code may run at ring 0**. Every entry into
+author code drops to ring 3 first:
+
+- `hyperlight_main` (the init entry point) runs in ring 3 (§3.8);
+- registered guest functions run their bodies in ring 3 (§3.8);
+- the `guest_dispatch_function` fallback for unregistered calls runs in ring 3
+  (§3.8);
+- exception and interrupt handlers run at ring 0, but a handler can only be
+  *installed* by writing supervisor-only state (the `HANDLERS` table lives in the
+  `.kdata` partition (§3.7); the IDT lives in supervisor memory), so ring 3
+  cannot install one — and no ring-0 runtime path installs author handlers.
+
+The only code that runs at ring 0 is the trusted runtime itself
+(`hyperlight-guest-bin` and the crates it builds on). This is the same division
+as an operating system: the kernel runs privileged, everything the application
+author supplies runs unprivileged.
+
 ### Guarantees
 
 With the feature enabled, ring 3 user code:
