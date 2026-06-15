@@ -285,6 +285,11 @@ pub(crate) extern "C" fn generic_init(
         registration();
     }
 
+    // Verify the ring 0 -> ring 3 -> ring 0 transition machinery works before
+    // running any user code in ring 3. Aborts the guest if it is broken.
+    #[cfg(all(feature = "userspace", target_arch = "x86_64"))]
+    arch::ring3::selftest();
+
     unsafe {
         hyperlight_main();
     }

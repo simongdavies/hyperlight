@@ -23,3 +23,18 @@ limitations under the License.
 /// a VA that will survive the snapshot process. Since we don't have a
 /// useful virtual allocator yet, we just put them here...
 pub const PROC_CONTROL_GVA: u64 = 0xffff_fd00_0000_0000;
+
+/// Top (exclusive, i.e. one past the highest byte) of the ring 3 user stack,
+/// used when the `userspace` feature drops guest code into ring 3. It lives in
+/// its own high-half slot, well clear of the kernel main stack
+/// (`MAIN_STACK_TOP_GVA`, 0xffff_ff00_..), the processor control structures
+/// (`PROC_CONTROL_GVA`, 0xffff_fd00_..) and the snapshot page tables
+/// (0xffff_8000_..). The stack grows downward from here.
+#[cfg(feature = "userspace")]
+pub const USER_STACK_TOP_GVA: u64 = 0xffff_fc00_0000_0000;
+
+/// Size of the ring 3 user stack. A small fixed stack is mapped eagerly when
+/// entering ring 3 for the first time; on-demand growth via the page-fault
+/// handler is a later refinement.
+#[cfg(feature = "userspace")]
+pub const USER_STACK_SIZE: u64 = 64 * 1024;

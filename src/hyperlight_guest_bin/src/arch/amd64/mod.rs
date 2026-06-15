@@ -20,3 +20,5 @@ pub mod exception;
 mod init;
 mod layout;
 pub(crate) mod machine;
+#[cfg(feature = "userspace")]
+pub(crate) mod ring3;

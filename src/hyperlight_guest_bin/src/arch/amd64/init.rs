@@ -169,6 +169,11 @@ pub extern "C" fn entrypoint(peb_address: u64, seed: u64, ops: u64, max_log_leve
         init_idt(pc);
         let stack_top = init_stack();
 
+        // Set up the ring 0 / ring 3 transition machinery (user stack and
+        // syscall MSRs) before any user code can run.
+        #[cfg(feature = "userspace")]
+        super::ring3::init();
+
         // Architecture early init is complete! We pivot now to
         // executing on the main stack, and jump into generic
         // initialisation code in lib.rs
