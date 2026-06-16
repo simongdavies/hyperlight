@@ -629,18 +629,41 @@ run-to-run noise.
 | `guest_calls/call_with_host_function/medium` | 51.94 µs | 55.37 µs | +6.6% |
 | `guest_calls/call_with_host_function/large` | 52.61 µs | 56.07 µs | +6.6% |
 
-**Sandbox creation, snapshots, and I/O workloads** (default size unless noted;
-the large-parameter row is from a separate run since its ~1-second iterations
-would otherwise dominate the wall-clock):
+**Sandbox creation** — the one-time startup cost, at four sandbox sizes (the
+larger sizes are dominated by the time to zero/copy the bigger guest memory, so
+the ring 3 component is a smaller fraction and partly buried in copy variance;
+`measurement-time` was shortened for these, so treat sub-few-percent rows as
+noise):
 
 | Benchmark | ring 0 | ring 3 | Δ% |
 |-----------|-------:|-------:|----:|
-| `sandboxes/create_uninitialized` | 700 µs | 733 µs | +4.6% |
-| `sandboxes/create_uninitialized_and_drop` | 745 µs | 772 µs | +3.6% |
-| `sandboxes/create_initialized` | 8.54 ms | 9.49 ms | +11% |
-| `sandboxes/create_initialized_and_drop` | 52.1 ms | 51.2 ms | noise |
-| `snapshots/create` | 553 µs | 644 µs | +16% |
-| `snapshots/restore` (no prior call) | 27.0 µs | 28.4 µs | noise |
+| `sandboxes/create_uninitialized/default` | 635 µs | 698 µs | +9.8% |
+| `sandboxes/create_uninitialized/small` | 9.92 ms | 8.95 ms | noise |
+| `sandboxes/create_uninitialized/medium` | 68.9 ms | 74.3 ms | +7.9% |
+| `sandboxes/create_uninitialized/large` | 256 ms | 264 ms | +3.1% |
+| `sandboxes/create_initialized/default` | 11.23 ms | 11.06 ms | noise |
+| `sandboxes/create_initialized/small` | 23.46 ms | 23.76 ms | +1.3% |
+| `sandboxes/create_initialized/medium` | 80.7 ms | 82.2 ms | +1.9% |
+| `sandboxes/create_initialized/large` | 273 ms | 268 ms | noise |
+
+**Snapshots** — create and restore, at four sizes:
+
+| Benchmark | ring 0 | ring 3 | Δ% |
+|-----------|-------:|-------:|----:|
+| `snapshots/create/default` | 459.6 µs | 539.1 µs | +17% |
+| `snapshots/create/small` | 11.25 ms | 10.55 ms | noise |
+| `snapshots/create/medium` | 130.3 ms | 128.4 ms | noise |
+| `snapshots/create/large` | 505.5 ms | 440.1 ms | noise |
+| `snapshots/restore/default` | 27.67 µs | 28.64 µs | +3.5% |
+| `snapshots/restore/small` | 28.67 µs | 30.78 µs | +7.4% |
+| `snapshots/restore/medium` | 190.5 µs | 197.97 µs | +3.9% |
+| `snapshots/restore/large` | 27.53 ms | 30.49 ms | +11% |
+
+**I/O workloads** (default size; the large-parameter row is from a separate run
+since its ~1-second iterations would otherwise dominate the wall-clock):
+
+| Benchmark | ring 0 | ring 3 | Δ% |
+|-----------|-------:|-------:|----:|
 | `sample_workloads/24K_in_8K_out` (24 KiB in, 8 KiB out) | 50.5 µs | 67.6 µs | +34% |
 | `guest_functions_with_large_parameters` (~100 MiB in) | 0.99 s | 1.58 s | +60% |
 
@@ -648,7 +671,7 @@ These confirm the per-call cost scales with how much data crosses the boundary,
 and the bare transition does not:
 
 - **The bare transition is within noise.** `guest_calls/call` is +2.7-4.0% across
-  sizes (and `snapshots/restore` is in the noise) — the privilege drop itself is
+  sizes (and `snapshots/restore/default` is +3.5%) — the privilege drop itself is
   essentially free, as the harness `GetStatic` row also shows.
 - **The per-call delta tracks payload size.** `24K_in_8K_out` (+34%) and
   `guest_functions_with_large_parameters` (+60% for ~100 MiB) are dominated by the
@@ -657,14 +680,18 @@ and the bare transition does not:
   large-parameter row only runs at all because the ring 0 dispatch stages the call
   **in place** from the input buffer (§3.8) — the ~100 MiB payload is never copied
   onto the runtime's small kernel heap, only onto the user heap it is destined for.
-- **`call_with_restore` (+3-11%) and `snapshots/create` (+16%)** carry the
+- **`call_with_restore` (+3-11%) and `snapshots/restore`** carry the
   copy-on-write re-fault of the user-stack and user-heap pages that ring 3
-  dirties; the restore cost scales with how much ring 3 actually ran (a fresh
-  `snapshots/restore` that never entered ring 3 is in the noise).
-- **Creation deltas** (`create_uninitialized` +4.6%, `create_initialized` +11%)
-  come from the larger user-accessible image, the extra GDT/MSR/boot self-test
-  setup, and the user-heap regions captured in the initial snapshot. The dedicated
-  harness above isolates the one-time startup component at ~1.5-2.2 ms.
+  dirties. The restore delta scales with how much ring 3 actually ran and with
+  sandbox size: `snapshots/restore` climbs from +3.5% at `default` to +11% at
+  `large`, where there are the most user pages to re-fault.
+- **Creation deltas** (`create_uninitialized/default` +9.8%, `snapshots/create`
+  +17%) come from the larger user-accessible image, the extra GDT/MSR/boot
+  self-test setup, and the user-heap regions captured in the initial snapshot.
+  At larger sandbox sizes the absolute startup cost is swamped by the time to
+  zero/copy the bigger guest memory (which both rings pay equally), so the *ring 3*
+  fraction shrinks and several large-size rows fall into copy-time noise. The
+  dedicated harness above isolates the one-time startup component at ~1.5-2.2 ms.
 
 Wiring the userspace guest build into `just guests`/CI and gating on the ring 3
 overhead remain open (see [Future work](#9-future-work)).

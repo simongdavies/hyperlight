@@ -204,28 +204,44 @@ fn sandbox_lifecycle_benchmark(c: &mut Criterion) {
         );
     }
 
-    // Ring 3 comparison (default size only; the size configs above are tuned for
-    // ring 0). Adds `/default/ring3` IDs alongside the ring 0 ones above.
+    // Ring 3 comparison at every size, so the suite reports the same
+    // `sandboxes/{op}/{size}` rows for ring 3 as for ring 0 (with a `/ring3`
+    // suffix). The ring 0 IDs and their saved baselines are unchanged.
     #[cfg(feature = "userspace")]
     {
         let m = GuestMode::Ring3;
-        let s = SandboxSize::Default;
-        group.bench_function(
-            format!("create_uninitialized/default{}", m.id_suffix()),
-            |b| bench_create_uninitialized(b, m, s),
-        );
-        group.bench_function(
-            format!("create_uninitialized_and_drop/default{}", m.id_suffix()),
-            |b| bench_create_uninitialized_and_drop(b, m, s),
-        );
-        group.bench_function(
-            format!("create_initialized/default{}", m.id_suffix()),
-            |b| bench_create_initialized(b, m, s),
-        );
-        group.bench_function(
-            format!("create_initialized_and_drop/default{}", m.id_suffix()),
-            |b| bench_create_initialized_and_drop(b, m, s),
-        );
+        for size in SandboxSize::all() {
+            group.bench_function(
+                format!("create_uninitialized/{}{}", size.name(), m.id_suffix()),
+                |b| bench_create_uninitialized(b, m, size),
+            );
+        }
+        for size in SandboxSize::all() {
+            group.bench_function(
+                format!(
+                    "create_uninitialized_and_drop/{}{}",
+                    size.name(),
+                    m.id_suffix()
+                ),
+                |b| bench_create_uninitialized_and_drop(b, m, size),
+            );
+        }
+        for size in SandboxSize::all() {
+            group.bench_function(
+                format!("create_initialized/{}{}", size.name(), m.id_suffix()),
+                |b| bench_create_initialized(b, m, size),
+            );
+        }
+        for size in SandboxSize::all() {
+            group.bench_function(
+                format!(
+                    "create_initialized_and_drop/{}{}",
+                    size.name(),
+                    m.id_suffix()
+                ),
+                |b| bench_create_initialized_and_drop(b, m, size),
+            );
+        }
     }
 
     group.finish();
@@ -466,18 +482,22 @@ fn snapshots_benchmark(c: &mut Criterion) {
         });
     }
 
-    // Ring 3 comparison (default size only). Adds `/default/ring3` IDs alongside
-    // the ring 0 ones above.
+    // Ring 3 comparison at every size, so the suite reports the same
+    // `snapshots/{op}/{size}` rows for ring 3 as for ring 0 (with a `/ring3`
+    // suffix). The ring 0 IDs and their saved baselines are unchanged.
     #[cfg(feature = "userspace")]
     {
         let m = GuestMode::Ring3;
-        let s = SandboxSize::Default;
-        group.bench_function(format!("create/default{}", m.id_suffix()), |b| {
-            bench_snapshot_create(b, m, s)
-        });
-        group.bench_function(format!("restore/default{}", m.id_suffix()), |b| {
-            bench_snapshot_restore(b, m, s)
-        });
+        for size in SandboxSize::all() {
+            group.bench_function(format!("create/{}{}", size.name(), m.id_suffix()), |b| {
+                bench_snapshot_create(b, m, size)
+            });
+        }
+        for size in SandboxSize::all() {
+            group.bench_function(format!("restore/{}{}", size.name(), m.id_suffix()), |b| {
+                bench_snapshot_restore(b, m, size)
+            });
+        }
     }
 
     group.finish();
