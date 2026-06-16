@@ -59,7 +59,14 @@ impl SandboxSize {
             Self::Medium => {
                 let mut cfg = SandboxConfiguration::default();
                 cfg.set_heap_size(MEDIUM_HEAP_SIZE);
+                // The ring 0 scratch tuning (0x50000) is below the userspace
+                // default scratch (the ring 3 user stack and its page tables are
+                // faulted in from scratch), so the userspace build uses a larger
+                // floor. The default (non-userspace) build keeps 0x50000.
+                #[cfg(not(feature = "userspace"))]
                 cfg.set_scratch_size(0x50000);
+                #[cfg(feature = "userspace")]
+                cfg.set_scratch_size(0x60000);
                 Some(cfg)
             }
             Self::Large => {
@@ -362,22 +369,29 @@ fn guest_calls_benchmark(c: &mut Criterion) {
         });
     }
 
-    // Ring 3 comparison (default size only). Adds `/default/ring3` IDs alongside
-    // the ring 0 ones above.
+    // Ring 3 comparison at every size, so the suite reports the same
+    // `guest_calls/{op}/{size}` rows for ring 3 as for ring 0 (with a `/ring3`
+    // suffix). The ring 0 IDs and their saved baselines are unchanged.
     #[cfg(feature = "userspace")]
     {
         let m = GuestMode::Ring3;
-        let s = SandboxSize::Default;
-        group.bench_function(format!("call/default{}", m.id_suffix()), |b| {
-            bench_guest_call(b, m, s)
-        });
-        group.bench_function(format!("call_with_restore/default{}", m.id_suffix()), |b| {
-            bench_guest_call_with_restore(b, m, s)
-        });
-        group.bench_function(
-            format!("call_with_host_function/default{}", m.id_suffix()),
-            |b| bench_guest_call_with_host_function(b, m, s),
-        );
+        for size in SandboxSize::all() {
+            group.bench_function(format!("call/{}{}", size.name(), m.id_suffix()), |b| {
+                bench_guest_call(b, m, size)
+            });
+        }
+        for size in SandboxSize::all() {
+            group.bench_function(
+                format!("call_with_restore/{}{}", size.name(), m.id_suffix()),
+                |b| bench_guest_call_with_restore(b, m, size),
+            );
+        }
+        for size in SandboxSize::all() {
+            group.bench_function(
+                format!("call_with_host_function/{}{}", size.name(), m.id_suffix()),
+                |b| bench_guest_call_with_host_function(b, m, size),
+            );
+        }
     }
 
     group.bench_function("different_thread".to_string(), |b| {

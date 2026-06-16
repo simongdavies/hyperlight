@@ -582,67 +582,89 @@ Interpretation:
 ### Results: Criterion suite (`just bench`)
 
 The same comparison is also produced by the main Criterion suite, so it is
-tracked by the same tooling as every other Hyperlight benchmark. Building it with
-`--features userspace` adds a `/ring3` variant alongside the default-size ring 0
-benchmark in the `sandboxes` (creation), `guest_calls`, and `snapshots` groups,
-the `sample_workloads` `24K_in_8K_out` I/O workload, and the
-`guest_functions_with_large_parameters` workload (~100 MiB of parameters); the
-ring 0 IDs and their saved baselines are unchanged, so the ring 3 rows are purely
-additive. (`different_thread` and `interrupt_latency` stay ring-0-only — they
-measure thread and interrupt mechanics, not the privilege boundary.)
+tracked by the same tooling (and the same day-over-day baselines) as every other
+Hyperlight benchmark. Building it with `--features userspace` adds a `/ring3`
+variant for each guest-executing benchmark — every `guest_calls/{op}/{size}` row,
+the `sandboxes` creation rows, the `snapshots` rows, the `sample_workloads`
+`24K_in_8K_out` I/O workload, and the `guest_functions_with_large_parameters`
+workload (~100 MiB of parameters). The ring 0 IDs and their saved baselines are
+unchanged, so the ring 3 rows are purely additive.
+
+Two benchmark groups are intentionally **not** given a ring 3 variant because no
+guest code runs in them, so the ring would make no difference:
+`function_call_serialization` (host-side flatbuffer encode/decode) and
+`shared_memory` (host-side buffer fill/copy). `guest_calls/different_thread` and
+`guest_calls/interrupt_latency` likewise stay ring-0-only — they measure thread
+and interrupt mechanics, not the privilege boundary.
 
 ```text
-# the microsecond-scale rows (sandboxes / guest_calls / snapshots / 24K_in_8K_out)
-cargo bench -p hyperlight-host --features userspace -- '/default' 24K_in_8K_out
+# the microsecond-scale rows (guest_calls / sandboxes / snapshots / 24K_in_8K_out)
+cargo bench -p hyperlight-host --features userspace -- 'guest_calls/' 'sandboxes/' 'snapshots/' 24K_in_8K_out
 # the ~100 MiB-payload workload (≈1 s per iteration), run separately
 cargo bench -p hyperlight-host --features userspace -- guest_functions_with_large_parameters
 ```
 
-Medians from one such run (KVM, release host + guests, on an otherwise idle
-developer box). The absolute figures move with the host; the same-run A/B
-**delta** is the figure of interest. The `guest_functions_with_large_parameters`
-row is from the same build but a separate run (its ~1-second iterations would
-otherwise dominate the wall-clock of the microsecond-scale rows):
+The tables below pair each ring 0 row with its `/ring3` sibling from the same run
+(KVM, release host + guests, idle developer box). **Δ% is the ring 3 overhead**
+— a positive number means ring 3 is that much slower than ring 0. (This is the
+opposite sign convention to a "speed-up" report, where an improvement is
+negative; here ring 3 is the more-secured, slower variant, so the interesting
+deltas are positive.) Microsecond-scale rows within a percent or two are within
+run-to-run noise.
 
-| Benchmark | ring 0 | ring 3 | delta |
-|-----------|-------:|-------:|------:|
-| `sandboxes/create_uninitialized` | 700 µs | 733 µs | **+33 µs (+4.6%)** |
-| `sandboxes/create_uninitialized_and_drop` | 745 µs | 772 µs | **+27 µs (+3.6%)** |
-| `sandboxes/create_initialized` | 8.54 ms | 9.49 ms | **+0.95 ms (+11%)** |
-| `sandboxes/create_initialized_and_drop` | 52.1 ms | 51.2 ms | within noise |
-| `guest_calls/call` (`Echo`) | 28.8 µs | 29.0 µs | within noise |
-| `guest_calls/call_with_restore` (`Echo` + restore) | 62.6 µs | 67.4 µs | **+4.8 µs (+7.6%)** |
-| `guest_calls/call_with_host_function` (`Add` → `HostAdd`) | 53.8 µs | 56.4 µs | **+2.6 µs (+4.8%)** |
-| `snapshots/create` | 553 µs | 644 µs | **+91 µs (+16%)** |
-| `snapshots/restore` (no prior call) | 27.0 µs | 28.4 µs | within noise |
-| `sample_workloads/24K_in_8K_out` (24 KiB in, 8 KiB out) | 50.5 µs | 67.6 µs | **+17.1 µs (+34%)** |
-| `guest_functions_with_large_parameters` (~100 MiB in) | 0.99 s | 1.58 s | **+0.59 s (+60%)** |
+**Guest calls** — the core per-call cost, at four sandbox sizes:
 
-This corroborates the harness numbers above and shows the per-call cost scaling
-with how much data crosses the boundary:
+| Benchmark | ring 0 | ring 3 | Δ% |
+|-----------|-------:|-------:|----:|
+| `guest_calls/call/default` | 27.34 µs | 28.09 µs | +2.7% |
+| `guest_calls/call/small` | 27.01 µs | 27.86 µs | +3.2% |
+| `guest_calls/call/medium` | 27.69 µs | 28.79 µs | +4.0% |
+| `guest_calls/call/large` | 28.82 µs | 27.77 µs | noise |
+| `guest_calls/call_with_restore/default` | 63.05 µs | 68.25 µs | +8.2% |
+| `guest_calls/call_with_restore/small` | 62.18 µs | 69.02 µs | +11.0% |
+| `guest_calls/call_with_restore/medium` | 81.61 µs | 84.08 µs | +3.0% |
+| `guest_calls/call_with_restore/large` | 210.08 µs | 215.99 µs | +2.8% |
+| `guest_calls/call_with_host_function/default` | 52.76 µs | 55.01 µs | +4.3% |
+| `guest_calls/call_with_host_function/small` | 51.31 µs | 54.78 µs | +6.8% |
+| `guest_calls/call_with_host_function/medium` | 51.94 µs | 55.37 µs | +6.6% |
+| `guest_calls/call_with_host_function/large` | 52.61 µs | 56.07 µs | +6.6% |
 
-- **The bare transition is within noise** (`guest_calls/call`,
-  `snapshots/restore`) — the privilege drop itself is essentially free, as the
-  harness `GetStatic` row also shows.
-- **The per-call delta tracks payload size.** `24K_in_8K_out` (+17 µs) and
-  `guest_functions_with_large_parameters` (+0.59 s for ~100 MiB) are dominated by
-  the cross-boundary marshalling copy: the encoded call is staged into the user
-  heap and the result copied back, so the ring 3 cost grows with the bytes moved.
-  The large-parameter row only runs at all because the ring 0 dispatch stages the
-  call **in place** from the input buffer (§3.8) — the ~100 MiB payload is never
-  copied onto the runtime's small kernel heap, only onto the user heap it is
-  destined for.
-- **`call_with_restore` (+7.6%) vs `snapshots/restore` (within noise).** Both
-  restore a snapshot, but `call_with_restore` makes an `Echo` call *first*, so it
-  dirties user-stack and user-heap pages that the restore must then re-fault;
-  `snapshots/restore` restores a freshly-created sandbox that never entered
-  ring 3, so almost no user pages are dirty. The ring 3 restore cost therefore
-  scales with how much ring 3 actually ran — exactly as the design predicts.
-- **Creation deltas** (`create_uninitialized` +4.6%, `create_initialized` +11%,
-  `snapshots/create` +16%) come from the larger user-accessible image, the extra
-  GDT/MSR/boot self-test setup, and the user-heap regions captured in the initial
-  snapshot. The dedicated harness above isolates the one-time startup component at
-  ~1.5-2.2 ms.
+**Sandbox creation, snapshots, and I/O workloads** (default size unless noted;
+the large-parameter row is from a separate run since its ~1-second iterations
+would otherwise dominate the wall-clock):
+
+| Benchmark | ring 0 | ring 3 | Δ% |
+|-----------|-------:|-------:|----:|
+| `sandboxes/create_uninitialized` | 700 µs | 733 µs | +4.6% |
+| `sandboxes/create_uninitialized_and_drop` | 745 µs | 772 µs | +3.6% |
+| `sandboxes/create_initialized` | 8.54 ms | 9.49 ms | +11% |
+| `sandboxes/create_initialized_and_drop` | 52.1 ms | 51.2 ms | noise |
+| `snapshots/create` | 553 µs | 644 µs | +16% |
+| `snapshots/restore` (no prior call) | 27.0 µs | 28.4 µs | noise |
+| `sample_workloads/24K_in_8K_out` (24 KiB in, 8 KiB out) | 50.5 µs | 67.6 µs | +34% |
+| `guest_functions_with_large_parameters` (~100 MiB in) | 0.99 s | 1.58 s | +60% |
+
+These confirm the per-call cost scales with how much data crosses the boundary,
+and the bare transition does not:
+
+- **The bare transition is within noise.** `guest_calls/call` is +2.7-4.0% across
+  sizes (and `snapshots/restore` is in the noise) — the privilege drop itself is
+  essentially free, as the harness `GetStatic` row also shows.
+- **The per-call delta tracks payload size.** `24K_in_8K_out` (+34%) and
+  `guest_functions_with_large_parameters` (+60% for ~100 MiB) are dominated by the
+  cross-boundary marshalling copy: the encoded call is staged into the user heap
+  and the result copied back, so the ring 3 cost grows with the bytes moved. The
+  large-parameter row only runs at all because the ring 0 dispatch stages the call
+  **in place** from the input buffer (§3.8) — the ~100 MiB payload is never copied
+  onto the runtime's small kernel heap, only onto the user heap it is destined for.
+- **`call_with_restore` (+3-11%) and `snapshots/create` (+16%)** carry the
+  copy-on-write re-fault of the user-stack and user-heap pages that ring 3
+  dirties; the restore cost scales with how much ring 3 actually ran (a fresh
+  `snapshots/restore` that never entered ring 3 is in the noise).
+- **Creation deltas** (`create_uninitialized` +4.6%, `create_initialized` +11%)
+  come from the larger user-accessible image, the extra GDT/MSR/boot self-test
+  setup, and the user-heap regions captured in the initial snapshot. The dedicated
+  harness above isolates the one-time startup component at ~1.5-2.2 ms.
 
 Wiring the userspace guest build into `just guests`/CI and gating on the ring 3
 overhead remain open (see [Future work](#9-future-work)).
