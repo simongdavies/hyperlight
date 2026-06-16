@@ -461,6 +461,9 @@ hyperlight_host.dll
 vgcore.*
 hyperlight_guest.h
 
+# Output of the userspace benchmark runner (dev/run-userspace-benchmarks.sh)
+/bench-results/
+
 # packer artifacts
 .pem
 
