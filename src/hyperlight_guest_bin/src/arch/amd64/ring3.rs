@@ -763,6 +763,11 @@ pub(crate) unsafe fn run_registered_guest_fn(f: GuestFunc, encoded_call: &[u8]) 
             !input_buf.is_null() && !desc_buf.is_null(),
             "user heap exhausted while marshalling a guest call into ring 3"
         );
+        // Copy the encoded call into the user buffer. When `encoded_call`
+        // borrows the supervisor input buffer (the in-place dispatch path), this
+        // copy is its *last* read: nothing below touches `encoded_call` again, so
+        // a nested host call during `enter_user` may reborrow the input buffer
+        // without aliasing it. See `GuestHandle::with_popped_input_raw`.
         core::ptr::copy_nonoverlapping(encoded_call.as_ptr(), input_buf, encoded_call.len());
         desc_buf.write(GuestCallDescriptor {
             fn_ptr: f as usize as u64,

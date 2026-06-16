@@ -88,17 +88,29 @@ impl GuestHandle {
         type_t
     }
 
-    /// Pops the top element from the shared input data buffer and returns its
-    /// raw bytes, without decoding them.
+    /// Runs `f` over the raw bytes of the top element of the shared input data
+    /// buffer **in place**, then pops the element (advances the stack pointer
+    /// and zeroes the consumed bytes).
     ///
     /// This is used by the `userspace` feature to forward a guest-function call
-    /// into ring 3 without re-encoding it: the runtime decodes a copy in ring 0
-    /// for the security checks, but the bytes handed to ring 3 are the original
-    /// ones. The element's exact length is recovered from the stack
-    /// back-pointer (the data occupies `[element .. top - 8]`), so the returned
-    /// vector contains no trailing padding.
+    /// into ring 3 without copying the (potentially very large) encoded call
+    /// onto the runtime's kernel heap: `f` reads the element directly from the
+    /// supervisor input buffer — typically decoding the call *header* for the
+    /// security checks and staging the bytes into a user-accessible buffer — and
+    /// its result is returned. The element's exact length is recovered from the
+    /// stack back-pointer (the data occupies `[element .. top - 8]`), so `f`
+    /// sees no trailing padding.
+    ///
+    /// The element is popped and zeroed only **after** `f` returns. `f` must
+    /// therefore finish reading the element bytes (e.g. copying them into a user
+    /// buffer) before it drives any ring 3 execution: a guest function may make a
+    /// nested host call, whose ring 0 worker pushes the host response onto this
+    /// same input buffer (above the still-resident call element, leaving the
+    /// stack balanced on return) and reborrows it via a fresh raw pointer. The
+    /// call element stays valid throughout, and because `f` does not read it
+    /// again after that point there is no aliasing hazard.
     #[cfg(feature = "userspace")]
-    pub fn try_pop_shared_input_data_raw(&self) -> Result<alloc::vec::Vec<u8>> {
+    pub fn with_popped_input_raw<R>(&self, f: impl FnOnce(&[u8]) -> R) -> Result<R> {
         let peb_ptr = self.peb().unwrap();
         let input_stack_size = unsafe { (*peb_ptr).input_stack.size as usize };
         let input_stack_ptr = unsafe { (*peb_ptr).input_stack.ptr as *mut u8 };
@@ -108,7 +120,7 @@ impl GuestHandle {
         if idb.is_empty() {
             return Err(HyperlightGuestError::new(
                 ErrorCode::GuestError,
-                "Got a 0-size buffer in pop_shared_input_data_raw".to_string(),
+                "Got a 0-size buffer in with_popped_input_raw".to_string(),
             ));
         }
 
@@ -119,7 +131,7 @@ impl GuestHandle {
             return Err(HyperlightGuestError::new(
                 ErrorCode::GuestError,
                 format!(
-                    "Invalid stack pointer: {} in pop_shared_input_data_raw",
+                    "Invalid stack pointer: {} in with_popped_input_raw",
                     stack_ptr_rel
                 ),
             ));
@@ -128,7 +140,7 @@ impl GuestHandle {
         let last_element_offset_rel = u64::from_le_bytes(
             idb[stack_ptr_rel as usize - 8..stack_ptr_rel as usize]
                 .try_into()
-                .expect("Invalid stack pointer in pop_shared_input_data_raw"),
+                .expect("Invalid stack pointer in with_popped_input_raw"),
         );
 
         // The element data is everything between its start and the 8-byte
@@ -136,10 +148,13 @@ impl GuestHandle {
         if last_element_offset_rel >= stack_ptr_rel - 8 {
             return Err(HyperlightGuestError::new(
                 ErrorCode::GuestError,
-                "Invalid element offset in pop_shared_input_data_raw".to_string(),
+                "Invalid element offset in with_popped_input_raw".to_string(),
             ));
         }
-        let data = idb[last_element_offset_rel as usize..stack_ptr_rel as usize - 8].to_vec();
+
+        // Run `f` over the element bytes in place — no kernel-heap copy of the
+        // (possibly very large) encoded call.
+        let result = f(&idb[last_element_offset_rel as usize..stack_ptr_rel as usize - 8]);
 
         // update the stack pointer to point to the element we just popped off
         idb[..8].copy_from_slice(&last_element_offset_rel.to_le_bytes());
@@ -147,7 +162,20 @@ impl GuestHandle {
         // zero out popped off buffer
         idb[last_element_offset_rel as usize..stack_ptr_rel as usize].fill(0);
 
-        Ok(data)
+        Ok(result)
+    }
+
+    /// Pops the top element from the shared input data buffer and returns its
+    /// raw bytes as an owned `Vec`, without decoding them.
+    ///
+    /// This is the owning convenience wrapper over [`with_popped_input_raw`],
+    /// used where the popped bytes must outlive the input buffer — notably the
+    /// (small) host-function return value behind a ring 3 host call. For the
+    /// large guest-call input, prefer [`with_popped_input_raw`], which avoids
+    /// copying the encoded call onto the kernel heap.
+    #[cfg(feature = "userspace")]
+    pub fn try_pop_shared_input_data_raw(&self) -> Result<alloc::vec::Vec<u8>> {
+        self.with_popped_input_raw(|raw| raw.to_vec())
     }
 
     /// Pushes the given data onto the shared output data buffer.

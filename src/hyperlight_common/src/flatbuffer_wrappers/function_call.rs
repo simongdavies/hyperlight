@@ -22,6 +22,8 @@ use flatbuffers::{FlatBufferBuilder, WIPOffset, size_prefixed_root};
 #[cfg(feature = "tracing")]
 use tracing::{Span, instrument};
 
+#[cfg(feature = "userspace")]
+use super::function_types::ParameterType;
 use super::function_types::{ParameterValue, ReturnType};
 use crate::flatbuffers::hyperlight::generated::{
     FunctionCall as FbFunctionCall, FunctionCallArgs as FbFunctionCallArgs,
@@ -268,6 +270,80 @@ impl TryFrom<&[u8]> for FunctionCall {
             parameters,
             function_call_type,
             expected_return_type,
+        })
+    }
+}
+
+/// The header of a [`FunctionCall`]: everything needed to *validate* a call (its
+/// type, name, and parameter *types*) without decoding the parameter *values*.
+///
+/// The `userspace` ring 0 dispatch path verifies a guest-function call against
+/// the supervisor function registry and then forwards the original encoded bytes
+/// into ring 3, where the values are decoded on the user heap. Decoding the
+/// values in ring 0 as well would copy every parameter — including large
+/// `Vec<u8>` payloads — onto the kernel heap only to discard them. Decoding just
+/// this header avoids that: the whole buffer is still structurally verified here
+/// (by the flatbuffer verifier in [`size_prefixed_root`]); only the value
+/// *materialisation* is deferred to ring 3.
+#[cfg(feature = "userspace")]
+#[derive(Clone)]
+pub struct FunctionCallHeader {
+    /// The function name.
+    pub function_name: String,
+    /// The parameter *types* (not values), in order.
+    pub parameter_types: Vec<ParameterType>,
+    function_call_type: FunctionCallType,
+}
+
+#[cfg(feature = "userspace")]
+impl FunctionCallHeader {
+    /// The type of the function call.
+    pub fn function_call_type(&self) -> FunctionCallType {
+        self.function_call_type.clone()
+    }
+
+    /// Decode only the header (call type, function name, parameter types) from an
+    /// encoded [`FunctionCall`], without copying any parameter values.
+    pub fn decode(value: &[u8]) -> Result<Self> {
+        let fb = size_prefixed_root::<FbFunctionCall>(value)
+            .map_err(|e| anyhow::anyhow!("Error reading function call buffer: {:?}", e))?;
+        let function_call_type = match fb.function_call_type() {
+            FbFunctionCallType::guest => FunctionCallType::Guest,
+            FbFunctionCallType::host => FunctionCallType::Host,
+            other => bail!("Invalid function call type: {:?}", other),
+        };
+        let function_name = fb.function_name().to_string();
+        let parameter_types = match fb.parameters() {
+            Some(params) => {
+                let mut types = Vec::with_capacity(params.len());
+                for p in params.iter() {
+                    // Map the parameter's union tag straight to its type. This is
+                    // identical to `ParameterType::from(&ParameterValue)`, but
+                    // reads only the tag instead of materialising the value.
+                    let ty = match p.value_type() {
+                        FbParameterValue::hlint => ParameterType::Int,
+                        FbParameterValue::hluint => ParameterType::UInt,
+                        FbParameterValue::hllong => ParameterType::Long,
+                        FbParameterValue::hlulong => ParameterType::ULong,
+                        FbParameterValue::hlfloat => ParameterType::Float,
+                        FbParameterValue::hldouble => ParameterType::Double,
+                        FbParameterValue::hlbool => ParameterType::Bool,
+                        FbParameterValue::hlstring => ParameterType::String,
+                        FbParameterValue::hlvecbytes => ParameterType::VecBytes,
+                        other => {
+                            bail!("Unexpected flatbuffer parameter value type: {:?}", other)
+                        }
+                    };
+                    types.push(ty);
+                }
+                types
+            }
+            None => Vec::new(),
+        };
+        Ok(Self {
+            function_name,
+            parameter_types,
+            function_call_type,
         })
     }
 }
