@@ -478,7 +478,7 @@ fn guest_call_benchmark_large_param(c: &mut Criterion) {
     #[cfg(target_os = "windows")]
     group.sample_size(10); // This benchmark is very slow on Windows, so we reduce the sample size to avoid long test runs.
 
-    group.bench_function("guest_call_with_large_parameters", |b| {
+    fn bench_large_param(b: &mut criterion::Bencher, guest_path: String) {
         const SIZE: usize = 50 * 1024 * 1024; // 50 MB
         let large_vec = vec![0u8; SIZE];
         let large_string = String::from_utf8(large_vec.clone()).unwrap();
@@ -487,12 +487,23 @@ fn guest_call_benchmark_large_param(c: &mut Criterion) {
         config.set_input_data_size(2 * SIZE + (1024 * 1024)); // 2 * SIZE + 1 MB, to allow 1MB for the rest of the serialized function call
         config.set_heap_size(SIZE as u64 * 15);
         config.set_scratch_size(6 * SIZE + 4 * (1024 * 1024)); // Big enough for the IO data regions and enough of the heap to be used
+        // Under a userspace host the configured heap is split into a kernel slice
+        // and the ring 3 user heap. Size both so the ~100 MiB of parameters fit
+        // either way: the ring 0 (non-userspace) guest decodes them on the kernel
+        // slice, while the ring 3 guest stages the encoded call in place from the
+        // input buffer into the user heap (no kernel-heap copy — see
+        // docs/userspace-ring3.md §3.8) and decodes the values there (input 128 +
+        // vec 64 + str 64 MiB of buddy blocks). The default (non-userspace) build
+        // keeps the original single-heap configuration unchanged.
+        #[cfg(feature = "userspace")]
+        {
+            config.set_heap_size(SIZE as u64 * 18); // ~900 MiB total
+            config.set_kernel_heap_size(SIZE as u64 * 8); // ~400 MiB kernel slice
+            config.set_scratch_size(8 * SIZE + 4 * (1024 * 1024));
+        }
 
-        let sandbox = UninitializedSandbox::new(
-            GuestBinary::FilePath(simple_guest_as_string().unwrap()),
-            Some(config),
-        )
-        .unwrap();
+        let sandbox =
+            UninitializedSandbox::new(GuestBinary::FilePath(guest_path), Some(config)).unwrap();
         let mut sandbox = sandbox.evolve().unwrap();
 
         b.iter_with_setup(
@@ -503,6 +514,20 @@ fn guest_call_benchmark_large_param(c: &mut Criterion) {
                     .unwrap()
             },
         );
+    }
+
+    group.bench_function("guest_call_with_large_parameters", |b| {
+        bench_large_param(b, simple_guest_as_string().unwrap())
+    });
+
+    // Ring 3 comparison: ~100 MiB of parameters marshalled across the privilege
+    // boundary — the heaviest marshalling workload in the suite. The encoded call
+    // is staged in place from the supervisor input buffer into the user heap
+    // (the ring 0 dispatch never copies it onto the kernel heap), then decoded in
+    // ring 3.
+    #[cfg(feature = "userspace")]
+    group.bench_function("guest_call_with_large_parameters/ring3", |b| {
+        bench_large_param(b, simple_guest_userspace_as_string().unwrap())
     });
 
     group.finish();
@@ -570,6 +595,16 @@ fn sample_workloads_benchmark(c: &mut Criterion) {
     fn bench_24k_in_8k_out(b: &mut criterion::Bencher, guest_path: String) {
         let mut cfg = SandboxConfiguration::default();
         cfg.set_input_data_size(25 * 1024);
+        // Under a userspace host the configured heap is split into a kernel slice
+        // and the ring 3 user heap, and a ring 0 (non-userspace) guest sees only
+        // the kernel slice. Size both so the 24 KiB payload fits either way, so
+        // the ring 3 row measures the ring transition rather than heap pressure.
+        // The default (non-userspace) build keeps the default heap unchanged.
+        #[cfg(feature = "userspace")]
+        {
+            cfg.set_heap_size(256 * 1024);
+            cfg.set_kernel_heap_size(128 * 1024);
+        }
 
         let mut sandbox = UninitializedSandbox::new(GuestBinary::FilePath(guest_path), Some(cfg))
             .unwrap()
@@ -592,6 +627,15 @@ fn sample_workloads_benchmark(c: &mut Criterion) {
 
     group.bench_function("24K_in_8K_out_rust", |b| {
         bench_24k_in_8k_out(b, simple_guest_as_string().unwrap());
+    });
+
+    // Ring 3 comparison of the same real-world-ish I/O workload. With the ring 0
+    // dispatch decoding only the call header (not the 24 KiB value), the ring 3
+    // user heap only has to hold the actual payload, so this measures the ring
+    // transition + cross-boundary marshalling rather than heap pressure.
+    #[cfg(feature = "userspace")]
+    group.bench_function("24K_in_8K_out_rust/ring3", |b| {
+        bench_24k_in_8k_out(b, simple_guest_userspace_as_string().unwrap());
     });
 
     group.finish();
