@@ -375,13 +375,24 @@ able to read; a blanket sweep would fault ring 3's own allocator. It closes the
 With the feature enabled, the guest-function dispatch path runs the user function
 *body* in ring 3. The function *lookup* and parameter *verification* stay in
 ring 0, because they read the supervisor-only function registry; only the body
-runs in ring 3. Three things cross the privilege boundary, all because ring 3
-cannot touch supervisor memory or execute privileged instructions:
+runs in ring 3. Crucially, ring 0 verification decodes only the call **header**
+(the function name and the parameter *types*) from the encoded buffer — not the
+parameter *values*. The whole buffer is still structurally validated, but the
+values are materialised only once, in ring 3, on the user heap. This keeps a
+large parameter (say a multi-kilobyte `Vec<u8>`) from being copied onto the
+runtime's small kernel heap just to be type-checked and discarded. Three things
+cross the privilege boundary, all because ring 3 cannot touch supervisor memory
+or execute privileged instructions:
 
 1. **Input marshalling.** The `FunctionCall` arrives in the supervisor input
-   buffer. Its already-encoded bytes are copied verbatim into a user-accessible
-   buffer before entering ring 3, where the body deserialises its arguments from
-   the user copy. (Forwarding the raw bytes avoids re-encoding the call.)
+   buffer. Its already-encoded bytes are copied **straight from the input buffer
+   into a user-accessible buffer** — in place, without an intermediate copy onto
+   the runtime's kernel heap — before entering ring 3, where the body
+   deserialises its arguments from the user copy. (Forwarding the raw bytes
+   avoids re-encoding the call; the header-only verification above avoids
+   decoding the values in ring 0 at all; and staging in place means even a very
+   large parameter is never copied onto the small kernel heap — only onto the
+   user heap it is destined for.)
 2. **Output marshalling.** The body returns a `Vec<u8>` in the user heap; after
    `SYS_RETURN` the ring 0 side copies it into the supervisor output buffer.
 3. **Privileged services.** Everything a guest function does that reaches the
@@ -519,11 +530,11 @@ cargo test -p hyperlight-host --features userspace --test userspace_bench \
     -- --ignored --nocapture
 ```
 
-### Results (KVM, release host + release guests)
+### Results: dedicated A/B harness (`userspace_bench`)
 
-Representative medians over repeated runs on a developer machine. The absolute
-figures are dominated by VM entry/exit and move with the host, so the **delta**
-is the figure of interest.
+KVM, release host + release guests. Representative medians over repeated runs on
+a developer machine. The absolute figures are dominated by VM entry/exit and move
+with the host, so the **delta** is the figure of interest.
 
 | Workload | ring 0 | ring 3 delta | what it isolates |
 |----------|-------:|-------------:|------------------|
@@ -568,20 +579,73 @@ Interpretation:
   without it: the supervisor `.kdata` page is re-protected once at boot (captured
   in the snapshot baseline) and is never written on the hot path.
 
-A Criterion-based `GuestMode { Ring0, Ring3 }` axis is also wired into the main
-[`benchmarks.rs`](../src/hyperlight_host/benches/benchmarks.rs) suite, so the
-ring 0 vs ring 3 comparison runs under `just bench` too. Building it with
+### Results: Criterion suite (`just bench`)
+
+The same comparison is also produced by the main Criterion suite, so it is
+tracked by the same tooling as every other Hyperlight benchmark. Building it with
 `--features userspace` adds a `/ring3` variant alongside the default-size ring 0
-benchmark in the `sandboxes` (creation — the one-time startup cost), `guest_calls`
-(call, call-with-restore, call-with-host-function), and `snapshots`
-(create, restore) groups. The ring 0 benchmark IDs and their saved baselines are
-unchanged, so the ring 3 rows are purely additive. The `sample_workloads`
-`24K_in_8K_out` benchmark is deliberately left ring-0-only: it runs on an
-intentionally tight hand-tuned heap that does not translate cleanly to the ring 3
-split heap (§3.9), so a like-for-like ring 3 row there would measure heap pressure
-rather than the ring transition. Wiring the userspace guest build into
-`just guests`/CI and gating on the ring 3 overhead remain open (see
-[Future work](#9-future-work)).
+benchmark in the `sandboxes` (creation), `guest_calls`, and `snapshots` groups,
+the `sample_workloads` `24K_in_8K_out` I/O workload, and the
+`guest_functions_with_large_parameters` workload (~100 MiB of parameters); the
+ring 0 IDs and their saved baselines are unchanged, so the ring 3 rows are purely
+additive. (`different_thread` and `interrupt_latency` stay ring-0-only — they
+measure thread and interrupt mechanics, not the privilege boundary.)
+
+```text
+# the microsecond-scale rows (sandboxes / guest_calls / snapshots / 24K_in_8K_out)
+cargo bench -p hyperlight-host --features userspace -- '/default' 24K_in_8K_out
+# the ~100 MiB-payload workload (≈1 s per iteration), run separately
+cargo bench -p hyperlight-host --features userspace -- guest_functions_with_large_parameters
+```
+
+Medians from one such run (KVM, release host + guests, on an otherwise idle
+developer box). The absolute figures move with the host; the same-run A/B
+**delta** is the figure of interest. The `guest_functions_with_large_parameters`
+row is from the same build but a separate run (its ~1-second iterations would
+otherwise dominate the wall-clock of the microsecond-scale rows):
+
+| Benchmark | ring 0 | ring 3 | delta |
+|-----------|-------:|-------:|------:|
+| `sandboxes/create_uninitialized` | 700 µs | 733 µs | **+33 µs (+4.6%)** |
+| `sandboxes/create_uninitialized_and_drop` | 745 µs | 772 µs | **+27 µs (+3.6%)** |
+| `sandboxes/create_initialized` | 8.54 ms | 9.49 ms | **+0.95 ms (+11%)** |
+| `sandboxes/create_initialized_and_drop` | 52.1 ms | 51.2 ms | within noise |
+| `guest_calls/call` (`Echo`) | 28.8 µs | 29.0 µs | within noise |
+| `guest_calls/call_with_restore` (`Echo` + restore) | 62.6 µs | 67.4 µs | **+4.8 µs (+7.6%)** |
+| `guest_calls/call_with_host_function` (`Add` → `HostAdd`) | 53.8 µs | 56.4 µs | **+2.6 µs (+4.8%)** |
+| `snapshots/create` | 553 µs | 644 µs | **+91 µs (+16%)** |
+| `snapshots/restore` (no prior call) | 27.0 µs | 28.4 µs | within noise |
+| `sample_workloads/24K_in_8K_out` (24 KiB in, 8 KiB out) | 50.5 µs | 67.6 µs | **+17.1 µs (+34%)** |
+| `guest_functions_with_large_parameters` (~100 MiB in) | 0.99 s | 1.58 s | **+0.59 s (+60%)** |
+
+This corroborates the harness numbers above and shows the per-call cost scaling
+with how much data crosses the boundary:
+
+- **The bare transition is within noise** (`guest_calls/call`,
+  `snapshots/restore`) — the privilege drop itself is essentially free, as the
+  harness `GetStatic` row also shows.
+- **The per-call delta tracks payload size.** `24K_in_8K_out` (+17 µs) and
+  `guest_functions_with_large_parameters` (+0.59 s for ~100 MiB) are dominated by
+  the cross-boundary marshalling copy: the encoded call is staged into the user
+  heap and the result copied back, so the ring 3 cost grows with the bytes moved.
+  The large-parameter row only runs at all because the ring 0 dispatch stages the
+  call **in place** from the input buffer (§3.8) — the ~100 MiB payload is never
+  copied onto the runtime's small kernel heap, only onto the user heap it is
+  destined for.
+- **`call_with_restore` (+7.6%) vs `snapshots/restore` (within noise).** Both
+  restore a snapshot, but `call_with_restore` makes an `Echo` call *first*, so it
+  dirties user-stack and user-heap pages that the restore must then re-fault;
+  `snapshots/restore` restores a freshly-created sandbox that never entered
+  ring 3, so almost no user pages are dirty. The ring 3 restore cost therefore
+  scales with how much ring 3 actually ran — exactly as the design predicts.
+- **Creation deltas** (`create_uninitialized` +4.6%, `create_initialized` +11%,
+  `snapshots/create` +16%) come from the larger user-accessible image, the extra
+  GDT/MSR/boot self-test setup, and the user-heap regions captured in the initial
+  snapshot. The dedicated harness above isolates the one-time startup component at
+  ~1.5-2.2 ms.
+
+Wiring the userspace guest build into `just guests`/CI and gating on the ring 3
+overhead remain open (see [Future work](#9-future-work)).
 
 
 
@@ -631,6 +695,14 @@ make the data partition *complete* rather than *escalation-safe*:
 
 ### 9.3 Other
 
+- **Single-buffer marshalling copy.** The ring 3 input marshalling stages the
+  encoded call into a single contiguous user-heap buffer (§3.8). This is no
+  longer a *correctness* limit — the buffer comes from the user heap, which
+  scales with the configured heap, and staging in place avoids any kernel-heap
+  copy — but for a very large parameter it still means one large (power-of-two
+  rounded) allocation and one full copy per call. Chunked or streamed marshalling
+  would reduce the peak footprint and the copy cost for multi-hundred-megabyte
+  payloads; it is not required for correctness.
 - **Benchmark CI integration.** The `GuestMode { Ring0, Ring3 }` axis is wired
   into the Criterion suite (§7) — including sandbox creation, so the one-time
   startup cost is captured — but the userspace guest build is not yet wired into
