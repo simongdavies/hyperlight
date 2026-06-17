@@ -617,8 +617,8 @@ These are measured on **real hardware**, one section per hypervisor (produced by
 [`dev/run-userspace-benchmarks.sh`](../dev/run-userspace-benchmarks.sh)). The
 absolute figures move with the machine and hypervisor — mshv/KVM/WHP VM-exit
 costs, the CPU, and the vCPU count all differ — so the portable figure is the
-**Δ%**. (Machine 1 of 3 below; the Ubuntu/KVM and Windows/WHP runs are added as
-they complete.)
+**Δ%**. (Machines 1 and 2 of 3 below — mshv and Ubuntu/KVM; the Windows/WHP run
+is added when it completes.)
 
 #### Machine 1 — mshv · Azure `Standard_D2s_v5` · Intel Xeon Platinum 8370C · 2 vCPU
 
@@ -716,6 +716,82 @@ and the bare transition does not:
   the absolute startup cost is swamped by the time to zero/copy the bigger guest
   memory (which both rings pay equally), so the *ring 3* fraction shrinks and the
   large-size rows fall into copy-time noise.
+
+#### Machine 2 — kvm · Azure · Ubuntu 20.04 · Intel Xeon Platinum 8370C · 8 vCPU
+
+Release host + guests on `feature/userspace-ring3`, rustc 1.89, idle box. Same
+CPU as the mshv box but 8 vCPU and a cheaper KVM VM-exit path, so the absolute
+figures are roughly 3× lower — the per-call `call` rows (~17-20 µs) are so fast
+that ring 0 and ring 3 are indistinguishable, and a couple even measure ring 3
+marginally *faster* (pure variance, labelled `noise`).
+
+**Guest calls** — the core per-call cost, at four sandbox sizes:
+
+| Benchmark | ring 0 | ring 3 | Δ% |
+|-----------|-------:|-------:|----:|
+| `guest_calls/call/default` | 20.28 µs | 18.92 µs | noise |
+| `guest_calls/call/small` | 19.12 µs | 18.93 µs | noise |
+| `guest_calls/call/medium` | 17.37 µs | 18.93 µs | +9.0% |
+| `guest_calls/call/large` | 16.26 µs | 18.12 µs | +11.5% |
+| `guest_calls/call_with_restore/default` | 38.14 µs | 42.55 µs | +11.6% |
+| `guest_calls/call_with_restore/small` | 39.01 µs | 42.70 µs | +9.4% |
+| `guest_calls/call_with_restore/medium` | 42.32 µs | 47.06 µs | +11.2% |
+| `guest_calls/call_with_restore/large` | 97.31 µs | 104.0 µs | +6.9% |
+| `guest_calls/call_with_host_function/default` | 30.09 µs | 33.92 µs | +12.7% |
+| `guest_calls/call_with_host_function/small` | 30.41 µs | 35.03 µs | +15.2% |
+| `guest_calls/call_with_host_function/medium` | 31.65 µs | 35.06 µs | +10.8% |
+| `guest_calls/call_with_host_function/large` | 31.24 µs | 34.71 µs | +11.1% |
+
+**Sandbox creation** — create-only and `_and_drop` (create + teardown), four sizes:
+
+| Benchmark | ring 0 | ring 3 | Δ% |
+|-----------|-------:|-------:|----:|
+| `sandboxes/create_uninitialized/default` | 381.8 µs | 420.6 µs | +10.2% |
+| `sandboxes/create_uninitialized/small` | 3.613 ms | 3.615 ms | noise |
+| `sandboxes/create_uninitialized/medium` | 21.13 ms | 20.90 ms | noise |
+| `sandboxes/create_uninitialized/large` | 78.76 ms | 78.85 ms | noise |
+| `sandboxes/create_uninitialized_and_drop/default` | 405.9 µs | 430.3 µs | +6.0% |
+| `sandboxes/create_uninitialized_and_drop/small` | 3.799 ms | 3.650 ms | noise |
+| `sandboxes/create_uninitialized_and_drop/medium` | 21.25 ms | 21.68 ms | +2.0% |
+| `sandboxes/create_uninitialized_and_drop/large` | 83.29 ms | 82.44 ms | noise |
+| `sandboxes/create_initialized/default` | 1.524 ms | 1.716 ms | +12.6% |
+| `sandboxes/create_initialized/small` | 4.909 ms | 5.058 ms | +3.0% |
+| `sandboxes/create_initialized/medium` | 23.69 ms | 23.46 ms | noise |
+| `sandboxes/create_initialized/large` | 82.72 ms | 84.25 ms | +1.8% |
+| `sandboxes/create_initialized_and_drop/default` | 2.061 ms | 2.236 ms | +8.5% |
+| `sandboxes/create_initialized_and_drop/small` | 5.389 ms | 5.789 ms | +7.4% |
+| `sandboxes/create_initialized_and_drop/medium` | 23.08 ms | 24.03 ms | +4.1% |
+| `sandboxes/create_initialized_and_drop/large` | 83.75 ms | 85.14 ms | +1.7% |
+
+**Snapshots** — create and restore, at four sizes:
+
+| Benchmark | ring 0 | ring 3 | Δ% |
+|-----------|-------:|-------:|----:|
+| `snapshots/create/default` | 282.5 µs | 301.5 µs | +6.7% |
+| `snapshots/create/small` | 4.015 ms | 4.016 ms | noise |
+| `snapshots/create/medium` | 49.64 ms | 48.16 ms | noise |
+| `snapshots/create/large` | 188.5 ms | 185.0 ms | noise |
+| `snapshots/restore/default` | 14.37 µs | 14.62 µs | +1.7% |
+| `snapshots/restore/small` | 14.94 µs | 15.17 µs | +1.5% |
+| `snapshots/restore/medium` | 18.50 µs | 18.86 µs | +2.0% |
+| `snapshots/restore/large` | 80.88 µs | 82.85 µs | +2.4% |
+
+**I/O workloads** (the large-parameter row is from a separate run):
+
+| Benchmark | ring 0 | ring 3 | Δ% |
+|-----------|-------:|-------:|----:|
+| `sample_workloads/24K_in_8K_out` (24 KiB in, 8 KiB out; rust guest) | 29.78 µs | 32.09 µs | +7.8% |
+| `guest_functions_with_large_parameters` (~100 MiB in) | 467.2 ms | 751.1 ms | +60.8% |
+
+The KVM numbers match mshv on the fundamentals: the bare transition is at the
+noise floor (the per-call `call` rows are so fast here that ring 0 and ring 3 are
+indistinguishable), the marshalling-bound rows scale with payload (`24K` +7.8%,
+large-parameters +60.8%), and the host-call, restore, and creation overheads are
+a steady single-to-low-double-digit percentage (`call_with_host_function`
++11-15%, `call_with_restore` +7-12%, `snapshots/restore` a very consistent
++1.5-2.4%, `create_*/default` +6-13%). The larger millisecond-scale
+create/snapshot rows are dominated by guest-memory zeroing that both rings pay
+equally, so they fall into the noise.
 
 Wiring the userspace guest build into `just guests`/CI and gating on the ring 3
 overhead remain open (see [Future work](#9-future-work)).
