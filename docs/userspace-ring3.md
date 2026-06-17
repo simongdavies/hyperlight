@@ -599,99 +599,123 @@ and interrupt mechanics, not the privilege boundary.
 
 ```text
 # the microsecond-scale rows (guest_calls / sandboxes / snapshots / 24K_in_8K_out)
-cargo bench -p hyperlight-host --features userspace -- 'guest_calls/' 'sandboxes/' 'snapshots/' 24K_in_8K_out
-# the ~100 MiB-payload workload (≈1 s per iteration), run separately
+cargo bench -p hyperlight-host --features userspace -- 'guest_calls/|sandboxes/|snapshots/|sample_workloads/24K'
+# the ~100 MiB-payload workload (hundreds of ms to ~1 s per iteration), run separately
 cargo bench -p hyperlight-host --features userspace -- guest_functions_with_large_parameters
 ```
 
-The tables below pair each ring 0 row with its `/ring3` sibling from the same run
-(KVM, release host + guests, idle developer box). **Δ% is the ring 3 overhead**
-— a positive number means ring 3 is that much slower than ring 0. (This is the
-opposite sign convention to a "speed-up" report, where an improvement is
-negative; here ring 3 is the more-secured, slower variant, so the interesting
-deltas are positive.) Microsecond-scale rows within a percent or two are within
-run-to-run noise.
+The tables below pair each ring 0 row with its `/ring3` sibling from the same
+run. **Δ% is the ring 3 overhead** — a positive number means ring 3 is that much
+slower than ring 0. (This is the opposite sign convention to a "speed-up" report,
+where an improvement is negative; here ring 3 is the more-secured, slower
+variant, so the interesting deltas are positive.) A row where ring 3 measured
+*faster* than ring 0 is an impossible "negative overhead" — pure run-to-run
+variance — and is labelled `noise`; the larger millisecond-scale rows, dominated
+by guest-memory zeroing that both rings pay equally, are the noisiest.
+
+These are measured on **real hardware**, one section per hypervisor (produced by
+[`dev/run-userspace-benchmarks.sh`](../dev/run-userspace-benchmarks.sh)). The
+absolute figures move with the machine and hypervisor — mshv/KVM/WHP VM-exit
+costs, the CPU, and the vCPU count all differ — so the portable figure is the
+**Δ%**. (Machine 1 of 3 below; the Ubuntu/KVM and Windows/WHP runs are added as
+they complete.)
+
+#### Machine 1 — mshv · Azure `Standard_D2s_v5` · Intel Xeon Platinum 8370C · 2 vCPU
+
+Release host + guests on `feature/userspace-ring3`, rustc 1.89, idle box.
 
 **Guest calls** — the core per-call cost, at four sandbox sizes:
 
 | Benchmark | ring 0 | ring 3 | Δ% |
 |-----------|-------:|-------:|----:|
-| `guest_calls/call/default` | 27.34 µs | 28.09 µs | +2.7% |
-| `guest_calls/call/small` | 27.01 µs | 27.86 µs | +3.2% |
-| `guest_calls/call/medium` | 27.69 µs | 28.79 µs | +4.0% |
-| `guest_calls/call/large` | 28.82 µs | 27.77 µs | noise |
-| `guest_calls/call_with_restore/default` | 63.05 µs | 68.25 µs | +8.2% |
-| `guest_calls/call_with_restore/small` | 62.18 µs | 69.02 µs | +11.0% |
-| `guest_calls/call_with_restore/medium` | 81.61 µs | 84.08 µs | +3.0% |
-| `guest_calls/call_with_restore/large` | 210.08 µs | 215.99 µs | +2.8% |
-| `guest_calls/call_with_host_function/default` | 52.76 µs | 55.01 µs | +4.3% |
-| `guest_calls/call_with_host_function/small` | 51.31 µs | 54.78 µs | +6.8% |
-| `guest_calls/call_with_host_function/medium` | 51.94 µs | 55.37 µs | +6.6% |
-| `guest_calls/call_with_host_function/large` | 52.61 µs | 56.07 µs | +6.6% |
+| `guest_calls/call/default` | 69.21 µs | 74.58 µs | +7.8% |
+| `guest_calls/call/small` | 70.77 µs | 75.67 µs | +6.9% |
+| `guest_calls/call/medium` | 73.61 µs | 74.57 µs | +1.3% |
+| `guest_calls/call/large` | 69.03 µs | 74.37 µs | +7.7% |
+| `guest_calls/call_with_restore/default` | 234.3 µs | 235.6 µs | +0.5% |
+| `guest_calls/call_with_restore/small` | 234.5 µs | 238.3 µs | +1.6% |
+| `guest_calls/call_with_restore/medium` | 248.0 µs | 252.0 µs | +1.6% |
+| `guest_calls/call_with_restore/large` | 356.2 µs | 357.1 µs | +0.3% |
+| `guest_calls/call_with_host_function/default` | 104.7 µs | 113.6 µs | +8.5% |
+| `guest_calls/call_with_host_function/small` | 105.6 µs | 115.8 µs | +9.7% |
+| `guest_calls/call_with_host_function/medium` | 107.2 µs | 114.3 µs | +6.6% |
+| `guest_calls/call_with_host_function/large` | 107.8 µs | 115.9 µs | +7.5% |
 
-**Sandbox creation** — the one-time startup cost, at four sandbox sizes (the
-larger sizes are dominated by the time to zero/copy the bigger guest memory, so
-the ring 3 component is a smaller fraction and partly buried in copy variance;
-`measurement-time` was shortened for these, so treat sub-few-percent rows as
+**Sandbox creation** — the one-time startup cost, at four sandbox sizes, for the
+create-only benchmarks and the `_and_drop` variants that also measure teardown
+(the larger sizes are dominated by the time to zero/copy the bigger guest memory,
+which both rings pay equally, so the ring 3 fraction shrinks into copy-time
 noise):
 
 | Benchmark | ring 0 | ring 3 | Δ% |
 |-----------|-------:|-------:|----:|
-| `sandboxes/create_uninitialized/default` | 635 µs | 698 µs | +9.8% |
-| `sandboxes/create_uninitialized/small` | 9.92 ms | 8.95 ms | noise |
-| `sandboxes/create_uninitialized/medium` | 68.9 ms | 74.3 ms | +7.9% |
-| `sandboxes/create_uninitialized/large` | 256 ms | 264 ms | +3.1% |
-| `sandboxes/create_initialized/default` | 11.23 ms | 11.06 ms | noise |
-| `sandboxes/create_initialized/small` | 23.46 ms | 23.76 ms | +1.3% |
-| `sandboxes/create_initialized/medium` | 80.7 ms | 82.2 ms | +1.9% |
-| `sandboxes/create_initialized/large` | 273 ms | 268 ms | noise |
+| `sandboxes/create_uninitialized/default` | 379.2 µs | 421.9 µs | +11.3% |
+| `sandboxes/create_uninitialized/small` | 2.250 ms | 2.352 ms | +4.5% |
+| `sandboxes/create_uninitialized/medium` | 27.03 ms | 26.94 ms | noise |
+| `sandboxes/create_uninitialized/large` | 97.38 ms | 82.02 ms | noise |
+| `sandboxes/create_uninitialized_and_drop/default` | 404.0 µs | 440.0 µs | +8.9% |
+| `sandboxes/create_uninitialized_and_drop/small` | 2.435 ms | 2.483 ms | +2.0% |
+| `sandboxes/create_uninitialized_and_drop/medium` | 26.73 ms | 26.88 ms | +0.6% |
+| `sandboxes/create_uninitialized_and_drop/large` | 97.51 ms | 82.89 ms | noise |
+| `sandboxes/create_initialized/default` | 1.758 ms | 1.834 ms | +4.4% |
+| `sandboxes/create_initialized/small` | 5.856 ms | 5.914 ms | +1.0% |
+| `sandboxes/create_initialized/medium` | 29.71 ms | 30.43 ms | +2.4% |
+| `sandboxes/create_initialized/large` | 89.40 ms | 87.76 ms | noise |
+| `sandboxes/create_initialized_and_drop/default` | 32.38 ms | 32.06 ms | noise |
+| `sandboxes/create_initialized_and_drop/small` | 40.04 ms | 39.98 ms | noise |
+| `sandboxes/create_initialized_and_drop/medium` | 63.00 ms | 63.44 ms | +0.7% |
+| `sandboxes/create_initialized_and_drop/large` | 122.2 ms | 119.8 ms | noise |
 
 **Snapshots** — create and restore, at four sizes:
 
 | Benchmark | ring 0 | ring 3 | Δ% |
 |-----------|-------:|-------:|----:|
-| `snapshots/create/default` | 459.6 µs | 539.1 µs | +17% |
-| `snapshots/create/small` | 11.25 ms | 10.55 ms | noise |
-| `snapshots/create/medium` | 130.3 ms | 128.4 ms | noise |
-| `snapshots/create/large` | 505.5 ms | 440.1 ms | noise |
-| `snapshots/restore/default` | 27.67 µs | 28.64 µs | +3.5% |
-| `snapshots/restore/small` | 28.67 µs | 30.78 µs | +7.4% |
-| `snapshots/restore/medium` | 190.5 µs | 197.97 µs | +3.9% |
-| `snapshots/restore/large` | 27.53 ms | 30.49 ms | +11% |
+| `snapshots/create/default` | 364.1 µs | 383.9 µs | +5.4% |
+| `snapshots/create/small` | 3.660 ms | 4.135 ms | +13.0% |
+| `snapshots/create/medium` | 50.35 ms | 50.94 ms | +1.2% |
+| `snapshots/create/large` | 189.3 ms | 175.8 ms | noise |
+| `snapshots/restore/default` | 153.7 µs | 155.2 µs | +1.0% |
+| `snapshots/restore/small` | 156.4 µs | 155.8 µs | noise |
+| `snapshots/restore/medium` | 173.7 µs | 167.7 µs | noise |
+| `snapshots/restore/large` | 1.818 ms | 1.106 ms | noise |
 
-**I/O workloads** (default size; the large-parameter row is from a separate run
-since its ~1-second iterations would otherwise dominate the wall-clock):
+**I/O workloads** (the large-parameter row is from a separate run since its
+~100-millisecond iterations would otherwise dominate the wall-clock):
 
 | Benchmark | ring 0 | ring 3 | Δ% |
 |-----------|-------:|-------:|----:|
-| `sample_workloads/24K_in_8K_out` (24 KiB in, 8 KiB out) | 50.5 µs | 67.6 µs | +34% |
-| `guest_functions_with_large_parameters` (~100 MiB in) | 0.99 s | 1.58 s | +60% |
+| `sample_workloads/24K_in_8K_out` (24 KiB in, 8 KiB out; rust guest) | 89.56 µs | 92.61 µs | +3.4% |
+| `guest_functions_with_large_parameters` (~100 MiB in) | 137.3 ms | 193.0 ms | +40.6% |
 
 These confirm the per-call cost scales with how much data crosses the boundary,
 and the bare transition does not:
 
-- **The bare transition is within noise.** `guest_calls/call` is +2.7-4.0% across
-  sizes (and `snapshots/restore/default` is +3.5%) — the privilege drop itself is
-  essentially free, as the harness `GetStatic` row also shows.
-- **The per-call delta tracks payload size.** `24K_in_8K_out` (+34%) and
-  `guest_functions_with_large_parameters` (+60% for ~100 MiB) are dominated by the
-  cross-boundary marshalling copy: the encoded call is staged into the user heap
-  and the result copied back, so the ring 3 cost grows with the bytes moved. The
-  large-parameter row only runs at all because the ring 0 dispatch stages the call
-  **in place** from the input buffer (§3.8) — the ~100 MiB payload is never copied
-  onto the runtime's small kernel heap, only onto the user heap it is destined for.
-- **`call_with_restore` (+3-11%) and `snapshots/restore`** carry the
-  copy-on-write re-fault of the user-stack and user-heap pages that ring 3
-  dirties. The restore delta scales with how much ring 3 actually ran and with
-  sandbox size: `snapshots/restore` climbs from +3.5% at `default` to +11% at
-  `large`, where there are the most user pages to re-fault.
-- **Creation deltas** (`create_uninitialized/default` +9.8%, `snapshots/create`
-  +17%) come from the larger user-accessible image, the extra GDT/MSR/boot
-  self-test setup, and the user-heap regions captured in the initial snapshot.
-  At larger sandbox sizes the absolute startup cost is swamped by the time to
-  zero/copy the bigger guest memory (which both rings pay equally), so the *ring 3*
-  fraction shrinks and several large-size rows fall into copy-time noise. The
-  dedicated harness above isolates the one-time startup component at ~1.5-2.2 ms.
+- **The bare transition is a few percent.** `guest_calls/call` is +7-8% at three
+  of the four sizes (the +1.3% at `medium` is a high ring 0 outlier inflating the
+  baseline, not a real reduction), and `snapshots/restore/default` is +1.0% — the
+  privilege drop plus the small fixed marshalling is a single-digit percentage of
+  a call otherwise dominated by VM entry/exit, which both rings pay equally.
+- **The per-call delta tracks payload size.** `24K_in_8K_out` (+3.4%) and
+  `guest_functions_with_large_parameters` (+40.6% for ~100 MiB) are dominated by
+  the cross-boundary marshalling copy: the encoded call is staged into the user
+  heap and the result copied back, so the ring 3 cost grows with the bytes moved.
+  The large-parameter row only runs at all because the ring 0 dispatch stages the
+  call **in place** from the input buffer (§3.8) — the ~100 MiB payload is never
+  copied onto the runtime's small kernel heap, only onto the user heap it is
+  destined for.
+- **`call_with_restore` (+0.3-1.6%)** is dominated by the restore work itself, so
+  the ring 3 fraction is small. The per-size `snapshots/restore` rows sit at or
+  below the noise floor on this 2-vCPU box (the `large` rows swing especially
+  widely), so they are not a reliable ring 3 signal at this sample size — the
+  copy-on-write re-fault of the user pages is real but small relative to the
+  restore.
+- **Creation deltas** (`create_uninitialized/default` +11.3%,
+  `create_initialized/default` +4.4%, `snapshots/create/default` +5.4%) come from
+  the larger user-accessible image, the extra GDT/MSR/boot self-test setup, and
+  the user-heap regions captured in the initial snapshot. At larger sandbox sizes
+  the absolute startup cost is swamped by the time to zero/copy the bigger guest
+  memory (which both rings pay equally), so the *ring 3* fraction shrinks and the
+  large-size rows fall into copy-time noise.
 
 Wiring the userspace guest build into `just guests`/CI and gating on the ring 3
 overhead remain open (see [Future work](#9-future-work)).
