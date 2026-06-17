@@ -71,7 +71,7 @@ die() { printf '\033[1;31m[bench] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 # flush-left id-only line seen.
 extract_medians() {
     awk '
-        { gsub(/\x1b\[[0-9;]*m/, "") }                 # strip ANSI colour
+        { gsub(/\x1b\[[0-9;]*m/, ""); gsub(/\r/, "") } # strip ANSI colour + CR (Windows CRLF logs)
         /time:.*\[.*\]/ {
             tp = index($0, "time:");
             idpart = substr($0, 1, tp - 1);
