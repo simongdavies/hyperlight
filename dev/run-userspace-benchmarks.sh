@@ -63,19 +63,28 @@ log() { printf '\033[1;34m[bench]\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31m[bench] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
 # --- Extract "<id>\t<median> <unit>" pairs from a raw Criterion log. ----------
-# A benchmark id line is printed flush-left with no whitespace and no ':'
-# (which excludes the "Benchmarking ...:" progress lines and the indented
-# "time:"/stat lines). The median is the middle value of the "[lo mid hi]" range.
+# The median is the middle value of the "[lo mid hi]" range on a "time:" line.
+# Criterion prints the benchmark id two ways depending on its length:
+#   - short ids inline, e.g.  "guest_calls/call/small  time:   [lo mid hi]"
+#   - long  ids on their own preceding line, then "    time:   [lo mid hi]"
+# so we take the id from before "time:" when present, else from the last
+# flush-left id-only line seen.
 extract_medians() {
     awk '
-        /^[!-~]+$/ && $0 !~ /:/ { id=$0; next }
-        /time:/ && id != "" {
-            b=index($0,"["); e=index($0,"]");
-            inner=substr($0,b+1,e-b-1);
-            n=split(inner,a," ");
-            if (n>=4) printf "%s\t%s %s\n", id, a[3], a[4];
-            id="";
+        { gsub(/\x1b\[[0-9;]*m/, "") }                 # strip ANSI colour
+        /time:.*\[.*\]/ {
+            tp = index($0, "time:");
+            idpart = substr($0, 1, tp - 1);
+            sub(/^[ \t]+/, "", idpart); sub(/[ \t]+$/, "", idpart);
+            if (idpart != "") id = idpart;             # inline form carries its id
+            b = index($0, "["); e = index($0, "]");
+            inner = substr($0, b + 1, e - b - 1);
+            n = split(inner, a, " ");
+            if (id != "" && n >= 4) printf "%s\t%s %s\n", id, a[3], a[4];
+            id = "";
+            next;
         }
+        /^[!-~]+$/ && $0 !~ /:/ { id = $0 }            # id printed on its own line
     ' "$1"
 }
 
