@@ -394,7 +394,11 @@ or execute privileged instructions:
    large parameter is never copied onto the small kernel heap — only onto the
    user heap it is destined for.)
 2. **Output marshalling.** The body returns a `Vec<u8>` in the user heap; after
-   `SYS_RETURN` the ring 0 side copies it into the supervisor output buffer.
+   `SYS_RETURN` the ring 0 side pushes it **straight from the user heap** into
+   the supervisor output buffer, with no intermediate kernel-heap copy (ring 0
+   may read user memory, so the result never has to be staged through a kernel
+   `Vec` first). The output buffer itself stays supervisor-only, so the host
+   still only ever sees runtime-produced bytes.
 3. **Privileged services.** Everything a guest function does that reaches the
    host funnels through the guest's `out32` chokepoint — host calls, logging, and
    abort all ultimately execute `out`, which faults in ring 3. `out32` gains a

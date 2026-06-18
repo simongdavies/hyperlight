@@ -27,6 +27,7 @@ use hyperlight_common::flatbuffer_wrappers::function_types::ParameterType;
 use hyperlight_common::flatbuffer_wrappers::guest_error::{ErrorCode, GuestError};
 use hyperlight_guest::bail;
 use hyperlight_guest::error::{HyperlightGuestError, Result};
+use hyperlight_guest::guest_handle::handle::GuestHandle;
 use tracing::instrument;
 
 use crate::{GUEST_HANDLE, REGISTERED_GUEST_FUNCTIONS};
@@ -45,7 +46,7 @@ fn guest_dispatch_function_default(function_call: FunctionCall) -> Result<Vec<u8
 
 #[instrument(skip_all, level = "Info")]
 #[cfg(all(feature = "userspace", target_arch = "x86_64"))]
-pub(crate) fn call_guest_function(header: FunctionCallHeader, raw: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn call_guest_function(header: FunctionCallHeader, raw: &[u8]) -> Result<()> {
     // Validate this is a Guest Function Call
     if header.function_call_type() != FunctionCallType::Guest {
         return Err(HyperlightGuestError::new(
@@ -149,6 +150,19 @@ pub(crate) fn call_guest_function(function_call: FunctionCall) -> Result<Vec<u8>
     }
 }
 
+/// Encode a guest-function error into the `FunctionCallResult` the host expects
+/// and push it onto the shared output buffer. Shared by both the userspace and
+/// non-userspace dispatch paths in [`internal_dispatch_function`].
+fn push_function_call_error(handle: &GuestHandle, err: HyperlightGuestError) {
+    let guest_error = Err(GuestError::new(err.kind, err.message));
+    let fcr = FunctionCallResult::new(guest_error);
+    let mut builder = FlatBufferBuilder::new();
+    let data = fcr.encode(&mut builder);
+    handle
+        .push_shared_output_data(data)
+        .expect("Failed to serialize function call result");
+}
+
 pub(crate) fn internal_dispatch_function() {
     // Read the current TSC to report it to the host with the spans/events
     // This helps calculating the timestamps relative to the guest call
@@ -170,37 +184,36 @@ pub(crate) fn internal_dispatch_function() {
     // for the security checks (lookup + verification); the parameter *values*
     // are decoded in ring 3, on the user heap. Reading in place means a large
     // payload is never copied onto the runtime's (small) kernel heap — it is
-    // staged directly from the input buffer into the user buffer.
+    // staged directly from the input buffer into the user buffer. On success the
+    // ring 3 dispatch (`run_registered_guest_fn`) has already pushed the encoded
+    // result to the shared output buffer straight from the user heap; only a
+    // ring 0 validation failure (wrong call type / parameter mismatch, before
+    // ring 3 runs) returns an error here, which we encode and push.
     #[cfg(all(feature = "userspace", target_arch = "x86_64"))]
-    let res = handle
-        .with_popped_input_raw(|raw| {
-            let header = FunctionCallHeader::decode(raw)
-                .expect("Function call header deserialization failed");
-            call_guest_function(header, raw)
-        })
-        .expect("Function call deserialization failed");
+    {
+        let res = handle
+            .with_popped_input_raw(|raw| {
+                let header = FunctionCallHeader::decode(raw)
+                    .expect("Function call header deserialization failed");
+                call_guest_function(header, raw)
+            })
+            .expect("Function call deserialization failed");
+        if let Err(err) = res {
+            push_function_call_error(&handle, err);
+        }
+    }
     #[cfg(not(all(feature = "userspace", target_arch = "x86_64")))]
-    let res = {
+    {
         let function_call = handle
             .try_pop_shared_input_data_into::<FunctionCall>()
             .expect("Function call deserialization failed");
-        call_guest_function(function_call)
-    };
-
-    match res {
-        Ok(bytes) => {
-            handle
-                .push_shared_output_data(bytes.as_slice())
-                .expect("Failed to serialize function call result");
-        }
-        Err(err) => {
-            let guest_error = Err(GuestError::new(err.kind, err.message));
-            let fcr = FunctionCallResult::new(guest_error);
-            let mut builder = FlatBufferBuilder::new();
-            let data = fcr.encode(&mut builder);
-            handle
-                .push_shared_output_data(data)
-                .expect("Failed to serialize function call result");
+        match call_guest_function(function_call) {
+            Ok(bytes) => {
+                handle
+                    .push_shared_output_data(bytes.as_slice())
+                    .expect("Failed to serialize function call result");
+            }
+            Err(err) => push_function_call_error(&handle, err),
         }
     }
 

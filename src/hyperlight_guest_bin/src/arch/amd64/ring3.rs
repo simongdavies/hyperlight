@@ -729,29 +729,27 @@ struct GuestCallDescriptor {
     output_cap: u64,
 }
 
-/// Run a registered guest function `f` in ring 3 and return the bytes to push
-/// to the host's shared output buffer.
+/// Run a registered guest function `f` in ring 3 and push its encoded result to
+/// the host's shared output buffer.
 ///
 /// `encoded_call` is the original encoded `FunctionCall` (the bytes the host
 /// placed in the shared input buffer). They are copied verbatim into a user
 /// buffer - no re-encoding - the function runs in ring 3 (so its allocations
 /// land on the user heap and a bug cannot touch the runtime's supervisor
-/// state), and the encoded result is copied back. Any error raised by the guest
-/// function is encoded into a `FunctionCallResult` in ring 3, exactly as the
-/// ring 0 dispatch path would, so the returned bytes are always the final bytes
-/// to hand to the host.
+/// state), and the encoded result is pushed to the supervisor output buffer
+/// **straight from the user heap**, with no intermediate kernel-heap copy on the
+/// way out (ring 0 may read user memory). Any error raised by the guest function
+/// is encoded into a `FunctionCallResult` in ring 3, exactly as the ring 0
+/// dispatch path would, so the pushed bytes are always the final bytes the host
+/// expects.
 ///
-/// Returned as `Result` only to match the non-userspace call site; it is always
-/// `Ok` (guest-function errors are encoded into the returned bytes).
-///
-/// Note: a guest function that itself calls a host function will fault in
-/// ring 3 until the host-call syscall is wired up; pure guest functions work
-/// today.
+/// Returns `Ok(())` once the result has been pushed; the `Result` surfaces only
+/// a failure to write the shared output buffer.
 ///
 /// # Safety
 /// [`init`] and the user heap must be initialised, and `f` must be a valid
 /// registered guest-function pointer.
-pub(crate) unsafe fn run_registered_guest_fn(f: GuestFunc, encoded_call: &[u8]) -> Result<Vec<u8>> {
+pub(crate) unsafe fn run_registered_guest_fn(f: GuestFunc, encoded_call: &[u8]) -> Result<()> {
     // Stage the (already-encoded) call, plus the descriptor, in user-accessible
     // memory for ring 3 to read.
     let input_layout = layout_for(encoded_call.len());
@@ -781,12 +779,17 @@ pub(crate) unsafe fn run_registered_guest_fn(f: GuestFunc, encoded_call: &[u8]) 
         // Run the guest function in ring 3.
         enter_user(guest_call_trampoline as usize as u64, desc_buf as u64);
 
-        // Copy the result out of user memory into a kernel-heap Vec, then free
-        // the user buffers.
+        // Push the encoded result straight from the user heap into the
+        // supervisor output buffer. Ring 0 may read user memory, so the result
+        // never has to be staged through an intermediate kernel-heap copy
+        // first - it goes directly from the ring 3 result buffer to the shared
+        // output buffer. Then free the user buffers.
         let desc = &*desc_buf;
-        let out =
-            core::slice::from_raw_parts(desc.output_ptr as *const u8, desc.output_len as usize)
-                .to_vec();
+        let handle = crate::GUEST_HANDLE;
+        let push_result = handle.push_shared_output_data(core::slice::from_raw_parts(
+            desc.output_ptr as *const u8,
+            desc.output_len as usize,
+        ));
         if desc.output_cap != 0 {
             user_dealloc(
                 desc.output_ptr as *mut u8,
@@ -795,7 +798,7 @@ pub(crate) unsafe fn run_registered_guest_fn(f: GuestFunc, encoded_call: &[u8]) 
         }
         user_dealloc(input_buf, input_layout);
         user_dealloc(desc_buf as *mut u8, desc_layout);
-        Ok(out)
+        push_result
     }
 }
 
