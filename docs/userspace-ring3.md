@@ -724,77 +724,78 @@ and the bare transition does not:
 
 Release host + guests on `feature/userspace-ring3`, rustc 1.89, idle box. Same
 CPU as the mshv box but 8 vCPU and a cheaper KVM VM-exit path, so the absolute
-figures are roughly 3× lower — the per-call `call` rows (~17-20 µs) are so fast
-that ring 0 and ring 3 are indistinguishable, and a couple even measure ring 3
-marginally *faster* (pure variance, labelled `noise`).
+figures are roughly 3× lower — the per-call `call` rows (~17-19 µs) sit at the
+noise floor, where a jittery ring 0 baseline (the four sizes land in a
+non-monotonic 18.8 / 19.5 / 16.7 / 17.3 µs order) swings the per-call delta from
+ring 3 marginally *faster* to a spurious +13% — all run-to-run variance.
 
 **Guest calls** — the core per-call cost, at four sandbox sizes:
 
 | Benchmark | ring 0 | ring 3 | Δ% |
 |-----------|-------:|-------:|----:|
-| `guest_calls/call/default` | 20.28 µs | 18.92 µs | noise |
-| `guest_calls/call/small` | 19.12 µs | 18.93 µs | noise |
-| `guest_calls/call/medium` | 17.37 µs | 18.93 µs | +9.0% |
-| `guest_calls/call/large` | 16.26 µs | 18.12 µs | +11.5% |
-| `guest_calls/call_with_restore/default` | 38.14 µs | 42.55 µs | +11.6% |
-| `guest_calls/call_with_restore/small` | 39.01 µs | 42.70 µs | +9.4% |
-| `guest_calls/call_with_restore/medium` | 42.32 µs | 47.06 µs | +11.2% |
-| `guest_calls/call_with_restore/large` | 97.31 µs | 104.0 µs | +6.9% |
-| `guest_calls/call_with_host_function/default` | 30.09 µs | 33.92 µs | +12.7% |
-| `guest_calls/call_with_host_function/small` | 30.41 µs | 35.03 µs | +15.2% |
-| `guest_calls/call_with_host_function/medium` | 31.65 µs | 35.06 µs | +10.8% |
-| `guest_calls/call_with_host_function/large` | 31.24 µs | 34.71 µs | +11.1% |
+| `guest_calls/call/default` | 18.76 µs | 18.93 µs | +0.9% |
+| `guest_calls/call/small` | 19.48 µs | 19.24 µs | noise |
+| `guest_calls/call/medium` | 16.74 µs | 18.92 µs | +13.0% |
+| `guest_calls/call/large` | 17.34 µs | 18.59 µs | +7.2% |
+| `guest_calls/call_with_restore/default` | 38.26 µs | 41.99 µs | +9.7% |
+| `guest_calls/call_with_restore/small` | 38.47 µs | 41.24 µs | +7.2% |
+| `guest_calls/call_with_restore/medium` | 43.73 µs | 46.84 µs | +7.1% |
+| `guest_calls/call_with_restore/large` | 97.35 µs | 102.6 µs | +5.4% |
+| `guest_calls/call_with_host_function/default` | 31.98 µs | 34.11 µs | +6.7% |
+| `guest_calls/call_with_host_function/small` | 31.78 µs | 35.39 µs | +11.4% |
+| `guest_calls/call_with_host_function/medium` | 31.33 µs | 35.26 µs | +12.5% |
+| `guest_calls/call_with_host_function/large` | 31.80 µs | 35.04 µs | +10.2% |
 
 **Sandbox creation** — create-only and `_and_drop` (create + teardown), four sizes:
 
 | Benchmark | ring 0 | ring 3 | Δ% |
 |-----------|-------:|-------:|----:|
-| `sandboxes/create_uninitialized/default` | 381.8 µs | 420.6 µs | +10.2% |
-| `sandboxes/create_uninitialized/small` | 3.613 ms | 3.615 ms | noise |
-| `sandboxes/create_uninitialized/medium` | 21.13 ms | 20.90 ms | noise |
-| `sandboxes/create_uninitialized/large` | 78.76 ms | 78.85 ms | noise |
-| `sandboxes/create_uninitialized_and_drop/default` | 405.9 µs | 430.3 µs | +6.0% |
-| `sandboxes/create_uninitialized_and_drop/small` | 3.799 ms | 3.650 ms | noise |
-| `sandboxes/create_uninitialized_and_drop/medium` | 21.25 ms | 21.68 ms | +2.0% |
-| `sandboxes/create_uninitialized_and_drop/large` | 83.29 ms | 82.44 ms | noise |
-| `sandboxes/create_initialized/default` | 1.524 ms | 1.716 ms | +12.6% |
-| `sandboxes/create_initialized/small` | 4.909 ms | 5.058 ms | +3.0% |
-| `sandboxes/create_initialized/medium` | 23.69 ms | 23.46 ms | noise |
-| `sandboxes/create_initialized/large` | 82.72 ms | 84.25 ms | +1.8% |
-| `sandboxes/create_initialized_and_drop/default` | 2.061 ms | 2.236 ms | +8.5% |
-| `sandboxes/create_initialized_and_drop/small` | 5.389 ms | 5.789 ms | +7.4% |
-| `sandboxes/create_initialized_and_drop/medium` | 23.08 ms | 24.03 ms | +4.1% |
-| `sandboxes/create_initialized_and_drop/large` | 83.75 ms | 85.14 ms | +1.7% |
+| `sandboxes/create_uninitialized/default` | 371.2 µs | 420.9 µs | +13.4% |
+| `sandboxes/create_uninitialized/small` | 3.605 ms | 3.625 ms | +0.5% |
+| `sandboxes/create_uninitialized/medium` | 21.93 ms | 21.31 ms | noise |
+| `sandboxes/create_uninitialized/large` | 83.29 ms | 79.57 ms | noise |
+| `sandboxes/create_uninitialized_and_drop/default` | 408.8 µs | 441.1 µs | +7.9% |
+| `sandboxes/create_uninitialized_and_drop/small` | 3.564 ms | 3.562 ms | noise |
+| `sandboxes/create_uninitialized_and_drop/medium` | 21.98 ms | 21.23 ms | noise |
+| `sandboxes/create_uninitialized_and_drop/large` | 83.75 ms | 79.01 ms | noise |
+| `sandboxes/create_initialized/default` | 1.613 ms | 1.783 ms | +10.6% |
+| `sandboxes/create_initialized/small` | 5.464 ms | 5.112 ms | noise |
+| `sandboxes/create_initialized/medium` | 22.51 ms | 22.89 ms | +1.7% |
+| `sandboxes/create_initialized/large` | 80.63 ms | 80.20 ms | noise |
+| `sandboxes/create_initialized_and_drop/default` | 2.154 ms | 2.388 ms | +10.9% |
+| `sandboxes/create_initialized_and_drop/small` | 5.958 ms | 5.939 ms | noise |
+| `sandboxes/create_initialized_and_drop/medium` | 23.77 ms | 23.50 ms | noise |
+| `sandboxes/create_initialized_and_drop/large` | 83.33 ms | 83.67 ms | +0.4% |
 
 **Snapshots** — create and restore, at four sizes:
 
 | Benchmark | ring 0 | ring 3 | Δ% |
 |-----------|-------:|-------:|----:|
-| `snapshots/create/default` | 282.5 µs | 301.5 µs | +6.7% |
-| `snapshots/create/small` | 4.015 ms | 4.016 ms | noise |
-| `snapshots/create/medium` | 49.64 ms | 48.16 ms | noise |
-| `snapshots/create/large` | 188.5 ms | 185.0 ms | noise |
-| `snapshots/restore/default` | 14.37 µs | 14.62 µs | +1.7% |
-| `snapshots/restore/small` | 14.94 µs | 15.17 µs | +1.5% |
-| `snapshots/restore/medium` | 18.50 µs | 18.86 µs | +2.0% |
-| `snapshots/restore/large` | 80.88 µs | 82.85 µs | +2.4% |
+| `snapshots/create/default` | 286.2 µs | 310.2 µs | +8.4% |
+| `snapshots/create/small` | 4.111 ms | 3.959 ms | noise |
+| `snapshots/create/medium` | 48.75 ms | 48.20 ms | noise |
+| `snapshots/create/large` | 183.8 ms | 182.8 ms | noise |
+| `snapshots/restore/default` | 14.29 µs | 14.62 µs | +2.3% |
+| `snapshots/restore/small` | 14.70 µs | 15.03 µs | +2.2% |
+| `snapshots/restore/medium` | 18.38 µs | 18.69 µs | +1.7% |
+| `snapshots/restore/large` | 84.93 µs | 82.78 µs | noise |
 
 **I/O workloads** (the large-parameter row is from a separate run):
 
 | Benchmark | ring 0 | ring 3 | Δ% |
 |-----------|-------:|-------:|----:|
-| `sample_workloads/24K_in_8K_out` (24 KiB in, 8 KiB out; rust guest) | 29.78 µs | 32.09 µs | +7.8% |
-| `guest_functions_with_large_parameters` (~100 MiB in) | 467.2 ms | 751.1 ms | +60.8% |
+| `sample_workloads/24K_in_8K_out` (24 KiB in, 8 KiB out; rust guest) | 29.23 µs | 32.30 µs | +10.5% |
+| `guest_functions_with_large_parameters` (~100 MiB in) | 464.3 ms | 746.5 ms | +60.8% |
 
-The KVM numbers match mshv on the fundamentals: the bare transition is at the
-noise floor (the per-call `call` rows are so fast here that ring 0 and ring 3 are
-indistinguishable), the marshalling-bound rows scale with payload (`24K` +7.8%,
-large-parameters +60.8%), and the host-call, restore, and creation overheads are
-a steady single-to-low-double-digit percentage (`call_with_host_function`
-+11-15%, `call_with_restore` +7-12%, `snapshots/restore` a very consistent
-+1.5-2.4%, `create_*/default` +6-13%). The larger millisecond-scale
-create/snapshot rows are dominated by guest-memory zeroing that both rings pay
-equally, so they fall into the noise.
+The KVM numbers match mshv on the fundamentals: the bare transition is lost in
+the noise (the per-call `call` rows swing with a jittery ring 0 baseline rather
+than showing real ring 3 overhead), the marshalling-bound rows scale with payload
+(`24K` +10.5%, large-parameters +60.8%), and the host-call, restore, and creation
+overheads are a steady single-to-low-double-digit percentage
+(`call_with_host_function` +7-13%, `call_with_restore` +5-10%, `snapshots/restore`
++1.7-2.3%, `create_*/default` +8-13%). The larger millisecond-scale create/snapshot
+rows are dominated by guest-memory zeroing that both rings pay equally, so they
+fall into the noise.
 
 #### Machine 3 — whp · Azure · Windows Server 2022 · Intel Xeon Platinum 8573C · 8 vCPU
 
