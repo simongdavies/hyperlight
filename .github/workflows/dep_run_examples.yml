@@ -51,7 +51,9 @@ jobs:
             github.run_id,
             github.run_number,
             github.run_attempt)
-        || '["self-hosted", "Linux", "arm64", "kvm", "ubuntu-24.04"]') }}
+        || format('["self-hosted", "{0}", "arm64", "{1}"]',
+            inputs.hypervisor == 'hvf' && 'macOS' || 'Linux',
+            inputs.hypervisor)) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
@@ -69,6 +71,8 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         with:
+          # Concurrent macOS runners share ~/.cargo/bin, so cleanup can remove Cargo from another job.
+          cache-bin: ${{ runner.os != 'macOS' }}
           shared-key: "${{ inputs.arch }}-${{ runner.os }}-${{ inputs.hypervisor }}-${{ inputs.config }}"
           save-if: "false"
 
@@ -87,14 +91,14 @@ jobs:
           name: c-guests-${{ inputs.arch }}-${{ inputs.config }}
           path: src/tests/c_guests/bin/${{ inputs.config }}/
 
-      - name: Run Rust examples - windows
-        if: runner.os == 'Windows'
+      - name: Run Rust examples - windows and macOS
+        if: runner.os == 'Windows' || runner.os == 'macOS'
         env:
           RUST_LOG: debug
         run: just run-rust-examples ${{ inputs.config }}
 
       - name: Run Rust examples - linux
-        if: runner.os != 'Windows'
+        if: runner.os == 'Linux'
         env:
           RUST_LOG: debug
         run: just run-rust-examples-linux ${{ inputs.config }}
