@@ -1188,6 +1188,8 @@ mod tests {
     use hyperlight_testing::sandbox_sizes::{LARGE_HEAP_SIZE, MEDIUM_HEAP_SIZE, SMALL_HEAP_SIZE};
     use hyperlight_testing::{c_simple_guest_as_pathbuf, simple_guest_as_pathbuf};
 
+    #[cfg(any(target_arch = "x86_64", feature = "trace_guest"))]
+    use crate::MultiUseSandbox;
     use crate::func::host_functions::Registerable;
     #[cfg(not(gdb))]
     use crate::hypervisor::hyperlight_vm::test_support::VmOperation;
@@ -1196,8 +1198,7 @@ mod tests {
     use crate::sandbox::SandboxConfiguration;
     use crate::sandbox::uninitialized::{GuestBlob, GuestEnvironment};
     use crate::{
-        GuestBinary, HyperlightError, MultiUseSandbox, Result, SandboxBuilder, SandboxStatus,
-        UninitializedSandbox,
+        GuestBinary, HyperlightError, Result, SandboxBuilder, SandboxStatus, UninitializedSandbox,
     };
 
     #[test]
