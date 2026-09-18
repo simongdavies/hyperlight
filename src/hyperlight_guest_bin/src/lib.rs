@@ -310,7 +310,8 @@ pub(crate) extern "C" fn generic_init(
     // This is done here because the tracing subscriber is initialized and the guest is in a
     // well-known state
     #[cfg(all(feature = "trace_guest", target_arch = "x86_64"))]
-    let _entered = tracing::span!(tracing::Level::INFO, "generic_init").entered();
+    let entered = hyperlight_guest_tracing::is_trace_enabled()
+        .then(|| tracing::span!(tracing::Level::INFO, "generic_init").entered());
 
     #[cfg(feature = "macros")]
     for registration in __private::GUEST_FUNCTION_INIT {
@@ -329,7 +330,9 @@ pub(crate) extern "C" fn generic_init(
         // spans, when preparing to close a guest function call context.
         // It is not mandatory, though, but avoids a warning on the host that alerts a spans
         // that has not been opened but is being closed.
-        _entered.exit();
+        if let Some(entered) = entered {
+            entered.exit();
+        }
 
         // Ensure that any tracing output from the initialisation phase is
         // flushed to the host, if necessary.

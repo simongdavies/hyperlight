@@ -78,14 +78,14 @@ pub(crate) fn internal_dispatch_function() {
     // Read the current TSC to report it to the host with the spans/events
     // This helps calculating the timestamps relative to the guest call
     #[cfg(all(feature = "trace_guest", target_arch = "x86_64"))]
-    let _entered = {
+    let entered = hyperlight_guest_tracing::is_trace_enabled().then(|| {
         let guest_start_tsc = hyperlight_guest_tracing::invariant_tsc::read_tsc();
         // Reset the trace state for the new guest function call with the new start TSC
         // This clears any existing spans/events from previous calls ensuring a clean state
         hyperlight_guest_tracing::new_call(guest_start_tsc);
 
         tracing::span!(tracing::Level::INFO, "internal_dispatch_function").entered()
-    };
+    });
 
     let handle = unsafe { GUEST_HANDLE };
 
@@ -126,7 +126,9 @@ pub(crate) fn internal_dispatch_function() {
         // spans, when preparing to close a guest function call context.
         // It is not mandatory, though, but avoids a warning on the host that alerts a spans
         // that has not been opened but is being closed.
-        _entered.exit();
+        if let Some(entered) = entered {
+            entered.exit();
+        }
 
         // Ensure that any tracing output during the call is flushed to
         // the host, if necessary.

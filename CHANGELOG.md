@@ -18,6 +18,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 * Expose C guest `ByteChunks` values as pointer and length arrays.
 * Return typed `hl_ReturnValue` objects from C guest functions through
   `hl_result_from_*` constructors.
+* Guest tracing skips its per-call and per-callsite work while the guest log
+  level is `OFF`. `hyperlight_guest_tracing::is_trace_enabled` reports whether
+  the configured level is above `OFF` rather than whether the tracing state was
+  allocated.
 
 ### Removed
 

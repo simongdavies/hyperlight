@@ -4889,6 +4889,88 @@ mod tests {
             assert_eq!(before_restore, after_restore);
         }
 
+        /// Runtime log-level updates can disable and re-enable guest tracing.
+        ///
+        /// Ignored because it installs a process-global `log` logger. Run in
+        /// isolation via the `test-isolated` Justfile recipe.
+        #[test]
+        #[ignore]
+        fn max_guest_log_level_can_be_disabled_and_reenabled() {
+            use hyperlight_common::log_level::GuestLogFilter;
+            use hyperlight_testing::logger::{LOGGER, Logger};
+            use tracing_core::LevelFilter;
+
+            Logger::initialize_test_logger();
+            LOGGER.set_max_level(log::LevelFilter::Trace);
+
+            let mut sandbox = SandboxBuilder::from_file(simple_guest_as_pathbuf())
+                .guest_log_level(LevelFilter::TRACE)
+                .build()
+                .unwrap();
+            let encoded: u64 = GuestLogFilter::Trace.into();
+            let count_guest_logs = |sandbox: &mut MultiUseSandbox| {
+                LOGGER.clear_log_calls();
+                sandbox
+                    .call::<()>("LogMessage", ("hello".to_string(), encoded as i32))
+                    .unwrap();
+                (0..LOGGER.num_log_calls())
+                    .filter_map(|i| LOGGER.get_log_call(i))
+                    .filter(|call| call.target == "hyperlight_guest")
+                    .count()
+            };
+
+            assert!(count_guest_logs(&mut sandbox) > 0);
+            sandbox.log_level(LevelFilter::OFF).unwrap();
+            assert_eq!(count_guest_logs(&mut sandbox), 0);
+            sandbox.log_level(LevelFilter::TRACE).unwrap();
+            assert!(count_guest_logs(&mut sandbox) > 0);
+        }
+
+        /// Callsites reached while the guest runs at `OFF` still produce trace
+        /// data once the level is raised, matching a guest started at `TRACE`.
+        ///
+        /// Ignored because it installs a process-global `log` logger. Run in
+        /// isolation via the `test-isolated` Justfile recipe.
+        #[test]
+        #[ignore]
+        fn max_guest_log_level_can_be_enabled_after_off_init() {
+            use hyperlight_common::log_level::GuestLogFilter;
+            use hyperlight_testing::logger::{LOGGER, Logger};
+            use tracing_core::LevelFilter;
+
+            Logger::initialize_test_logger();
+            LOGGER.set_max_level(log::LevelFilter::Trace);
+
+            let encoded: u64 = GuestLogFilter::Trace.into();
+            let count_guest_logs = |sandbox: &mut MultiUseSandbox| {
+                LOGGER.clear_log_calls();
+                sandbox
+                    .call::<()>("LogMessage", ("hello".to_string(), encoded as i32))
+                    .unwrap();
+                (0..LOGGER.num_log_calls())
+                    .filter_map(|i| LOGGER.get_log_call(i))
+                    .filter(|call| call.target == "hyperlight_guest")
+                    .count()
+            };
+
+            let mut from_trace = SandboxBuilder::from_file(simple_guest_as_pathbuf())
+                .guest_log_level(LevelFilter::TRACE)
+                .build()
+                .unwrap();
+            let _ = count_guest_logs(&mut from_trace);
+            let expected = count_guest_logs(&mut from_trace);
+
+            let mut from_off = SandboxBuilder::from_file(simple_guest_as_pathbuf())
+                .guest_log_level(LevelFilter::OFF)
+                .build()
+                .unwrap();
+            // Runs the guest at OFF so its callsites cache a disabled interest.
+            assert_eq!(count_guest_logs(&mut from_off), 0);
+
+            from_off.log_level(LevelFilter::TRACE).unwrap();
+            assert_eq!(count_guest_logs(&mut from_off), expected);
+        }
+
         /// Two sandboxes built from clones of one `Arc<Snapshot>` can
         /// each `restore` back to it, and stay memory-isolated from
         /// each other in between.

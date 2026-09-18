@@ -33,14 +33,12 @@ impl GuestSubscriber {
         }
     }
 
-    pub(crate) fn set_max_log_level(&self, filter: LevelFilter) {
-        self.max_log_level
-            .store(u64::from(GuestLogFilter::from(filter)), Ordering::Relaxed);
+    /// Returns whether the filter changed.
+    pub(crate) fn set_max_log_level(&self, filter: LevelFilter) -> bool {
+        let filter = u64::from(GuestLogFilter::from(filter));
+        self.max_log_level.swap(filter, Ordering::Relaxed) != filter
     }
 
-    pub(crate) fn accepts_trace_events(&self) -> bool {
-        self.max_log_level.load(Ordering::Relaxed) == u64::from(GuestLogFilter::Trace)
-    }
     /// Returns a reference to the internal state of the subscriber
     /// This is used to access the spans and events collected by the subscriber
     pub(crate) fn state(&self) -> &Arc<Mutex<GuestState>> {
@@ -49,8 +47,12 @@ impl GuestSubscriber {
 }
 
 impl Subscriber for GuestSubscriber {
-    fn register_callsite(&self, _: &'static Metadata<'static>) -> Interest {
-        Interest::sometimes()
+    fn register_callsite(&self, metadata: &'static Metadata<'static>) -> Interest {
+        if self.enabled(metadata) {
+            Interest::always()
+        } else {
+            Interest::never()
+        }
     }
 
     fn enabled(&self, md: &Metadata<'_>) -> bool {
@@ -210,19 +212,15 @@ mod tests {
     }
 
     #[test]
-    fn callsite_interest_is_rechecked_after_filter_updates() {
+    fn callsite_interest_tracks_filter_updates() {
         let subscriber = GuestSubscriber::new(0, LevelFilter::ERROR);
-        assert!(
-            subscriber
-                .register_callsite(&CALLSITE_METADATA)
-                .is_sometimes()
-        );
+        assert!(subscriber.register_callsite(&CALLSITE_METADATA).is_never());
 
         subscriber.set_max_log_level(LevelFilter::TRACE);
-        assert!(subscriber.enabled(&CALLSITE_METADATA));
+        assert!(subscriber.register_callsite(&CALLSITE_METADATA).is_always());
 
         subscriber.set_max_log_level(LevelFilter::ERROR);
-        assert!(!subscriber.enabled(&CALLSITE_METADATA));
+        assert!(subscriber.register_callsite(&CALLSITE_METADATA).is_never());
     }
 
     static CALLSITE: tracing_core::callsite::DefaultCallsite =
