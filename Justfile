@@ -6,6 +6,9 @@ set dotenv-load := true
 set-env-command := if os() == "windows" { "$env:" } else { "export " }
 bin-suffix := if os() == "windows" { ".bat" } else { ".sh" }
 nightly-toolchain := "nightly-2026-02-27"
+host-toolchain := "1.95"
+guest-toolchain := "1.94"
+guest-cargo := "cargo +" + guest-toolchain
 # Pinned cargo-hyperlight version used to build the guest sysroot. Keep this in
 # lockstep with the version pinned in flake.nix.
 cargo-hyperlight-version := "0.1.14"
@@ -17,7 +20,7 @@ target-triple := env('TARGET_TRIPLE', "")
 docker := if target-triple != "" { require("docker") } else { "" }
 # this command is only used host side not for guests
 # include the --target-dir for the cross builds.  This ensures that the builds are separated and avoid any conflicts with the guest builds
-cargo-cmd := if target-triple != "" { require("cross") } else { "cargo" } 
+cargo-cmd := (if target-triple != "" { require("cross") } else { "cargo" }) + " +" + host-toolchain
 target-triple-flag := if target-triple != "" { "--target " + target-triple + " --target-dir ./target/host"} else { "" }
 # set up cross to use the devices
 kvm-gid := if path_exists("/dev/kvm") == "true" { `getent group kvm | cut -d: -f3` } else { "" }
@@ -59,13 +62,13 @@ guests: build-and-move-rust-guests build-and-move-c-guests
 # the upgrade (this is how the broken 0.1.5 `--build-plan` binary kept running).
 # When the version doesn't match we force a reinstall to the pinned version.
 ensure-cargo-hyperlight:
-    {{ if os() == "windows" { "if (-not ((cargo hyperlight --version 2>$null) -like '*" + cargo-hyperlight-version + "*')) { cargo install --locked --force --version " + cargo-hyperlight-version + " cargo-hyperlight }" } else { "cargo hyperlight --version 2>/dev/null | grep -qF '" + cargo-hyperlight-version + "' || cargo install --locked --force --version " + cargo-hyperlight-version + " cargo-hyperlight" } }}
+    {{ if os() == "windows" { "if (-not ((" + guest-cargo + " hyperlight --version 2>$null) -like '*" + cargo-hyperlight-version + "*')) { " + guest-cargo + " install --locked --force --version " + cargo-hyperlight-version + " cargo-hyperlight }" } else { guest-cargo + " hyperlight --version 2>/dev/null | grep -qF '" + cargo-hyperlight-version + "' || " + guest-cargo + " install --locked --force --version " + cargo-hyperlight-version + " cargo-hyperlight" } }}
 
 build-rust-guests target=default-target features="": (ensure-cargo-hyperlight)
     @# --workspace unifies feature resolution so shared deps build once. Needed because witguest
     @# pulls bindgen via hyperlight-component-macro, which would otherwise turn on extra features
     @# on libc's build.rs host deps and force a libc rebuild. simple/dummyguest don't hit this.
-    cd src/tests/rust_guests && cargo hyperlight build --workspace {{ if features =="" {''} else if features=="no-default-features" {"--no-default-features" } else {"--no-default-features -F " + features } }} --profile={{ if target == "debug" { "dev" } else { target } }}
+    cd src/tests/rust_guests && {{ guest-cargo }} hyperlight build --workspace {{ if features =="" {''} else if features=="no-default-features" {"--no-default-features" } else {"--no-default-features -F " + features } }} --profile={{ if target == "debug" { "dev" } else { target } }}
 
 @move-rust-guests target=default-target:
     cp {{ simpleguest_source }}/{{ target }}/simpleguest* {{ rust_guests_bin_dir }}/{{ target }}/
@@ -78,8 +81,8 @@ build-and-move-c-guests: (build-c-guests "debug") (move-c-guests "debug") (build
 clean: clean-rust
 
 clean-rust: 
-    cargo clean
-    cd src/tests/rust_guests && cargo clean
+    cargo +{{ host-toolchain }} clean
+    cd src/tests/rust_guests && {{ guest-cargo }} clean
     {{ if os() == "windows" { "Remove-Item src/tests/rust_guests/witguest/*.wasm -Force -ErrorAction SilentlyContinue" } else { "rm -f src/tests/rust_guests/witguest/*.wasm" } }}
     git clean -fdx src/tests/c_guests/bin src/tests/rust_guests/bin
 
@@ -121,8 +124,8 @@ test-like-ci config=default-target hypervisor="kvm":
 
 code-checks-like-ci config=default-target hypervisor="kvm":
     @# Ensure up-to-date Cargo.lock
-    cargo fetch --locked
-    cargo fetch --manifest-path src/tests/rust_guests/Cargo.toml --locked
+    cargo +{{ host-toolchain }} fetch --locked
+    {{ guest-cargo }} fetch --manifest-path src/tests/rust_guests/Cargo.toml --locked
 
     @# fmt
     just fmt-check
@@ -331,10 +334,13 @@ check:
     {{ cargo-cmd }} check -p hyperlight-host --features hw-interrupts  {{ target-triple-flag }}
     {{ cargo-cmd }} check -p hyperlight-host --features executable_heap  {{ target-triple-flag }}
 
+# Explicit workspace members keep rustfmt out of external path dependencies.
+fmt-packages := "hyperlight-common hyperlight-testing hyperlight-guest hyperlight-guest-tracing hyperlight-host hyperlight-component-macro hyperlight-component-util hyperlight_guest_capi hyperlight-guest-bin hyperlight-guest-macro hyperlight-libc hyperlight-fuzz trace_dump"
+fmt-guest-packages := "dummyguest simpleguest witguest"
+
 fmt-check: (ensure-nightly-fmt)
-    cargo +{{nightly-toolchain}} fmt --all -- --check
-    cargo +{{nightly-toolchain}} fmt --manifest-path src/tests/rust_guests/Cargo.toml --all -- --check
-    cargo +{{nightly-toolchain}} fmt --manifest-path src/hyperlight_guest_capi/Cargo.toml -- --check
+    cargo +{{nightly-toolchain}} fmt -p {{ fmt-packages }} -- --check
+    cargo +{{nightly-toolchain}} fmt --manifest-path src/tests/rust_guests/Cargo.toml -p {{ fmt-guest-packages }} -- --check
 
 [private]
 ensure-nightly-fmt:
@@ -344,9 +350,8 @@ check-license-headers:
     ./dev/check-license-headers.sh
 
 fmt-apply: (ensure-nightly-fmt)
-    cargo +{{nightly-toolchain}} fmt --all
-    cargo +{{nightly-toolchain}} fmt --manifest-path src/tests/rust_guests/Cargo.toml --all
-    cargo +{{nightly-toolchain}} fmt --manifest-path src/hyperlight_guest_capi/Cargo.toml
+    cargo +{{nightly-toolchain}} fmt -p {{ fmt-packages }}
+    cargo +{{nightly-toolchain}} fmt --manifest-path src/tests/rust_guests/Cargo.toml -p {{ fmt-guest-packages }}
 
 clippy target=default-target:
     {{ cargo-cmd }} clippy --all-targets {{ if hyperlight-target-arch == "x86_64" { "--all-features" } else { "" } }} --profile={{ if target == "debug" { "dev" } else { target } }}  {{ target-triple-flag }} -- -D warnings
@@ -355,31 +360,35 @@ clippy target=default-target:
 clippyw target=default-target:
     {{ cargo-cmd }} clippy --all-targets --all-features --target x86_64-pc-windows-gnu --profile={{ if target == "debug" { "dev" } else { target } }}  -- -D warnings
 
+# Checks macOS types and cfgs. Runtime qualification requires Apple Silicon.
+clippym target=default-target:
+    cargo +{{ host-toolchain }} clippy --all-targets --features process-isolation --target aarch64-apple-darwin --profile={{ if target == "debug" { "dev" } else { target } }} -- -D warnings
+
 clippy-guests target=default-target: (ensure-cargo-hyperlight)
-    cd src/tests/rust_guests && cargo hyperlight clippy --workspace --profile={{ if target == "debug" { "dev" } else { target } }} -- -D warnings
+    cd src/tests/rust_guests && {{ guest-cargo }} hyperlight clippy --workspace --profile={{ if target == "debug" { "dev" } else { target } }} -- -D warnings
 
 clippy-apply-fix-unix:
-    cargo clippy --fix --all 
+    cargo +{{ host-toolchain }} clippy --fix --all
 
 clippy-apply-fix-windows:
-    cargo clippy --target x86_64-pc-windows-msvc --fix --all 
+    cargo +{{ host-toolchain }} clippy --target x86_64-pc-windows-msvc --fix --all
 
 # Run clippy with feature combinations for all packages
 clippy-exhaustive target=default-target:
-    ./hack/clippy-package-features.sh hyperlight-host {{ target }} {{ target-triple }}
-    ./hack/clippy-package-features.sh hyperlight-guest {{ target }} 
-    ./hack/clippy-package-features.sh hyperlight-guest-bin {{ target }}
-    ./hack/clippy-package-features.sh hyperlight-guest-macro {{ target }}
-    ./hack/clippy-package-features.sh hyperlight-common {{ target }} {{ target-triple }}
-    ./hack/clippy-package-features.sh hyperlight-testing {{ target }} {{ target-triple }}
-    ./hack/clippy-package-features.sh hyperlight-component-macro  {{ target }} {{ target-triple }}
-    ./hack/clippy-package-features.sh hyperlight-component-util {{ target }} {{ target-triple }}
-    {{ if hyperlight-target-arch == "x86_64" { "./hack/clippy-package-features.sh hyperlight-guest-tracing " + target } else { "" } }}
+    rustup run {{ host-toolchain }} ./hack/clippy-package-features.sh hyperlight-host {{ target }} {{ target-triple }}
+    rustup run {{ guest-toolchain }} ./hack/clippy-package-features.sh hyperlight-guest {{ target }}
+    rustup run {{ guest-toolchain }} ./hack/clippy-package-features.sh hyperlight-guest-bin {{ target }}
+    rustup run {{ guest-toolchain }} ./hack/clippy-package-features.sh hyperlight-guest-macro {{ target }}
+    rustup run {{ guest-toolchain }} ./hack/clippy-package-features.sh hyperlight-common {{ target }} {{ target-triple }}
+    rustup run {{ host-toolchain }} ./hack/clippy-package-features.sh hyperlight-testing {{ target }} {{ target-triple }}
+    rustup run {{ host-toolchain }} ./hack/clippy-package-features.sh hyperlight-component-macro {{ target }} {{ target-triple }}
+    rustup run {{ host-toolchain }} ./hack/clippy-package-features.sh hyperlight-component-util {{ target }} {{ target-triple }}
+    {{ if hyperlight-target-arch == "x86_64" { "rustup run " + guest-toolchain + " ./hack/clippy-package-features.sh hyperlight-guest-tracing " + target } else { "" } }}
     just clippy-guests {{ target }}
 
 # Test a specific package with all feature combinations
 clippy-package package target=default-target:
-    ./hack/clippy-package-features.sh {{ package }} {{ target }}
+    rustup run {{ if package =~ '^hyperlight-(guest($|-)|common$)' { guest-toolchain } else { host-toolchain } }} ./hack/clippy-package-features.sh {{ package }} {{ target }}
 
 # Verify Minimum Supported Rust Version
 verify-msrv:
@@ -437,11 +446,11 @@ bench-download os hypervisor cpu_vendor tag="":
 # Warning: compares to and then OVERWRITES the given baseline
 bench-ci baseline features="":
     @# Benchmarks are always run with release builds for meaningful results
-    cargo bench --profile=release {{ if features =="" {''} else { "--features " + features } }} -- --verbose --save-baseline {{ baseline }}
+    cargo +{{ host-toolchain }} bench --profile=release {{ if features =="" {''} else { "--features " + features } }} -- --verbose --save-baseline {{ baseline }}
 
 bench features="":
     @# Benchmarks are always run with release builds for meaningful results
-    cargo bench --profile=release {{ if features =="" {''} else { "--features " + features } }} -- --verbose
+    cargo +{{ host-toolchain }} bench --profile=release {{ if features =="" {''} else { "--features " + features } }} -- --verbose
 
 ###############
 ### FUZZING ###
@@ -620,7 +629,7 @@ default-snapshot-goldens-image := "ghcr.io/hyperlight-dev/hyperlight-snapshot-go
 # local directory. A missing entry fails the test. Each host checks
 # only its own (arch, hypervisor, cpu vendor, profile) golden.
 snapshot-goldens-verify target=default-target:
-    cargo test {{ if target == "release" { "--release" } else { "" } }} \
+    cargo +{{ host-toolchain }} test {{ if target == "release" { "--release" } else { "" } }} \
         -p hyperlight-host --test snapshot_goldens -- verify
 
 # Pull this host's goldens into the directory `snapshot-goldens-verify`
@@ -673,7 +682,7 @@ snapshot-goldens-pull target=default-target which="all" image=default-snapshot-g
 # reads. Run this then `snapshot-goldens-verify` to test the round trip
 # on one host. Pass `out` to write the snapshots elsewhere.
 snapshot-goldens-generate target=default-target out="":
-    cargo test {{ if target == "release" { "--release" } else { "" } }} \
+    cargo +{{ host-toolchain }} test {{ if target == "release" { "--release" } else { "" } }} \
         -p hyperlight-host --test snapshot_goldens -- generate {{ out }}
 
 # Generate this host's golden from the branch and place it where

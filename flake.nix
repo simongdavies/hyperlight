@@ -84,13 +84,19 @@
                 "wasm32-wasip1" "wasm32-wasip2" "wasm32-unknown-unknown"
                 "aarch64-unknown-none" "aarch64-apple-darwin"
               ];
-              extensions = [ "rust-src" ] ++ (if args.channel == "nightly" then [ "miri-preview" ] else []);
+              extensions = [ "rust-src" "rustfmt-preview" "clippy-preview" ]
+                ++ (if args.channel == "nightly" then [ "miri-preview" "llvm-tools-preview" ] else []);
             });
 
           # Hyperlight needs a variety of toolchains, since we use Nightly
           # for rustfmt and old toolchains to verify MSRV
           toolchains = lib.mapAttrs (_: customisedRustChannelOf) {
             stable = {
+              date = "2026-04-16";
+              channel = "stable";
+              sha256 = "sha256-gh/xTkxKHL4eiRXzWv8KP7vfjSk61Iq48x47BEDFgfk=";
+            };
+            "1.94" = {
               date = "2026-03-05";
               channel = "stable";
               sha256 = "sha256-qqF33vNuAdU5vua96VKVIwuc43j4EFeEXbjQ6+l4mO4=";
@@ -116,6 +122,7 @@
             "Cargo.toml" = {
               outputHashes = {
                 "piet-0.8.0" = "sha256-yHF0axor+uaGC0RYhw1JmjvFLVTYZkTx1XzDtuN2KIk=";
+                "mesh_process-0.0.0" = "sha256-q6FGSXMmCr68osL7p4HbniwOKJhjBL0X0aVc6kpyLYo=";
               };
             };
             "src/tests/rust_guests/Cargo.toml" = {
@@ -141,7 +148,7 @@
             paths = stdlibDeps ++ manifestDeps;
           };
 
-          # Script snippet, used in the cargo/rustc wrappers below,
+          # Script snippet, used in the cargo wrapper below,
           # which creates a number of .cargo/config.toml files in
           # order to allow using Nix-fetched dependencies (this must
           # be done for the guests, as well as for the main
@@ -191,35 +198,121 @@
             find "$(base_cargo metadata --format-version 1 | jq -r '.target_directory')" -path '*/build/libgit2-sys-*/out/include' -print0 | xargs -r -0 chmod u+w -R
           '';
 
-          # Hyperlight scripts use cargo in a bunch of ways that don't
-          # make sense for Nix cargo, including the `rustup +toolchain`
-          # syntax to use a specific toolchain and `cargo install`, so we
-          # build wrappers for rustc and cargo that enable this.  The
-          # scripts also use `rustup toolchain install` in some cases, in
-          # order to work in CI, so we provide a fake rustup that does
-          # nothing as well.
-          rustup-like-wrapper = name: pkgs.writeShellScriptBin name
-            (let
+          # Toolchains and components are supplied by Nix, not rustup.
+          selectToolchain = let
+              selectors = toolchains // { "1.95" = toolchains.stable; };
               clause = name: toolchain: ''
-                +${name}) base="${toolchain.rust}"; shift 1; ;;
-                +${name}-${toolchain.rust.toolchainVersionAttrs.date}) base="${toolchain.rust}"; shift 1; ;;
+                ${name}|${name}-${toolchain.rust.toolchainVersionAttrs.date}) base="${toolchain.rust}" ;;
               '';
               clauses = lib.strings.concatStringsSep "\n"
-                (lib.mapAttrsToList clause toolchains);
+                (lib.mapAttrsToList clause selectors);
             in ''
-              base="${toolchains.stable.rust}"
-              ${materialiseDeps}
-              case "$1" in
-                ${clauses}
-                install) exit 0; ;;
+              fail() { echo "$*" >&2; exit 1; }
+              select_toolchain() {
+                case "$1" in
+                  ${clauses}
+                  *) fail "Unsupported Nix Rust toolchain: $1" ;;
+                esac
+              }
+              toolchain="''${RUSTUP_TOOLCHAIN:-stable}"
+              case "''${1:-}" in
+                +*) toolchain="''${1#+}"; shift ;;
               esac
+              select_toolchain "$toolchain"
+            '';
+          rustup-like-wrapper = name: pkgs.writeShellScriptBin name ''
+              ${selectToolchain}
+              ${lib.optionalString (name == "cargo") ''
+                if [ "''${1:-}" = install ]; then exit 0; fi
+                ${materialiseDeps}
+              ''}
               export PATH="$base/bin:$PATH"
               exec "$base/bin/${name}" "$@"
-            '');
+            '';
+          nix-rustup = pkgs.writeShellScriptBin "rustup" ''
+            if [ "''${1:-}" = --quiet ]; then shift; fi
+            ${selectToolchain}
+            action="''${1:-}"
+            shift || fail "Expected a rustup action"
+            case "$action" in
+              run)
+                [ "$#" -ge 2 ] || fail "Expected a toolchain and command"
+                toolchain="$1"
+                select_toolchain "$toolchain"
+                shift
+                export RUSTUP_TOOLCHAIN="$toolchain"
+                # Keep cargo's dependency wrapper ahead of the selected binaries.
+                export PATH="$(dirname "$0"):$base/bin:$PATH"
+                exec "$@"
+                ;;
+              component|toolchain|target) ;;
+              *) fail "Unsupported Nix rustup action: $action" ;;
+            esac
+            operation="''${1:-}"
+            shift || fail "Expected a rustup operation"
+            items=()
+            while [ "$#" -gt 0 ]; do
+              case "$1" in
+                --toolchain)
+                  [ "$action" != toolchain ] && [ "$#" -ge 2 ] || fail "Invalid --toolchain"
+                  toolchain="$2"; select_toolchain "$toolchain"; shift 2 ;;
+                --no-self-update)
+                  [ "$action/$operation" = toolchain/install ] || fail "Invalid --no-self-update"
+                  shift ;;
+                --profile)
+                  [ "$action/$operation" = toolchain/install ] && [ "$#" -ge 2 ] || fail "Invalid --profile"
+                  case "$2" in minimal|default|complete) ;; *) fail "Unsupported profile: $2" ;; esac
+                  shift 2 ;;
+                --installed)
+                  [ "$operation" = list ] && [ "$action" != toolchain ] || fail "Invalid --installed"
+                  shift ;;
+                -*) fail "Unsupported Nix rustup option: $1" ;;
+                *) items+=("$1"); shift ;;
+              esac
+            done
+            case "$action/$operation" in
+              toolchain/list)
+                [ "''${#items[@]}" -eq 0 ] || fail "Unexpected toolchain list arguments"
+                printf '%s\n' ${lib.escapeShellArgs (lib.attrNames toolchains ++ [ "1.95" ])}
+                ;;
+              toolchain/install)
+                [ "''${#items[@]}" -gt 0 ] || fail "Expected a toolchain"
+                for item in "''${items[@]}"; do select_toolchain "$item"; done
+                ;;
+              component/list)
+                [ "''${#items[@]}" -eq 0 ] || fail "Unexpected component list arguments"
+                for manifest in "$base"/lib/rustlib/manifest-*; do
+                  [ -f "$manifest" ] || continue
+                  printf '%s (installed)\n' "''${manifest##*/manifest-}"
+                done
+                ;;
+              component/add)
+                [ "''${#items[@]}" -gt 0 ] || fail "Expected a component"
+                for item in "''${items[@]}"; do
+                  case "$item" in
+                    rustfmt|clippy|miri|llvm-tools) item="$item-preview" ;;
+                    rust-src|rustfmt-preview|clippy-preview|miri-preview|llvm-tools-preview) ;;
+                    *) fail "Unsupported Nix Rust component: $item" ;;
+                  esac
+                  compgen -G "$base/lib/rustlib/manifest-$item" >/dev/null ||
+                    compgen -G "$base/lib/rustlib/manifest-$item-*" >/dev/null ||
+                    fail "Component $item is not supplied by Nix for $toolchain"
+                done
+                ;;
+              target/add)
+                [ "''${#items[@]}" -gt 0 ] || fail "Expected a target"
+                for item in "''${items[@]}"; do
+                  [ -d "$base/lib/rustlib/$item/lib" ] ||
+                    fail "Target $item is not supplied by Nix for $toolchain"
+                done
+                ;;
+              *) fail "Unsupported Nix rustup action: $action $operation" ;;
+            esac
+          '';
           fake-rustup = pkgs.symlinkJoin {
             name = "fake-rustup";
             paths = [
-              (pkgs.writeShellScriptBin "rustup" "")
+              nix-rustup
               (rustup-like-wrapper "rustc")
               (rustup-like-wrapper "cargo")
             ];

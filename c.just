@@ -12,7 +12,7 @@ c-flags-release-elf := '-O3'
 build-c-guests target=default-target: (build-rust-capi target) (compile-c-guest target) (link-c-guest target)
 
 build-rust-capi target=default-target: (ensure-cargo-hyperlight)
-    cd src/hyperlight_guest_capi && cargo hyperlight build --profile {{ if target == "debug" { "dev" } else { target } }}
+    cd src/hyperlight_guest_capi && {{ guest-cargo }} hyperlight build --profile {{ if target == "debug" { "dev" } else { target } }}
 
 compile-c-guest target=default-target:
     # elf
