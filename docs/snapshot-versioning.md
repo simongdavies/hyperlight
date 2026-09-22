@@ -25,18 +25,20 @@ A snapshot carries three independently evolvable version markers:
   anything about how the bytes are packed inside the OCI layer.
 * **Config schema**, `MT_CONFIG_V1`
   (`application/vnd.hyperlight.snapshot.config.v1+json`), aliased as
-  `MT_CONFIG_CURRENT`. This is the JSON shape of the config blob:
+  `MT_CONFIG_CURRENT` for snapshots without native process definitions.
+  Process-aware snapshots use `MT_CONFIG_V2`, aliased as
+  `MT_PROCESS_CONFIG_CURRENT`. This is the JSON shape of the config blob:
   field names, types, required vs optional, the descriptors the loader
   needs in order to reconstruct the sandbox (memory sizes, buffer
   sizes, `abi_version`, `hyperlight_version`, etc.). Renaming a field,
   changing its type, or adding a required field is a schema change and
-  bumps this constant.
+  requires a new named schema version.
 
 The `OCI_LAYOUT_VERSION` constant is pinned by the OCI image-layout
 spec at `1.0.0`.
 
 Each media-type axis is a `_VN` constant with a `_CURRENT` alias. The
-writer emits `_CURRENT`. The loader matches each `_VN` explicitly. To
+writer emits the applicable `_CURRENT`. The loader matches each `_VN` explicitly. To
 add a version, declare `MT_FOO_V2`, point `MT_FOO_CURRENT` at it, and
 add a loader arm that translates the old version or rejects it.
 
@@ -48,6 +50,19 @@ records it for diagnostics and does not gate loading on it.
 
 Record compatibility paths here when a future hard snapshot break can remove
 them.
+
+Config v1 retains its JSON shape and omits `process_topology`, including when
+`process-isolation` is enabled. Config v2 requires a valid topology and an enabled
+process loader. Older or feature-disabled loaders reject its media type rather
+than silently discarding native ownership. The writer selects the schema from
+the presence of process definitions, not from the feature flag alone.
+
+This config extension preserves guest memory ABI 3 and memory encoding v1.
+The nested topology has its own `schema_version: 1`. Referenced native program
+configs also have `schema_version: 1`. These identify definition formats, not
+guest memory layouts or running-process state. Unsupported versions are rejected.
+Changing their serialized shape requires an explicit version/compatibility
+decision and updated schema pins.
 
 ## Enforcement
 
@@ -63,6 +78,11 @@ hold a copy of every value that defines the format:
 OCI layout version, the `HyperlightPEB` size, every `OutBAction` and
 `VmAction` discriminant, and `BASE_ADDRESS`. If the source value
 drifts from the copy in `tripwires.rs`, the crate fails to compile.
+
+`config::schema_pin` pins the legacy config and the process-aware config's
+nested topology, program descriptors, controls, contracts and trust policy.
+The process pin uses the complete architecture-specific x86-64 or aarch64
+config shape.
 
 The snapshot golden verify test
 (`cargo test -p hyperlight-host --test snapshot_goldens`) loads
@@ -82,6 +102,9 @@ just snapshot-goldens-verify  # run them through the current loader
 
 Each host verifies only its own `(arch, hypervisor, cpu vendor, profile)`
 golden. A missing entry fails the test rather than being skipped.
+The golden binary without an explicit mode is a no-op, including through
+`just test`. Only an explicit `verify` run against published inputs proves
+compatibility with those inputs.
 
 On a pull request the verify test runs on every supported arch and
 hypervisor runner. The default path pulls the published tag set for the
@@ -92,6 +115,12 @@ path described in [Breaking the format on a pull request](#breaking-the-format-o
 ## Changing the format
 
 When you change anything on the list above, you have three options.
+
+Change only the affected version axis. The ABI-bump steps below apply to
+memory ABI changes. A compatible config-only extension adds a named config
+version and retains the old loader without changing the memory ABI.
+`GOLDENS_VERSION` stays at v3.0 while ABI 3 and the published `CHECKS` set stay
+unchanged. New schema unit tests are not additions to that published check set.
 
 ### Option 1: avoid the break
 
@@ -367,4 +396,3 @@ major:
 * The loader accepts the old `abi_version` (Option 2 step 4), so the old
   golden loads.
 * Register the host functions the old golden's checks call.
-

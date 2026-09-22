@@ -1098,7 +1098,7 @@ mod schema_pin {
         assert_eq!(
             actual_value, pinned_value,
             "Snapshot config JSON schema changed. If the change can break \
-             existing snapshots on disk, bump `MT_CONFIG_V1` in \
+             existing snapshots on disk, add a config version in \
              `super::media_types` and follow `docs/snapshot-versioning.md`. \
              Either way, paste the actual output below into the matching \
              `PINNED_*`.\n\nactual:\n{actual}"
@@ -1108,6 +1108,72 @@ mod schema_pin {
     #[test]
     fn call_round_trip() {
         assert_round_trip(PINNED_CALL);
+    }
+
+    #[cfg(feature = "process-isolation")]
+    #[test]
+    fn process_config_v2_pins_nested_schema() {
+        use crate::process::program::ProcessTopologyDefinition;
+
+        const PINNED_TOPOLOGY: &str = r#"{
+          "schema_version": 1,
+          "sandbox": {
+            "name": "sandbox",
+            "program": {
+              "mediaType": "application/vnd.oci.image.manifest.v1+json",
+              "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+              "size": 123
+            },
+            "profile": [
+              {"control": {"memory_limit": 268435456}, "required": true},
+              {"control": "deny_network", "required": false},
+              {"control": "deny_child_processes", "required": true}
+            ],
+            "functions": [],
+            "windows_sandbox_host_policy": "trusted"
+          },
+          "workers": [{
+            "name": "functions",
+            "program": {
+              "mediaType": "application/vnd.oci.image.manifest.v1+json",
+              "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+              "size": 456
+            },
+            "profile": [
+              {"control": {"memory_limit": 67108864}, "required": true},
+              {"control": {"cpu_budget": {
+                "quota": {"secs": 0, "nanos": 50000000},
+                "period": {"secs": 0, "nanos": 100000000}
+              }}, "required": true},
+              {"control": "deny_network", "required": true},
+              {"control": "deny_child_processes", "required": true}
+            ],
+            "functions": [
+              {"name": "HostAdd", "parameters": ["int", "int"], "output": "int",
+               "idempotency": "idempotent"},
+              {"name": "Notify", "parameters": ["vec_bytes", "bool"], "output": "void",
+               "idempotency": "non_idempotent"},
+              {"name": "Unclassified", "parameters": ["byte_chunks"], "output": "vec_bytes",
+               "idempotency": "unspecified"}
+            ],
+            "windows_sandbox_host_policy": "app_container"
+          }]
+        }"#;
+        // PINNED_CALL supplies the complete x86-64 or aarch64 config shape.
+        let mut expected: serde_json::Value = serde_json::from_str(PINNED_CALL).unwrap();
+        expected["abi_version"] = 3.into();
+        expected["process_topology"] = serde_json::from_str(PINNED_TOPOLOGY).unwrap();
+        let mut config: OciSnapshotConfig = serde_json::from_value(expected.clone()).unwrap();
+        let topology: ProcessTopologyDefinition =
+            serde_json::from_value(config.process_topology.take().unwrap()).unwrap();
+        topology.validate().unwrap();
+        config.abi_version = SNAPSHOT_ABI_VERSION;
+        config.process_topology = Some(serde_json::to_value(topology).unwrap());
+        assert_eq!(
+            serde_json::to_value(config).unwrap(),
+            expected,
+            "Process config schema changed. Follow docs/snapshot-versioning.md."
+        );
     }
 
     #[test]

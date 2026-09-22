@@ -51,6 +51,281 @@ fn create_snapshot() -> Arc<Snapshot> {
     sbox.snapshot().unwrap()
 }
 
+#[cfg(feature = "process-isolation")]
+mod program_exports {
+    use super::*;
+    use crate::process::program::{
+        LocalProgramStore, ProcessDefinition, ProcessTopologyDefinition, ProgramArtifact,
+        ProgramConfig, ProgramRole, ProgramTarget,
+    };
+    use crate::process::{ProcessControl, ProcessProfile, RequestedControl};
+
+    fn definition(artifact: ProgramArtifact) -> ProcessTopologyDefinition {
+        let profile = ProcessProfile::new([RequestedControl {
+            control: ProcessControl::DenyChildProcesses,
+            required: true,
+        }]);
+        ProcessTopologyDefinition::new(
+            Some(ProcessDefinition::new("sandbox", artifact, &profile, Vec::new()).unwrap()),
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
+    fn package(store: &LocalProgramStore) -> ProgramArtifact {
+        store
+            .package(
+                &ProgramConfig {
+                    schema_version: 1,
+                    role: ProgramRole::SandboxHost,
+                    target: ProgramTarget::current(Default::default()),
+                    functions: Vec::new(),
+                },
+                b"native program fixture",
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn reference_export_preserves_never_started_program_without_resolving_it() {
+        let source = tempfile::tempdir().unwrap();
+        let store = LocalProgramStore::new(source.path());
+        let artifact = package(&store);
+        let topology = definition(artifact);
+        drop(source);
+        let snapshot = Arc::try_unwrap(create_snapshot())
+            .ok()
+            .unwrap()
+            .with_process_topology(topology.clone())
+            .unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let tag = OciTag::new("reference").unwrap();
+        let digest = snapshot.save(target.path(), &tag).unwrap();
+        assert_eq!(
+            std::fs::read_dir(target.path().join("blobs/sha256"))
+                .unwrap()
+                .count(),
+            3
+        );
+        let loaded = Snapshot::checked_load(target.path(), digest).unwrap();
+        assert_eq!(loaded.process_topology(), Some(&topology));
+        loaded.validate_process_topology(Some(&topology)).unwrap();
+        assert!(loaded.validate_process_topology(None).is_err());
+        assert!(
+            topology
+                .validate_programs(&store, &ProgramTarget::current(Default::default()))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn self_contained_export_copies_and_verifies_native_closure() {
+        let source = tempfile::tempdir().unwrap();
+        let store = LocalProgramStore::new(source.path());
+        let artifact = package(&store);
+        let topology = definition(artifact.clone());
+        let snapshot = Arc::try_unwrap(create_snapshot())
+            .ok()
+            .unwrap()
+            .with_process_topology(topology.clone())
+            .unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let tag = OciTag::new("embedded").unwrap();
+        let digest = snapshot
+            .save_with_programs(target.path(), &tag, &store)
+            .unwrap();
+        snapshot
+            .save_with_programs(target.path(), &tag, &store)
+            .unwrap();
+        assert_eq!(
+            std::fs::read_dir(target.path().join("blobs/sha256"))
+                .unwrap()
+                .count(),
+            6
+        );
+        drop(source);
+        let embedded = LocalProgramStore::new(target.path());
+        topology
+            .validate_programs(&embedded, &ProgramTarget::current(Default::default()))
+            .unwrap();
+        let loaded = Snapshot::checked_load(target.path(), digest).unwrap();
+        assert_eq!(loaded.process_topology(), Some(&topology));
+        let manifest = target
+            .path()
+            .join("blobs/sha256")
+            .join(artifact.digest().as_str().strip_prefix("sha256:").unwrap());
+        std::fs::remove_file(manifest).unwrap();
+        // Definition parsing is independent of resolving or starting programs.
+        assert!(Snapshot::checked_load(target.path(), tag).is_ok());
+        assert!(
+            topology
+                .validate_programs(&embedded, &ProgramTarget::current(Default::default()))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn missing_program_fails_embedded_export_without_publishing_snapshot() {
+        let source = tempfile::tempdir().unwrap();
+        let store = LocalProgramStore::new(source.path());
+        let topology = definition(package(&store));
+        let snapshot = Arc::try_unwrap(create_snapshot())
+            .ok()
+            .unwrap()
+            .with_process_topology(topology)
+            .unwrap();
+        drop(source);
+        let target = tempfile::tempdir().unwrap();
+        assert!(
+            snapshot
+                .save_with_programs(target.path(), &OciTag::new("missing").unwrap(), &store)
+                .is_err()
+        );
+        assert!(!target.path().join("index.json").exists());
+    }
+
+    #[test]
+    fn process_config_rejects_unknown_topology_version() {
+        let source = tempfile::tempdir().unwrap();
+        let store = LocalProgramStore::new(source.path());
+        let snapshot = Arc::try_unwrap(create_snapshot())
+            .ok()
+            .unwrap()
+            .with_process_topology(definition(package(&store)))
+            .unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let tag = OciTag::new("future-topology").unwrap();
+        snapshot.save(target.path(), &tag).unwrap();
+        rewrite_config(target.path(), |config| {
+            config["process_topology"]["schema_version"] = 2.into();
+        });
+        let error = unwrap_err_snapshot(Snapshot::checked_load(target.path(), tag));
+        assert!(
+            error
+                .to_string()
+                .contains("Unsupported process topology schema"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn legacy_export_omits_process_extension() {
+    let snapshot = create_snapshot();
+    let target = tempfile::tempdir().unwrap();
+    let digest = snapshot
+        .save(target.path(), &OciTag::new("legacy").unwrap())
+        .unwrap();
+    let config: Value =
+        serde_json::from_slice(&std::fs::read(find_config_blob(target.path())).unwrap()).unwrap();
+    assert!(config.get("process_topology").is_none());
+    let path = target
+        .path()
+        .join("blobs/sha256")
+        .join(digest.as_str().strip_prefix("sha256:").unwrap());
+    let manifest: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(manifest["config"]["mediaType"], super::file::MT_CONFIG_V1);
+    assert!(Snapshot::checked_load(target.path(), digest).is_ok());
+}
+
+#[test]
+fn process_topology_cannot_be_smuggled_into_legacy_config() {
+    let snapshot = create_snapshot();
+    let target = tempfile::tempdir().unwrap();
+    let tag = OciTag::new("legacy").unwrap();
+    snapshot.save(target.path(), &tag).unwrap();
+    rewrite_config(target.path(), |config| {
+        config["process_topology"] = serde_json::json!({
+            "schema_version": 1, "sandbox": null, "workers": []
+        });
+    });
+    let error = unwrap_err_snapshot(Snapshot::checked_load(target.path(), tag));
+    assert!(
+        error
+            .to_string()
+            .contains("media type and process topology disagree"),
+        "{error}"
+    );
+}
+
+#[test]
+fn process_config_requires_a_definition() {
+    let snapshot = create_snapshot();
+    let target = tempfile::tempdir().unwrap();
+    let tag = OciTag::new("incomplete").unwrap();
+    snapshot.save(target.path(), &tag).unwrap();
+    rewrite_manifest(target.path(), |manifest| {
+        manifest["config"]["mediaType"] =
+            "application/vnd.hyperlight.snapshot.config.v2+json".into();
+        manifest["artifactType"] = "application/vnd.hyperlight.snapshot.config.v2+json".into();
+    });
+    let error = unwrap_err_snapshot(Snapshot::checked_load(target.path(), tag));
+    let expected = if cfg!(feature = "process-isolation") {
+        "media type and process topology disagree"
+    } else {
+        "unexpected config media type"
+    };
+    assert!(error.to_string().contains(expected), "{error}");
+}
+
+#[cfg(not(feature = "process-isolation"))]
+#[test]
+fn process_config_requires_enabled_loader() {
+    let target = tempfile::tempdir().unwrap();
+    let tag = OciTag::new("processes").unwrap();
+    create_snapshot().save(target.path(), &tag).unwrap();
+    rewrite_config(target.path(), |config| {
+        config["process_topology"] = serde_json::json!({
+            "schema_version": 1,
+            "sandbox": {
+                "name": "sandbox",
+                "program": {
+                    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                    "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                    "size": 123
+                },
+                "profile": [{"control": "deny_child_processes", "required": true}],
+                "functions": [],
+                "windows_sandbox_host_policy": "app_container"
+            },
+            "workers": []
+        });
+    });
+    rewrite_manifest(target.path(), |manifest| {
+        manifest["config"]["mediaType"] = super::file::MT_CONFIG_V2.into();
+        manifest["artifactType"] = super::file::MT_CONFIG_V2.into();
+    });
+    let error = unwrap_err_snapshot(Snapshot::checked_load(target.path(), tag));
+    assert!(
+        error.to_string().contains("unexpected config media type"),
+        "{error}"
+    );
+}
+
+#[test]
+fn future_process_config_version_is_rejected() {
+    let target = tempfile::tempdir().unwrap();
+    let tag = OciTag::new("future-config").unwrap();
+    create_snapshot().save(target.path(), &tag).unwrap();
+    rewrite_manifest(target.path(), |manifest| {
+        let media = "application/vnd.hyperlight.snapshot.config.v3+json";
+        manifest["config"]["mediaType"] = media.into();
+        manifest["artifactType"] = media.into();
+    });
+    let error = unwrap_err_snapshot(Snapshot::checked_load(target.path(), tag));
+    let message = error.to_string();
+    assert!(
+        message.contains("unexpected config media type"),
+        "{message}"
+    );
+    assert!(message.contains(super::file::MT_CONFIG_V1), "{message}");
+    assert_eq!(
+        message.contains(super::file::MT_CONFIG_V2),
+        cfg!(feature = "process-isolation"),
+        "{message}"
+    );
+}
+
 /// `Result::unwrap_err` requires `T: Debug`, but `Snapshot` is not
 /// `Debug`. This wrapper is the test-side equivalent.
 #[track_caller]

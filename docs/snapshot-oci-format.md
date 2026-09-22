@@ -26,7 +26,7 @@ path/
                                       (`memory_size` bytes)
 ```
 
-Three blob kinds per tag:
+Three snapshot blob kinds per tag:
 
 * **manifest** (`application/vnd.oci.image.manifest.v1+json`). Tiny JSON
   pointer record selected via `index.json`. References one config and
@@ -36,6 +36,7 @@ Three blob kinds per tag:
   resume address and captured registers, memory layout, registered
   host functions, snapshot generation counter. Loaded eagerly and
   fully parsed.
+  Snapshots with native process definitions use config version 2.
 * **layer / memory** (`application/vnd.hyperlight.snapshot.memory.v1`).
   The raw guest memory image, exactly `memory_size` bytes. mmap'd on
   restore.
@@ -69,6 +70,33 @@ config or layer blobs that no other tag references, become orphans
 in `blobs/sha256/`.
 
 ## Write semantics
+
+### Native process definitions
+
+With `process-isolation`, snapshots can record sandbox-host and host-function
+process definitions, immutable program references, contracts and requested
+controls. `save` writes references. `save_with_programs` also copies their
+validated program closure into the layout. Loading metadata does not launch
+programs.
+
+The writer selects `MT_PROCESS_CONFIG_CURRENT` (config v2) when process
+definitions are present. Without them it selects `MT_CONFIG_CURRENT` (config
+v1) and omits the extension, even in a feature-enabled build. Config v2 requires
+the process loader and topology schema 1. Native program configs use their own
+schema 1. Guest memory retains ABI 3 and encoding v1. See
+[snapshot versioning](snapshot-versioning.md).
+
+Native callback and process state is outside the snapshot. In-place restore
+keeps existing native processes. Fresh reconstruction validates the recorded
+definitions and creates new sandbox-owned processes.
+
+The Windows sandbox-host policy is a request, not authority. Missing policy
+metadata requires AppContainer. A recorded `Trusted` policy requires a separate
+`SandboxBuilder::allow_trusted_windows_sandbox_host()` call for every fresh
+reconstruction. A valid digest or self-contained export cannot provide this
+consent. An explicit AppContainer placement cannot restore a trusted placement.
+
+### Snapshot writes
 
 `Snapshot::save(path, tag)` opens or creates the OCI layout at
 `path` and writes one snapshot under `tag`, an [`OciTag`] whose
