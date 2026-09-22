@@ -185,6 +185,24 @@ name = "sandbox_worker"
 path = "tests/fixtures/sandbox_worker.rs"
 required-features = ["process-isolation"]
 
+[[example]]
+name = "isolation_bench"
+path = "tests/fixtures/isolation_bench.rs"
+
+[[example]]
+name = "isolation_local_consumer"
+path = "tests/fixtures/isolation_local_consumer.rs"
+
+[[example]]
+name = "isolation_bench_worker"
+path = "tests/fixtures/isolation_bench_worker.rs"
+required-features = ["process-isolation"]
+
+[[example]]
+name = "isolation_bench_sandbox"
+path = "tests/fixtures/isolation_bench_sandbox.rs"
+required-features = ["process-isolation"]
+
 [[test]]
 name = "snapshot_goldens"
 path = "tests/snapshot_goldens/main.rs"

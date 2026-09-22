@@ -79,6 +79,88 @@ the probe's entry marker. The test also requires root/domain cleanup and image
 removal. It changes only its private test image, not the helper or production
 filter. An unrelated early launch failure does not satisfy the test.
 
+## Bounded runtime measurements
+
+`isolation_bench` defaults to sequential startup, guest-call and snapshot
+measurements. Its optional `measurement` object selects an observed workload:
+
+* `{"kind":"resident","sandboxes":4}` holds 1, 2, 4 or 8 independent sandboxes.
+  Each sandbox has one execution thread and its own native workers.
+* `{"kind":"recovery"}` tests one quiescent function-worker loss. It requires
+  a remote-function placement.
+
+Both require `vm_starts: 1`. Counts and placement remain explicit. These modes
+do not change production concurrency, profiles, restart limits or retry rules.
+The caller must separately authorize the workload and observer.
+
+The fixture publishes immutable `event-N.json` boundaries in its new work
+directory. An external observer returns `ack-N.json` with the same sequence and
+phase, a successful `hyperlight-isolation-observation/v1` result and its exact
+authority, source identity and sampling policy. Publish each file atomically.
+A missing acknowledgement fails after five seconds. Mismatched or unsuccessful
+acknowledgements invalidate the run.
+
+The ten-second channel wait does not cancel a synchronous guest call. Warmup,
+active calls and thread joins require an outer controller deadline. The bounded
+Linux runner enforces 15 seconds for each controller. On timeout it aborts the
+request. The owned-domain driver kills the entire request cgroup and verifies
+emptiness/removal. Forced cleanup invalidates the result and stops the campaign.
+Without that external deadline and verified teardown, this fixture has no
+whole-run bound. No thread is detached to hide blocked work.
+
+Resident acquisition starts with a one-second reference window after execution
+threads exist but before VM creation. All sandboxes must then complete eight
+validated warmup calls. A two-second idle window precedes five seconds of serial
+`Add(17,25)` calls per sandbox. Every result must equal 42. Per-sandbox counters
+and a common wall-time interval provide throughput without an unbounded vector
+of call samples. Sandboxes remain alive through the final observation. This
+measures bounded scaling, not maximum machine capacity.
+
+Recovery mutates guest static state by seven and reads it back before allowing
+the observer to terminate exactly one pinned original function-worker root.
+The next idempotent HostAdd call must return 42. The guest mutation, replacement
+identity, program identity and effective required controls must survive.
+The observer records fault-request to validated-boundary time separately from
+the fixture's call duration. This is quiescent loss, not ambiguous in-flight
+replay or a sandbox-host failure test.
+
+Observers sample at 100 ms intervals outside measured accounting. Linux
+private-resident bytes are `Private_Clean + Private_Dirty` from `smaps_rollup`.
+RSS and PSS remain separate. Cgroup charged current/peak bytes are not private
+or committed memory. Parent/child cgroup totals overlap and must not be summed.
+Windows private committed bytes use `PROCESS_MEMORY_COUNTERS_EX.PrivateUsage`.
+Working set is separate. Pin process handles and creation identities. Include
+all observed owned descendants and retain role attribution. Missing reads or a
+changing census invalidate the sample. Linux and Windows memory types are not
+numerically interchangeable.
+
+Whole-topology sums count each PID once. The warm-idle median minus the reference
+median, divided by the sandbox count, is an amortized increment. It is not exact
+per-VM ownership when VMs share a caller. Retain negative increments as noise,
+not zero savings. Sampling itself adds overhead.
+
+`summarize_bench.py` retains raw reports and produces `observed_groups` separately
+from latency groups. It rejects incomplete windows, duplicate PIDs, missing
+memory values and invalid recovery evidence. Group identity includes workload,
+sandbox count, observer identity, authority, effective controls and platform.
+Resident artifacts contain a `per_sandbox` array of index/artifact pairs, matching
+the process inventories. Observer identity must match the enclosing controller.
+At a declared 100 ms interval, adjacent samples must be 50 to 150 ms apart.
+Reference, idle and active windows require at least 9, 19 and 49 samples,
+spanning at least 0.8, 1.8 and 4.8 seconds. Populated windows cannot overlap or
+reuse timestamps. Each stable window must retain its complete process census.
+Idle and active censuses must match. Construction between reference and idle,
+and the explicit recovery replacement, are separate transitions.
+Keep one delegated root across repetitions of a condition. Different roots are
+different conditions. Three repetitions provide descriptive ranges, not strong
+tail estimates or an accepted overhead threshold.
+
+Native process state is not a guest snapshot. Internal startup-phase timing
+and Windows Job-empty timestamps require separate evidence. Observed original
+root exit is not whole-domain emptiness. Linux sampled empty/removed-domain
+times are bounds, not exact completion timestamps. Executable size is not memory
+usage. Presence of these fixtures does not establish runtime qualification.
+
 ## Hyperlight cleanup limitation
 
 Hyperlight requires original-root completion and domain emptiness before
