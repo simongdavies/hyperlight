@@ -295,6 +295,26 @@ impl Snapshot {
         self.save(path, tag)
     }
 
+    /// Exports guest memory and provider-owned native programs into one OCI layout.
+    ///
+    /// The provider supplies immutable program content. Host launch authority is
+    /// neither exported nor restored from this layout.
+    #[cfg(feature = "process-isolation")]
+    pub fn save_with_process_provider(
+        &self,
+        path: impl AsRef<Path>,
+        tag: &OciTag,
+        provider: &crate::process::MeshProcessProvider,
+    ) -> crate::Result<OciDigest> {
+        self.build_config()?;
+        if let Some(topology) = &self.process_topology {
+            topology.validate_host_functions(&self.host_functions)?;
+            let destination = crate::process::program::LocalProgramStore::new(path.as_ref());
+            provider.export_programs(topology, &destination)?;
+        }
+        self.save(path, tag)
+    }
+
     /// Save this snapshot into an OCI Image Layout directory on disk.
     /// The saved snapshot can be loaded later with
     /// [`Snapshot::load`].

@@ -5,21 +5,37 @@
 fn main() -> hyperlight_host::Result<()> {
     use hyperlight_host::{new_error, process};
 
-    // SAFETY: the trusted launcher enters this fixture before any threads exist.
-    let startup = unsafe { process::ProcessStartup::capture() }?
-        .ok_or_else(|| new_error!("Worker startup resources are required"))?;
+    // SAFETY: capture runs once before threads. Any invitation comes from the trusted launcher.
+    let startup = unsafe { process::ProcessStartup::capture() }?;
+    if startup.is_none() && std::env::args().skip(1).collect::<Vec<_>>() == ["--policy-child"] {
+        return Ok(());
+    }
+    let startup = startup.ok_or_else(|| new_error!("Worker startup resources are required"))?;
+    let allow_children = match std::fs::read("/child-policy") {
+        Ok(mode) if mode == b"allow" => true,
+        Ok(mode) if mode == b"deny" => false,
+        Ok(_) => return Err(new_error!("Invalid packaged child policy")),
+        // Existing qualification images require denial without a policy file.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
     let mut functions = process::ProcessHostFunctions::default();
     functions.bind(
         process::HostFunctionContract::<(i32, i32), i32>::new(
             "HostAdd",
             process::Idempotency::Idempotent,
         ),
-        |a, b| {
-            let check = || {
-                let error = std::process::Command::new("/program")
-                    .status()
-                    .expect_err("Child process creation must be denied");
-                assert_eq!(error.raw_os_error(), Some(libc::EPERM));
+        move |a, b| {
+            let check = move || {
+                let result = std::process::Command::new("/program")
+                    .arg("--policy-child")
+                    .status();
+                if allow_children {
+                    assert!(result.expect("Child creation must succeed").success());
+                } else {
+                    let error = result.expect_err("Child process creation must be denied");
+                    assert_eq!(error.raw_os_error(), Some(libc::EPERM));
+                }
             };
             check();
             std::thread::spawn(move || {

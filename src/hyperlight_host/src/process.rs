@@ -75,7 +75,10 @@ mod linux;
 mod linux_domain;
 #[cfg(target_os = "linux")]
 mod linux_output;
+#[cfg(any(target_os = "macos", test))]
+mod macos;
 pub mod program;
+mod provider;
 mod runtime;
 mod sandbox;
 mod transport;
@@ -85,6 +88,7 @@ mod windows;
 pub use launch::{ControlOutcome, ControlResult, ProcessCleanupError, ProcessReport};
 #[cfg(target_os = "linux")]
 pub use linux::LinuxProcessResources;
+pub use provider::MeshProcessProvider;
 pub use runtime::RestartPolicy;
 pub(crate) use runtime::Runtime as ProcessRuntime;
 pub use sandbox::SandboxHost;
@@ -240,13 +244,13 @@ impl ProcessProfile {
 #[derive(Clone, Debug)]
 pub struct ProcessOptions {
     name: String,
-    program: program::ProgramArtifact,
+    program: Option<program::ProgramArtifact>,
     profile: ProcessProfile,
     windows_sandbox_host_policy: WindowsSandboxHostPolicy,
 }
 
 impl ProcessOptions {
-    /// The executable binds its own implementations to the shared contracts.
+    /// Uses a prepackaged program for this process placement.
     pub fn new(
         name: impl Into<String>,
         program: program::ProgramArtifact,
@@ -254,10 +258,33 @@ impl ProcessOptions {
     ) -> Self {
         Self {
             name: name.into(),
-            program,
+            program: Some(program),
             profile,
             windows_sandbox_host_policy: WindowsSandboxHostPolicy::default(),
         }
+    }
+
+    /// Requests provider-owned program packaging for this process placement.
+    pub fn for_provider(name: impl Into<String>, profile: ProcessProfile) -> Self {
+        Self {
+            name: name.into(),
+            program: None,
+            profile,
+            windows_sandbox_host_policy: WindowsSandboxHostPolicy::default(),
+        }
+    }
+
+    /// Supplies a prepackaged program for qualification or custom embedders.
+    ///
+    /// This is an explicit alias for [`Self::new`]. Normal applications should
+    /// use [`Self::for_provider`] and let the
+    /// [`MeshProcessProvider`] own program packaging.
+    pub fn with_program_artifact(
+        name: impl Into<String>,
+        program: program::ProgramArtifact,
+        profile: ProcessProfile,
+    ) -> Self {
+        Self::new(name, program, profile)
     }
 
     /// Records a containment request. Trusted mode also needs builder permission.
@@ -267,8 +294,10 @@ impl ProcessOptions {
     }
 
     fn validate(&self) -> Result<()> {
-        if self.name.is_empty() {
-            return Err(new_error!("Process name must be nonempty"));
+        if self.name.is_empty() || self.name.chars().any(char::is_control) {
+            return Err(new_error!(
+                "Process name must be nonempty and contain no control characters"
+            ));
         }
         self.profile.validate()
     }
@@ -380,6 +409,7 @@ pub(crate) struct Topology {
     sandbox_functions: Vec<FunctionDefinition>,
     functions: Vec<HostFunctionProcess>,
     duplicate_sandbox: bool,
+    pub(crate) provider: Option<MeshProcessProvider>,
     pub(crate) programs: Option<(program::LocalProgramStore, program::ProgramTarget)>,
     pub(crate) restart_policy: RestartPolicy,
     pub(crate) allow_trusted_windows_sandbox_host: bool,
@@ -393,14 +423,21 @@ impl Topology {
             .sandbox
             .as_ref()
             .map(|options| {
+                let functions = self
+                    .sandbox_functions
+                    .iter()
+                    .map(program::FunctionContractDefinition::from_definition)
+                    .collect::<Vec<_>>();
                 program::ProcessDefinition::new(
                     &options.name,
-                    options.program.clone(),
+                    self.resolve_program(
+                        &options.name,
+                        program::ProgramRole::SandboxHost,
+                        &functions,
+                        options.program.as_ref(),
+                    )?,
                     &options.profile,
-                    self.sandbox_functions
-                        .iter()
-                        .map(program::FunctionContractDefinition::from_definition)
-                        .collect(),
+                    functions,
                 )
                 .map(|definition| {
                     definition.with_windows_sandbox_host_policy(options.windows_sandbox_host_policy)
@@ -411,15 +448,21 @@ impl Topology {
             .functions
             .iter()
             .map(|worker| {
+                let functions = worker
+                    .functions
+                    .iter()
+                    .map(program::FunctionContractDefinition::from_definition)
+                    .collect::<Vec<_>>();
                 program::ProcessDefinition::new(
                     &worker.options.name,
-                    worker.options.program.clone(),
+                    self.resolve_program(
+                        &worker.options.name,
+                        program::ProgramRole::FunctionWorker,
+                        &functions,
+                        worker.options.program.as_ref(),
+                    )?,
                     &worker.options.profile,
-                    worker
-                        .functions
-                        .iter()
-                        .map(program::FunctionContractDefinition::from_definition)
-                        .collect(),
+                    functions,
                 )
                 .map(|definition| {
                     definition.with_windows_sandbox_host_policy(
@@ -452,6 +495,19 @@ impl Topology {
             (Some(expected), None) => expected.clone(),
             (None, None) => return Ok(None),
         };
+        for function in definition
+            .sandbox()
+            .into_iter()
+            .chain(definition.workers())
+            .flat_map(|process| process.functions())
+        {
+            if local.inner().function_signature(function.name()).is_some() {
+                return Err(new_error!(
+                    "Snapshot process topology conflicts with local host function '{}'",
+                    function.name()
+                ));
+            }
+        }
         self.authorize(&definition)?;
         Ok(Some(definition))
     }
@@ -480,28 +536,46 @@ impl Topology {
         definition: program::ProcessTopologyDefinition,
     ) -> Result<ResolvedTopology> {
         self.authorize(&definition)?;
-        let (store, target) = self.programs.ok_or_else(|| {
-            new_error!("A process topology requires a local program store and verified target")
-        })?;
-        if target != program::ProgramTarget::current(target.os_dependencies.clone()) {
-            return Err(new_error!(
-                "Program execution target must match the current host"
-            ));
-        }
-        definition.validate_programs(&store, &target)?;
-        let launcher = std::sync::Arc::new(launch::ConfiguredLauncher {
-            store,
-            target,
-            #[cfg(target_os = "windows")]
-            windows: windows::WindowsPrincipals::new(&definition)?,
-            #[cfg(target_os = "linux")]
-            linux: self.linux_resources,
-        });
+        let provider = self.provider()?;
+        let launcher = provider.launcher(&definition)?;
         Ok(ResolvedTopology {
             definition,
             launcher,
             policy: self.restart_policy,
         })
+    }
+
+    fn provider(&self) -> Result<MeshProcessProvider> {
+        if let Some(provider) = &self.provider {
+            return Ok(provider.clone());
+        }
+        if let Some((store, target)) = &self.programs {
+            let provider = MeshProcessProvider::from_local_programs(store.clone(), target.clone())?;
+            #[cfg(target_os = "linux")]
+            let provider = match &self.linux_resources {
+                Some(resources) => provider.with_linux_resources(resources.clone())?,
+                None => provider,
+            };
+            return Ok(provider);
+        }
+        Err(new_error!(
+            "Process placement requires a MeshProcessProvider capability"
+        ))
+    }
+
+    fn resolve_program(
+        &self,
+        name: &str,
+        role: program::ProgramRole,
+        functions: &[program::FunctionContractDefinition],
+        artifact: Option<&program::ProgramArtifact>,
+    ) -> Result<program::ProgramArtifact> {
+        match artifact {
+            Some(artifact) => Ok(artifact.clone()),
+            None => self
+                .provider()?
+                .resolve_program(name, role, functions, None),
+        }
     }
 
     pub(crate) fn sandbox(&mut self, process: ProcessOptions) {

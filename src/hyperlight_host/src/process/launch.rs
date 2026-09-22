@@ -6,13 +6,57 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures::FutureExt;
-use mesh_process::{Mesh, OwnedHost, PendingHostLaunch};
+use mesh_process::Mesh;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub(super) use mesh_process::OwnedHost;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+use mesh_process::PendingHostLaunch;
 
 use super::program::{
     LocalProgramStore, ProcessDefinition, ProgramArtifact, ProgramRole, ProgramTarget,
 };
 use super::{ProcessControl, RequestedControl};
 use crate::{HyperlightError, Result, new_error};
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+pub(super) struct OwnedHost;
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+impl OwnedHost {
+    pub(super) fn id(&self) -> i32 {
+        0
+    }
+
+    pub(super) fn terminate_root(&self) -> Result<()> {
+        Err(new_error!(
+            "Mesh owned-process launch is unavailable on this host"
+        ))
+    }
+
+    pub(super) async fn wait_root(&mut self) -> Result<()> {
+        Err(new_error!(
+            "Mesh owned-process launch is unavailable on this host"
+        ))
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+struct PendingHostLaunch;
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+impl PendingHostLaunch {
+    fn cancel(&self) -> Result<()> {
+        Err(new_error!(
+            "Mesh owned-process launch is unavailable on this host"
+        ))
+    }
+
+    async fn wait_completion(&self) -> Result<()> {
+        Err(new_error!(
+            "Mesh owned-process launch is unavailable on this host"
+        ))
+    }
+}
 
 /// Effective enforcement or an explicit omission of one requested restriction.
 #[derive(Clone, Debug)]
@@ -55,7 +99,7 @@ pub struct ProcessReport {
     pub controls: Vec<ControlOutcome>,
 }
 
-pub(super) trait ProcessGuard: Send + Sync {
+pub(crate) trait ProcessGuard: Send + Sync {
     /// A pending native birth prevents fallback resource deletion.
     fn start_launch(&self);
     fn terminate_domain(&self) -> Result<()>;
@@ -64,7 +108,7 @@ pub(super) trait ProcessGuard: Send + Sync {
     fn release_resources(&self, deadline: Instant) -> Result<()>;
 }
 
-pub(super) struct PreparedProcess {
+pub(crate) struct PreparedProcess {
     pub config: mesh_process::ProcessConfig,
     pub guard: Arc<dyn ProcessGuard>,
     pub controls: Vec<ControlOutcome>,
@@ -78,43 +122,54 @@ pub(super) async fn launch_owned<T: 'static + mesh::message::MeshField + Send>(
     cancellation: mesh::CancelContext,
     timeout: Duration,
 ) -> Result<OwnedHost> {
-    guard.start_launch();
-    let mut pending = mesh.begin_launch_host_owned(config, initial);
-    let result = cancellation
-        .with_timeout(timeout)
-        .until_cancelled(pending.wait_host())
-        .await;
-    let error = match result {
-        Ok(Ok(root)) => return Ok(root),
-        // OpenVMM owns this foreign error type. Preserve its source chain.
-        Ok(Err(error)) => HyperlightError::from(error),
-        Err(error) => new_error!("Process launch cancelled: {error}"),
-    };
-    let deadline = Instant::now() + timeout;
-    let cancelled = pending.cancel();
-    let initial_kill = guard.terminate_domain();
-    let completion = mesh::CancelContext::new()
-        .with_timeout(deadline.saturating_duration_since(Instant::now()))
-        .until_cancelled(pending.wait_completion())
-        .await;
-    let release = finish_cleanup(guard.as_ref(), matches!(completion, Ok(Ok(_))), deadline);
-    let message = format!(
-        "Process launch failed: {error}; cancel: {cancelled:?}; initial termination: {initial_kill:?}; root: {completion:?}; cleanup: {release:?}"
-    );
-    if release.is_ok() {
-        Err(new_error!("{message}"))
-    } else {
-        Err(Box::new(ProcessCleanupError {
-            message,
-            source: Box::new(error),
-            owner: CleanupOwner::Launch(UnconfirmedLaunch {
-                pending: Mutex::new(pending),
-                guard,
-                deadline,
-                released: AtomicBool::new(false),
-            }),
-        })
-        .into())
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        let _ = (mesh, config, initial, guard, cancellation, timeout);
+        return Err(new_error!(
+            "Mesh owned-process launch is unavailable on this host"
+        ));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    {
+        guard.start_launch();
+        let mut pending = mesh.begin_launch_host_owned(config, initial);
+        let result = cancellation
+            .with_timeout(timeout)
+            .until_cancelled(pending.wait_host())
+            .await;
+        let error = match result {
+            Ok(Ok(root)) => return Ok(root),
+            // OpenVMM owns this foreign error type. Preserve its source chain.
+            Ok(Err(error)) => HyperlightError::from(error),
+            Err(error) => new_error!("Process launch cancelled: {error}"),
+        };
+        let deadline = Instant::now() + timeout;
+        let cancelled = pending.cancel();
+        let initial_kill = guard.terminate_domain();
+        let completion = mesh::CancelContext::new()
+            .with_timeout(deadline.saturating_duration_since(Instant::now()))
+            .until_cancelled(pending.wait_completion())
+            .await;
+        let release = finish_cleanup(guard.as_ref(), matches!(completion, Ok(Ok(_))), deadline);
+        let message = format!(
+            "Process launch failed: {error}; cancel: {cancelled:?}; initial termination: {initial_kill:?}; root: {completion:?}; cleanup: {release:?}"
+        );
+        if release.is_ok() {
+            Err(new_error!("{message}"))
+        } else {
+            Err(Box::new(ProcessCleanupError {
+                message,
+                source: Box::new(error),
+                owner: CleanupOwner::Launch(UnconfirmedLaunch {
+                    pending: Mutex::new(pending),
+                    guard,
+                    deadline,
+                    released: AtomicBool::new(false),
+                }),
+            })
+            .into())
+        }
     }
 }
 
@@ -299,7 +354,7 @@ fn finish_cleanup(guard: &dyn ProcessGuard, root_complete: bool, deadline: Insta
     guard.release_resources(deadline)
 }
 
-pub(super) trait ProcessLauncher: Send + Sync {
+pub(crate) trait ProcessLauncher: Send + Sync {
     fn prepare(&self, role: ProgramRole, definition: &ProcessDefinition)
     -> Result<PreparedProcess>;
 }
@@ -311,6 +366,7 @@ pub(super) struct ConfiguredLauncher {
     pub windows: super::windows::WindowsPrincipals,
     #[cfg(target_os = "linux")]
     pub linux: Option<super::LinuxProcessResources>,
+    pub _provider: Arc<super::provider::Provider>,
 }
 
 impl ProcessLauncher for ConfiguredLauncher {
@@ -331,20 +387,40 @@ impl ProcessLauncher for ConfiguredLauncher {
             return Err(crate::new_error!("Process program contracts changed"));
         }
         #[cfg(target_os = "windows")]
-        return super::windows::prepare(role, definition, &program, &self.windows);
+        let mut prepared = super::windows::prepare(role, definition, &program, &self.windows)?;
         #[cfg(target_os = "linux")]
-        return super::linux::prepare(
+        let mut prepared = super::linux::prepare(
             role,
             definition,
             &program,
             self.linux
                 .as_ref()
                 .ok_or_else(|| crate::new_error!("Linux process resources are required"))?,
-        );
+        )?;
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        {
+            prepared.config = prepared.config.env([
+                (
+                    std::ffi::OsString::from("HYPERLIGHT_PROCESS_ROLE"),
+                    match role {
+                        ProgramRole::SandboxHost => "sandbox",
+                        ProgramRole::FunctionWorker => "worker",
+                    }
+                    .into(),
+                ),
+                (
+                    std::ffi::OsString::from("HYPERLIGHT_PROCESS_NAME"),
+                    definition.name().into(),
+                ),
+            ]);
+            Ok(prepared)
+        }
         #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-        Err(crate::new_error!(
-            "Process confinement is unavailable on this host"
-        ))
+        {
+            Err(crate::new_error!(
+                "Process confinement is unavailable on this host"
+            ))
+        }
     }
 }
 

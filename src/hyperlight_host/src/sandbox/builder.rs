@@ -308,10 +308,16 @@ impl SandboxBuilder {
         self
     }
 
+    /// Supplies the Mesh/PAL capability that owns native process placement.
+    pub fn mesh_process_provider(mut self, provider: crate::process::MeshProcessProvider) -> Self {
+        self.topology.get_or_insert_with(Default::default).provider = Some(provider);
+        self
+    }
+
     /// Resolves native programs from a local OCI store before starting processes.
     ///
-    /// The target must describe this host and its verified OS dependencies.
-    /// Snapshot reconstruction uses its saved process definitions.
+    /// This low-level seam is intended for qualification and custom embedders.
+    /// Normal applications should use [`Self::mesh_process_provider`].
     pub fn process_programs(
         mut self,
         store: crate::process::program::LocalProgramStore,

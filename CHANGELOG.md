@@ -18,6 +18,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Guest memory keeps ABI 3 and encoding v1. Loading v2 requires `process-isolation`.
 * Linux `DenyChildProcesses` permits runtime threads through native `clone`.
   Process creation is denied. `clone3` returns `ENOSYS` for libc fallback.
+* `MeshProcessProvider` owns native program packaging and platform process
+  authority. Applications declare placement, contracts and process constraints.
+  Snapshot reconstruction reacquires provider authority from the current host.
 
 ### Changed
 * Support overriding the guest log level when building or restoring initialized snapshots. Persisted snapshots use ABI version 3 and must be regenerated.

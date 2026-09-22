@@ -14,13 +14,12 @@ use hyperlight_common::flatbuffer_wrappers::function_types::{
 };
 use mesh::MeshPayload;
 use mesh::rpc::{Rpc, RpcSend};
-use mesh_process::OwnedHost;
 #[cfg(test)]
 use mesh_process::ProcessConfig;
 use tracing_core::LevelFilter;
 
 use super::launch::{
-    CleanupOwner, PreparedProcess, ProcessCleanupError, ProcessGuard, ProcessLauncher,
+    CleanupOwner, OwnedHost, PreparedProcess, ProcessCleanupError, ProcessGuard, ProcessLauncher,
     ProcessReport,
 };
 use super::program::{FunctionContractDefinition, ProcessTopologyDefinition, ProgramRole};

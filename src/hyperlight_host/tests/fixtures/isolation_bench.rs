@@ -551,7 +551,7 @@ mod placement {
                 builder = builder.linux_process_resources(resources.clone());
             }
             if let Some(program) = &self.sandbox {
-                let mut options = ProcessOptions::new(
+                let mut options = ProcessOptions::with_program_artifact(
                     "bench-sandbox",
                     program.clone(),
                     controls(config, consent),
@@ -570,7 +570,7 @@ mod placement {
             }
             if let Some(program) = &self.worker {
                 builder = builder.host_function_process(
-                    HostFunctionProcess::new(ProcessOptions::new(
+                    HostFunctionProcess::new(ProcessOptions::with_program_artifact(
                         "bench-functions",
                         program.clone(),
                         controls(config, false),

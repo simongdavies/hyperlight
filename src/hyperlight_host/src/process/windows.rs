@@ -19,7 +19,7 @@
 //! * <https://learn.microsoft.com/windows/win32/api/winnt/ns-winnt-jobobject_extended_limit_information>
 //! * <https://learn.microsoft.com/windows/win32/api/winnt/ns-winnt-jobobject_cpu_rate_control_information>
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::{OsStr, OsString, c_void};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
@@ -29,14 +29,15 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use mesh_process::{ProcessConfig, SandboxProfile};
 use pal::windows::process::{Builder as ProcessBuilder, ChildProcessPolicy, Stdio};
 use pal::windows::security::Sid;
 use windows_sys::Win32::Foundation::{
-    ERROR_ACCESS_DENIED, ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION, LocalFree,
+    ERROR_ACCESS_DENIED, ERROR_LOCK_VIOLATION, ERROR_NO_MORE_ITEMS, ERROR_SHARING_VIOLATION,
+    ERROR_SUCCESS, LocalFree,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SE_FILE_OBJECT,
@@ -57,6 +58,10 @@ use windows_sys::Win32::System::JobObjects::{
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicAccountingInformation,
     JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
     TerminateJobObject,
+};
+use windows_sys::Win32::System::Registry::{
+    HKEY, HKEY_LOCAL_MACHINE, KEY_READ, REG_EXPAND_SZ, REG_SZ, RegCloseKey, RegEnumValueW,
+    RegOpenKeyExW,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows_sys::Win32::UI::Shell::{
@@ -404,6 +409,237 @@ fn runtime_path(image_path: &str) -> io::Result<PathBuf> {
         relative.push(component);
     }
     Ok(relative)
+}
+
+pub(super) fn capture_adjacent_dependencies(
+    executable: &[u8],
+    source_directory: Option<&Path>,
+) -> Result<Vec<super::program::ProgramFile>> {
+    let source_directory = source_directory.ok_or_else(|| {
+        new_error!("Native program path has no parent directory for DLL discovery")
+    })?;
+    let mut pending = VecDeque::from([(executable.to_vec(), true)]);
+    let mut visited = BTreeSet::new();
+    let mut files = Vec::new();
+    let mut total = executable.len() as u64;
+    while let Some((image, is_root)) = pending.pop_front() {
+        let pe = goblin::pe::PE::parse(&image)
+            .map_err(|error| new_error!("Invalid Windows native program: {error}"))?;
+        validate_pe_role(&pe, is_root)?;
+        for library in pe.libraries {
+            if Path::new(library).file_name() != Some(OsStr::new(library)) {
+                return Err(new_error!(
+                    "Windows native program import '{library}' is not a DLL basename"
+                ));
+            }
+            let key = library.to_ascii_lowercase();
+            if !visited.insert(key.clone()) {
+                continue;
+            }
+            if visited.len() > 128 {
+                return Err(new_error!(
+                    "Windows native program dependency closure exceeds 128 DLLs"
+                ));
+            }
+            if is_windows_forced_system_library(library)? {
+                continue;
+            }
+            let adjacent = source_directory.join(library);
+            if adjacent.is_file() {
+                let captured = super::provider::capture_file(&adjacent)?;
+                total = total
+                    .checked_add(captured.bytes.len() as u64)
+                    .filter(|total| *total <= super::provider::MAX_PROGRAM_BYTES)
+                    .ok_or_else(|| {
+                        new_error!("Windows native program dependency closure exceeds 256 MiB")
+                    })?;
+                pending.push_back((captured.bytes.clone(), false));
+                files.push(super::program::ProgramFile::new(
+                    format!("/{library}"),
+                    captured.bytes,
+                )?);
+                continue;
+            }
+            if is_windows_system_fallback(library) {
+                continue;
+            }
+        }
+    }
+    Ok(files)
+}
+
+pub(super) fn runtime_closure(
+    executable: &[u8],
+    runtime_files: &[super::program::ProgramFile],
+) -> Result<Vec<super::program::ProgramFile>> {
+    runtime_closure_with_limits(
+        executable,
+        runtime_files,
+        128,
+        super::provider::MAX_PROGRAM_BYTES,
+    )
+}
+
+pub(super) fn runtime_closure_with_limits(
+    executable: &[u8],
+    runtime_files: &[super::program::ProgramFile],
+    max_files: usize,
+    max_bytes: u64,
+) -> Result<Vec<super::program::ProgramFile>> {
+    if runtime_files.len() > max_files {
+        return Err(new_error!(
+            "Windows native program dependency closure exceeds 128 DLLs"
+        ));
+    }
+    let mut total = executable.len() as u64;
+    let mut available = BTreeMap::new();
+    for file in runtime_files {
+        total = total
+            .checked_add(file.bytes().len() as u64)
+            .filter(|total| *total <= max_bytes)
+            .ok_or_else(|| {
+                new_error!("Windows native program dependency closure exceeds 256 MiB")
+            })?;
+        let path = file.image_path();
+        if let Some(name) = path.strip_prefix('/').filter(|path| !path.contains('/')) {
+            available.insert(name.to_ascii_lowercase(), file);
+        }
+    }
+    let mut pending = VecDeque::from([(executable, true)]);
+    let mut visited = BTreeSet::new();
+    let mut queued = BTreeSet::new();
+    while let Some((image, is_root)) = pending.pop_front() {
+        let pe = goblin::pe::PE::parse(image)
+            .map_err(|error| new_error!("Invalid Windows native program: {error}"))?;
+        validate_pe_role(&pe, is_root)?;
+        for library in pe.libraries {
+            if Path::new(library).file_name() != Some(OsStr::new(library)) {
+                return Err(new_error!(
+                    "Windows native program import '{library}' is not a DLL basename"
+                ));
+            }
+            let key = library.to_ascii_lowercase();
+            if !visited.insert(key.clone()) {
+                continue;
+            }
+            if visited.len() > max_files {
+                return Err(new_error!(
+                    "Windows native program dependency closure exceeds 128 DLLs"
+                ));
+            }
+            if is_windows_forced_system_library(library)? {
+                continue;
+            }
+            if let Some(file) = available.get(&key) {
+                if queued.insert(key) {
+                    pending.push_back((file.bytes(), false));
+                }
+                continue;
+            }
+            if is_windows_system_fallback(library) {
+                continue;
+            }
+            return Err(new_error!(
+                "Required application DLL '{library}' was not captured. Place it beside the \
+                 executable or declare it before placement with MeshProcessProvider::with_runtime_file \
+                 or MeshProcessProvider::with_program_runtime_file"
+            ));
+        }
+    }
+    Ok(runtime_files.to_vec())
+}
+
+fn validate_pe_role(pe: &goblin::pe::PE<'_>, is_root: bool) -> Result<()> {
+    if is_root == pe.is_lib {
+        return Err(if is_root {
+            new_error!("Windows native program image is marked as a DLL")
+        } else {
+            new_error!("Windows native runtime dependency is not marked as a DLL")
+        });
+    }
+    Ok(())
+}
+
+fn is_windows_forced_system_library(library: &str) -> Result<bool> {
+    let lower = library.to_ascii_lowercase();
+    if lower.starts_with("api-ms-win-") || lower.starts_with("ext-ms-win-") {
+        return Ok(true);
+    }
+    Ok(known_dlls()?.contains(&lower))
+}
+
+fn is_windows_system_fallback(library: &str) -> bool {
+    std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .is_some_and(|root| root.join("System32").join(library).is_file())
+}
+
+struct RegistryKey(HKEY);
+
+impl Drop for RegistryKey {
+    fn drop(&mut self) {
+        // SAFETY: RegOpenKeyExW returned this live key handle.
+        unsafe { RegCloseKey(self.0) };
+    }
+}
+
+pub(super) fn known_dlls() -> Result<&'static BTreeSet<String>> {
+    static KNOWN_DLLS: OnceLock<std::result::Result<BTreeSet<String>, String>> = OnceLock::new();
+    match KNOWN_DLLS.get_or_init(read_known_dlls) {
+        Ok(known) => Ok(known),
+        Err(error) => Err(new_error!(
+            "Mesh provider cannot read the Windows KnownDLL policy: {error}"
+        )),
+    }
+}
+
+fn read_known_dlls() -> std::result::Result<BTreeSet<String>, String> {
+    let mut key = std::ptr::null_mut();
+    let path = wide(r"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDLLs");
+    // SAFETY: The predefined root and null-terminated path are valid. `key` is writable.
+    let result = unsafe { RegOpenKeyExW(HKEY_LOCAL_MACHINE, path.as_ptr(), 0, KEY_READ, &mut key) };
+    if result != ERROR_SUCCESS {
+        return Err(format!("RegOpenKeyExW failed with error {result}"));
+    }
+    let key = RegistryKey(key);
+    let mut known = BTreeSet::new();
+    for index in 0.. {
+        let mut name = vec![0_u16; 1024];
+        let mut name_length = name.len() as u32;
+        let mut data = vec![0_u16; 1024];
+        let mut data_bytes = (data.len() * size_of::<u16>()) as u32;
+        let mut value_type = 0;
+        // SAFETY: All buffers are writable for the lengths supplied. Reserved is null.
+        let result = unsafe {
+            RegEnumValueW(
+                key.0,
+                index,
+                name.as_mut_ptr(),
+                &mut name_length,
+                std::ptr::null(),
+                &mut value_type,
+                data.as_mut_ptr().cast(),
+                &mut data_bytes,
+            )
+        };
+        if result == ERROR_NO_MORE_ITEMS {
+            break;
+        }
+        if result != ERROR_SUCCESS {
+            return Err(format!("RegEnumValueW failed with error {result}"));
+        }
+        if value_type != REG_SZ && value_type != REG_EXPAND_SZ {
+            continue;
+        }
+        let length = (data_bytes as usize / size_of::<u16>())
+            .min(data.len())
+            .saturating_sub(1);
+        let value = String::from_utf16_lossy(&data[..length]).to_ascii_lowercase();
+        if value.ends_with(".dll") {
+            known.insert(value);
+        }
+    }
+    Ok(known)
 }
 
 struct StagedImage {
@@ -1483,10 +1719,36 @@ mod tests {
         ] {
             assert!(runtime_path(path).is_err(), "{path}");
         }
+
         assert_eq!(
             runtime_path("/lib/a.dll").unwrap(),
             PathBuf::from("lib/a.dll")
         );
+    }
+
+    #[test]
+    fn provider_discovers_current_executable_system_imports_without_packaging_them() {
+        let executable = std::env::current_exe().unwrap();
+        let bytes = std::fs::read(&executable).unwrap();
+        let adjacent = capture_adjacent_dependencies(&bytes, executable.parent()).unwrap();
+        let files = runtime_closure(&bytes, &adjacent).unwrap();
+        assert!(files.iter().all(|file| {
+            executable
+                .parent()
+                .unwrap()
+                .join(&file.image_path()[1..])
+                .is_file()
+        }));
+    }
+
+    #[test]
+    fn runtime_closure_rejects_aggregate_size_bound() {
+        let executable = std::fs::read(std::env::current_exe().unwrap()).unwrap();
+        let file = super::super::program::ProgramFile::new("/data.bin", vec![1]).unwrap();
+        let error =
+            runtime_closure_with_limits(&executable, &[file], usize::MAX, executable.len() as u64)
+                .unwrap_err();
+        assert!(error.to_string().contains("exceeds 256 MiB"));
     }
 
     #[test]
@@ -1859,7 +2121,7 @@ mod tests {
         let mut sandbox =
             crate::SandboxBuilder::from_file(hyperlight_testing::simple_guest_as_pathbuf())
                 .sandbox_process(
-                    ProcessOptions::new("sandbox", artifact, profile)
+                    ProcessOptions::with_program_artifact("sandbox", artifact, profile)
                         .windows_sandbox_host_policy(WindowsSandboxHostPolicy::Trusted),
                 )
                 .sandbox_host_function(PRINT)
@@ -2156,7 +2418,7 @@ mod tests {
         let mut builder =
             crate::SandboxBuilder::from_file(hyperlight_testing::simple_guest_as_pathbuf())
                 .host_function_process(
-                    HostFunctionProcess::new(ProcessOptions::new(
+                    HostFunctionProcess::new(ProcessOptions::with_program_artifact(
                         "arithmetic",
                         artifact,
                         profile.clone(),
@@ -2195,7 +2457,7 @@ mod tests {
             }));
             builder = builder
                 .sandbox_process(
-                    ProcessOptions::new("sandbox", artifact, profile)
+                    ProcessOptions::with_program_artifact("sandbox", artifact, profile)
                         .windows_sandbox_host_policy(policy),
                 )
                 .sandbox_host_function(PRINT);

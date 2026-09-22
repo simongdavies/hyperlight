@@ -12,6 +12,97 @@ use crate::process::{
     RequestedControl,
 };
 
+#[test]
+fn static_elf_needs_no_runtime_closure() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("static.c");
+    let executable = directory.path().join("static");
+    std::fs::write(&source, "int main(void) { return 0; }\n").unwrap();
+    assert!(
+        std::process::Command::new("cc")
+            .arg("-static")
+            .arg(&source)
+            .arg("-o")
+            .arg(&executable)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        std::process::Command::new(&executable)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(super::runtime_closure(&executable).unwrap().is_empty());
+}
+
+#[test]
+fn malformed_static_candidate_is_rejected() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = directory.path().join("invalid");
+    std::fs::write(&executable, b"not an ELF").unwrap();
+    assert!(super::runtime_closure(&executable).is_err());
+}
+
+fn origin_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let directory = tempfile::tempdir().unwrap();
+    let library_source = directory.path().join("helper.c");
+    let program_source = directory.path().join("program.c");
+    let library = directory.path().join("liborigin_helper.so");
+    let program = directory.path().join("origin-program");
+    std::fs::write(&library_source, "int origin_helper(void) { return 42; }\n").unwrap();
+    std::fs::write(
+        &program_source,
+        "extern int origin_helper(void); int main(void) { return origin_helper() != 42; }\n",
+    )
+    .unwrap();
+    assert!(
+        std::process::Command::new("cc")
+            .args(["-shared", "-fPIC", "-Wl,-soname,liborigin_helper.so"])
+            .arg(&library_source)
+            .arg("-o")
+            .arg(&library)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        std::process::Command::new("cc")
+            .arg(&program_source)
+            .arg("-L")
+            .arg(directory.path())
+            .arg("-lorigin_helper")
+            .arg("-Wl,-rpath,$ORIGIN")
+            .arg("-o")
+            .arg(&program)
+            .status()
+            .unwrap()
+            .success()
+    );
+    (directory, program, library)
+}
+
+#[test]
+fn origin_dependency_is_resolved_and_captured() {
+    let (_directory, program, library) = origin_fixture();
+    let expected = std::fs::read(library).unwrap();
+    let files = super::runtime_closure(&program).unwrap();
+    let captured = files
+        .iter()
+        .find(|file| file.image_path() == "/liborigin_helper.so")
+        .unwrap();
+    assert_eq!(captured.bytes(), expected);
+}
+
+#[test]
+fn unresolved_origin_dependency_is_rejected() {
+    let (_directory, program, library) = origin_fixture();
+    std::fs::remove_file(library).unwrap();
+    let error = super::runtime_closure(&program).unwrap_err();
+    assert!(error.to_string().contains("not found"));
+}
+
 const ADD: HostFunctionContract<(i32, i32), i32> =
     HostFunctionContract::new("HostAdd", Idempotency::Idempotent);
 const PID: HostFunctionContract<(), u32> =
@@ -604,9 +695,13 @@ fn check_guest_calls_and_snapshot(worker_image: &str) {
     let mut sandbox =
         crate::SandboxBuilder::from_file(hyperlight_testing::simple_guest_as_pathbuf())
             .host_function_process(
-                HostFunctionProcess::new(ProcessOptions::new("arithmetic", artifact, profile))
-                    .function(ADD)
-                    .function(PID),
+                HostFunctionProcess::new(ProcessOptions::with_program_artifact(
+                    "arithmetic",
+                    artifact,
+                    profile,
+                ))
+                .function(ADD)
+                .function(PID),
             )
             .process_programs(store.clone(), target.clone())
             .linux_process_resources(resources.clone())
@@ -715,14 +810,14 @@ fn confined_dedicated_vm_calls_worker_restores_and_fails_independently() {
     };
     let mut sandbox =
         crate::SandboxBuilder::from_file(hyperlight_testing::simple_guest_as_pathbuf())
-            .sandbox_process(ProcessOptions::new(
+            .sandbox_process(ProcessOptions::with_program_artifact(
                 "dedicated-vm",
                 sandbox_program,
                 profile(512 << 20),
             ))
             .sandbox_host_function(PRINT)
             .host_function_process(
-                HostFunctionProcess::new(ProcessOptions::new(
+                HostFunctionProcess::new(ProcessOptions::with_program_artifact(
                     "arithmetic",
                     function_program,
                     profile(256 << 20),

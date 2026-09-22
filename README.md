@@ -72,6 +72,9 @@ See [docs/getting-started.md](./docs/getting-started.md) for detailed prerequisi
 - **Running** Hyperlight
 - **Building guests**
 
+For native process placement examples, see the
+[Ubuntu/WSL2 process-isolation quickstart](./dev/process-isolation/QUICKSTART.md).
+
 Or skip setup entirely with a codespace:
 
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/hyperlight-dev/hyperlight)

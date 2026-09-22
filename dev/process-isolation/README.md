@@ -1,5 +1,65 @@
 # Required Minijail Landlock prerequisite
 
+Start with the [Ubuntu/WSL2 developer quickstart](QUICKSTART.md) for runnable
+controllers, prerequisites, scenario coverage and limitations.
+
+## Mesh/PAL ownership
+
+`MeshProcessProvider` is the application-facing capability boundary. Hyperlight
+consumes placement, typed contracts and `ProcessProfile` constraints. The
+provider owns executable packaging, platform launch authority, process
+preparation and cleanup. Linux cgroup, Minijail, seccomp, Landlock, namespace,
+device and runtime-closure details remain behind that boundary.
+
+The discovered provider packages the application executable by default.
+`MeshProcessProvider::with_program` associates a logical process name with a
+dedicated executable while keeping runtime-closure discovery and launch
+authority behind the same provider boundary.
+
+Windows packaging follows PE imports recursively for DLLs beside the executable.
+Windows system DLLs remain host dependencies. Explicit provider methods add
+application runtime files that import discovery cannot infer. Import validation
+runs when placement resolves, after explicit files have been registered.
+Packaging does not search arbitrary PATH locations, registry installations or
+package manifests.
+
+Linux packaging captures the executable through one open handle, preserves
+adjacent `$ORIGIN` dependency context in provider-owned storage, then discovers
+the runtime closure from that immutable context.
+
+The builder's explicit program-store and Linux-resource methods are low-level
+qualification and embedder seams. They are not the normal product workflow.
+Snapshots retain immutable program references, never launch authority. A loaded
+snapshot requires a fresh provider from the current host.
+
+Future OpenVMM product integration should enable the existing opt-in
+`process-isolation` feature only in the product package that owns the capability,
+bind a provider or broker to product service lifecycle and authority, package
+worker and broker assets through the product deployment manifest, then inject
+the provider into Mesh. Feature-off builds must keep process placement and its
+backend assets out of the runtime and package. This repository does not modify
+OpenVMM packaging.
+
+macOS process placement is unsupported. App Sandbox is a public static
+code-signing entitlement model, not a dynamic child-placement API.
+`sandbox_init` and `sandbox-exec` provide dynamic profiles but are deprecated
+without a supported replacement. The pinned `mesh_process` dependency also
+exports owned-process launch only for Windows and Linux. This implementation
+does not use deprecated Apple APIs.
+Cross-Clippy for `aarch64-apple-darwin` checks cfgs and types only.
+
+Apple references:
+
+* [Configuring the macOS App Sandbox](https://developer.apple.com/documentation/xcode/configuring-the-macos-app-sandbox)
+* [App Sandbox inheritance](https://developer.apple.com/library/archive/qa/qa1773/_index.html)
+* [Hypervisor entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.hypervisor)
+* [Endpoint Security](https://developer.apple.com/documentation/endpointsecurity)
+
+App Sandbox and Hypervisor access require code signing and entitlements.
+Endpoint Security requires a restricted entitlement and system-extension
+deployment, so it is not a per-launch provider mechanism. Native Apple Silicon
+qualification must cover signing, entitlement compatibility and HVF behavior.
+
 This directory contains an opt-in patch for Minijail commit
 `8d20993c7189a948995bd20901abecc041e1a28e`. The process adapter requires
 `--require-landlock --landlock-abi 5`. A pristine helper rejects the new option.

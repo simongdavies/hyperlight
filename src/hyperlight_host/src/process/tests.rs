@@ -15,7 +15,7 @@ fn options(name: &str) -> ProcessOptions {
         "size": 1
     }))
     .unwrap();
-    ProcessOptions::new(
+    ProcessOptions::with_program_artifact(
         name,
         program::ProgramArtifact::from_descriptor(descriptor).unwrap(),
         ProcessProfile::new([RequestedControl {
@@ -23,6 +23,27 @@ fn options(name: &str) -> ProcessOptions {
             required: true,
         }]),
     )
+}
+
+#[test]
+fn application_process_options_are_platform_neutral() {
+    let options = ProcessOptions::for_provider(
+        "arithmetic",
+        ProcessProfile::new([RequestedControl {
+            control: ProcessControl::DenyNetwork,
+            required: true,
+        }]),
+    );
+    assert_eq!(options.name, "arithmetic");
+    assert!(options.program.is_none());
+}
+
+#[test]
+fn legacy_process_options_constructor_remains_source_compatible() {
+    let options = options("arithmetic");
+    let artifact = options.program.clone().unwrap();
+    let compatible = ProcessOptions::new("arithmetic", artifact, options.profile.clone());
+    assert!(compatible.program.is_some());
 }
 
 #[test]
@@ -190,7 +211,7 @@ fn invalid_profiles_fail_before_loading_guest() {
 }
 
 #[test]
-fn missing_program_store_fails_before_loading_guest() {
+fn missing_mesh_provider_fails_before_loading_guest() {
     let result = SandboxBuilder::from_bytes([])
         .host_function_process(HostFunctionProcess::new(options("arithmetic")).function(ADD))
         .build();
@@ -198,7 +219,7 @@ fn missing_program_store_fails_before_loading_guest() {
         result
             .unwrap_err()
             .to_string()
-            .contains("requires a local program store")
+            .contains("requires a MeshProcessProvider capability")
     );
 }
 
@@ -209,7 +230,7 @@ fn program_resolution_precedes_launch_and_guest_loading() {
     let target = program::ProgramTarget::current(Default::default());
     let process = HostFunctionProcess::new(options("arithmetic")).function(ADD);
     let expected = store
-        .validate(&process.options.program, &target)
+        .validate(process.options.program.as_ref().unwrap(), &target)
         .unwrap_err()
         .to_string();
     let error = SandboxBuilder::from_bytes([])
@@ -418,7 +439,11 @@ fn trusted_windows_snapshot_needs_permission_on_each_build() {
         Some(saved.clone())
     );
     let error = topology.resolve(saved.clone()).err().unwrap();
-    assert!(error.to_string().contains("requires a local program store"));
+    assert!(
+        error
+            .to_string()
+            .contains("requires a MeshProcessProvider capability")
+    );
     assert!(
         Topology::default()
             .configured_definition(Some(&saved), &HostFunctions::default())

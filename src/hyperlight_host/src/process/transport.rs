@@ -113,6 +113,29 @@ impl ProcessStartup {
         self.0
     }
 
+    /// Role supplied by the Mesh/PAL launch capability.
+    pub fn role(&self) -> Result<super::program::ProgramRole> {
+        match std::env::var("HYPERLIGHT_PROCESS_ROLE").as_deref() {
+            Ok("sandbox") => Ok(super::program::ProgramRole::SandboxHost),
+            Ok("worker") => Ok(super::program::ProgramRole::FunctionWorker),
+            _ => Err(new_error!(
+                "Mesh provider did not identify the process role"
+            )),
+        }
+    }
+
+    /// Logical process owner supplied by the Mesh/PAL launch capability.
+    pub fn name(&self) -> Result<String> {
+        let name = std::env::var("HYPERLIGHT_PROCESS_NAME")
+            .map_err(|_| new_error!("Mesh provider did not identify the process owner"))?;
+        if name.is_empty() || name.chars().any(char::is_control) {
+            return Err(new_error!(
+                "Mesh provider supplied an invalid process owner"
+            ));
+        }
+        Ok(name)
+    }
+
     /// Captures worker startup resources, or returns `None` in an application role.
     ///
     /// # Safety
@@ -1876,7 +1899,7 @@ mod tests {
                 .build()
                 .unwrap_err()
                 .to_string()
-                .contains("requires a local program store")
+                .contains("requires a MeshProcessProvider capability")
         );
         sandbox.restore(snapshot.clone()).unwrap();
         assert_eq!(process_id(&sandbox), original_pid);

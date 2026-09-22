@@ -8,9 +8,9 @@ use std::time::{Duration, Instant};
 
 use futures::FutureExt;
 use mesh::rpc::RpcSend;
-use mesh_process::{Mesh, OwnedHost};
+use mesh_process::Mesh;
 
-use super::launch::{PreparedProcess, ProcessGuard, ProcessLauncher, ProcessReport};
+use super::launch::{OwnedHost, PreparedProcess, ProcessGuard, ProcessLauncher, ProcessReport};
 use super::program::{
     FunctionContractDefinition, ProcessDefinition, ProcessTopologyDefinition, ProgramRole,
 };
