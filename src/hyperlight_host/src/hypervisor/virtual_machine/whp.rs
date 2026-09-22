@@ -43,25 +43,34 @@ use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags, MemoryRegionTyp
 #[cfg(feature = "trace_guest")]
 use crate::sandbox::trace::TraceContext as SandboxTraceContext;
 
-#[allow(dead_code)] // Will be used for runtime hypervisor detection
 pub(crate) fn is_hypervisor_present() -> bool {
+    match query_hypervisor_presence() {
+        Ok(present) => present,
+        Err(error) => {
+            tracing::info!(
+                ?error,
+                "Windows Hypervisor Platform capability query failed"
+            );
+            false
+        }
+    }
+}
+
+pub(crate) fn query_hypervisor_presence() -> windows::core::Result<bool> {
     let mut capability: WHV_CAPABILITY = Default::default();
     let written_size: Option<*mut u32> = None;
 
-    match unsafe {
+    // SAFETY: The capability buffer is writable and correctly sized and aligned.
+    unsafe {
         WHvGetCapability(
             WHvCapabilityCodeHypervisorPresent,
             &mut capability as *mut _ as *mut c_void,
             std::mem::size_of::<WHV_CAPABILITY>() as u32,
             written_size,
-        )
-    } {
-        Ok(_) => unsafe { capability.HypervisorPresent.as_bool() },
-        Err(_) => {
-            tracing::info!("Windows Hypervisor Platform is not available on this system");
-            false
-        }
-    }
+        )?
+    };
+    // SAFETY: Successful HypervisorPresent queries initialize this union member.
+    Ok(unsafe { capability.HypervisorPresent.as_bool() })
 }
 
 /// Maps an MSR index to the WHP register used for host reset.
@@ -520,6 +529,13 @@ impl VirtualMachine for WhpVm {
         #[cfg(feature = "trace_guest")]
         tc.setup_guest_trace(Span::current().context());
 
+        #[cfg_attr(
+            not(feature = "hw-interrupts"),
+            expect(
+                clippy::never_loop,
+                reason = "Only hardware interrupt exits re-enter the vCPU"
+            )
+        )]
         loop {
             unsafe {
                 WHvRunVirtualProcessor(

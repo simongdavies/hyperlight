@@ -153,7 +153,7 @@ impl CpuVendor {
 
 /// Top-level Hyperlight snapshot config JSON. Lives at
 /// `blobs/sha256/<config-digest>` with media type
-/// `application/vnd.hyperlight.snapshot.config.v1+json`.
+/// config v1 without process definitions, or config v2 with them.
 ///
 /// In OCI terms this is the "image config" blob that the manifest's
 /// `config` descriptor points to. It describes the accompanying
@@ -199,6 +199,9 @@ pub(super) struct OciSnapshotConfig {
     /// `SCRATCH_TOP_SNAPSHOT_GENERATION_OFFSET` is continuous across
     /// save/load.
     pub(super) snapshot_generation: u64,
+    /// Present only in the process-aware config schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) process_topology: Option<serde_json::Value>,
 }
 
 /// Sizes and permissions of the regions inside the snapshot blob,
@@ -234,9 +237,9 @@ pub(super) struct HostFunction {
 /// Kept local so we don't have to plumb serde through `hyperlight_common`.
 /// The `match`es below are exhaustive: any new variant upstream forces
 /// an explicit decision here.
-#[derive(Serialize, Deserialize, Copy, Clone)]
+#[derive(Serialize, Deserialize, Copy, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-enum ParameterTypeRepr {
+pub(crate) enum ParameterTypeRepr {
     Int,
     UInt,
     Long,
@@ -251,9 +254,9 @@ enum ParameterTypeRepr {
 
 /// JSON-friendly mirror of
 /// [`hyperlight_common::flatbuffer_wrappers::function_types::ReturnType`].
-#[derive(Serialize, Deserialize, Copy, Clone)]
+#[derive(Serialize, Deserialize, Copy, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-enum ReturnTypeRepr {
+pub(crate) enum ReturnTypeRepr {
     Int,
     UInt,
     Long,
@@ -788,6 +791,7 @@ mod tests {
             memory_size: PAGE_SIZE as u64,
             host_functions: Vec::new(),
             snapshot_generation: 0,
+            process_topology: None,
         }
     }
 

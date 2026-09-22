@@ -94,6 +94,10 @@ pub struct SandboxBuilder {
     mapped_file_cow: Vec<(std::path::PathBuf, u64)>,
     mapped_memory_regions: Vec<MemoryRegion>,
     guest_log_level: Option<LevelFilter>,
+    #[cfg(feature = "process-isolation")]
+    topology: Option<Box<crate::process::Topology>>,
+    #[cfg(feature = "process-isolation")]
+    caller_callbacks: bool,
 }
 
 impl SandboxBuilder {
@@ -106,7 +110,17 @@ impl SandboxBuilder {
             mapped_file_cow: Vec::new(),
             mapped_memory_regions: Vec::new(),
             guest_log_level: None,
+            #[cfg(feature = "process-isolation")]
+            topology: None,
+            #[cfg(feature = "process-isolation")]
+            caller_callbacks: false,
         }
+    }
+
+    #[cfg(all(test, feature = "process-isolation"))]
+    pub(crate) fn started_process_functions(mut self, functions: HostFunctions) -> Self {
+        self.host_funcs = functions;
+        self
     }
 
     /// Build a sandbox running the guest binary at `path`, an ELF file.
@@ -140,60 +154,223 @@ impl SandboxBuilder {
             mapped_file_cow,
             mapped_memory_regions,
             guest_log_level,
+            #[cfg(feature = "process-isolation")]
+            topology,
+            #[cfg(feature = "process-isolation")]
+            caller_callbacks,
         } = self;
 
-        let mut sandbox = match source {
-            Source::GuestBinary(guest_binary) => {
-                let env = GuestEnvironment {
-                    init_data: init_data.as_ref().map(|(data, flags)| GuestBlob {
-                        data,
-                        permissions: *flags,
-                    }),
-                    guest_binary,
-                };
-
-                let mut uninitialized_sandbox = UninitializedSandbox::new(env, Some(cfg))?;
-
-                uninitialized_sandbox.host_funcs = Arc::new(Mutex::new(host_funcs.into_inner()));
-
-                for (path, guest_base) in mapped_file_cow {
-                    uninitialized_sandbox.map_file_cow(&path, guest_base)?;
+        #[cfg(feature = "process-isolation")]
+        let host_funcs = {
+            let mut host_funcs = host_funcs;
+            let expected = match &source {
+                Source::Snapshot(snapshot) => snapshot.process_topology(),
+                Source::GuestBinary(_) => None,
+            };
+            if topology.is_some() || expected.is_some() {
+                let topology = topology.unwrap_or_default();
+                if let Some(definition) = topology.configured_definition(expected, &host_funcs)? {
+                    let dedicated = definition.sandbox().is_some();
+                    if dedicated {
+                        if caller_callbacks {
+                            return Err(new_error!(
+                                "Dedicated sandbox callbacks must be registered in its executable"
+                            ));
+                        }
+                        if !mapped_file_cow.is_empty() || !mapped_memory_regions.is_empty() {
+                            return Err(new_error!(
+                                "Dedicated sandboxes cannot transfer caller memory or file mappings"
+                            ));
+                        }
+                        if matches!(source, Source::Snapshot(_)) && init_data.is_some() {
+                            return Err(new_error!(
+                                "Snapshot reconstruction cannot replace init_data"
+                            ));
+                        }
+                    }
+                    let resolved = topology.resolve(definition)?;
+                    if dedicated {
+                        if let Some(level) = guest_log_level {
+                            cfg.set_max_guest_log_level(level);
+                        }
+                        let source = match source {
+                            Source::GuestBinary(GuestBinary::FilePath(path)) => {
+                                crate::process::SandboxSource::Binary(std::fs::read(path)?)
+                            }
+                            Source::GuestBinary(GuestBinary::Buffer(bytes)) => {
+                                crate::process::SandboxSource::Binary(bytes)
+                            }
+                            Source::Snapshot(snapshot) => crate::process::SandboxSource::Snapshot(
+                                crate::process::SnapshotImage::capture(&snapshot)?,
+                            ),
+                        };
+                        return resolved.start_sandbox(source, &cfg, init_data);
+                    }
+                    resolved.start_local(&mut host_funcs)?;
                 }
-
-                if let Some(log_level) = guest_log_level {
-                    uninitialized_sandbox.set_max_guest_log_level(log_level);
-                }
-
-                uninitialized_sandbox.evolve()?
             }
-            Source::Snapshot(snapshot) => {
-                if init_data.is_some() {
-                    return Err(new_error!(
-                        "init_data has no effect when building from a snapshot, as the snapshot already contains it"
-                    ));
-                }
-
-                if let Some(log_level) = guest_log_level {
-                    cfg.set_max_guest_log_level(log_level);
-                }
-
-                let mut sandbox = Sandbox::from_snapshot(snapshot, host_funcs, Some(cfg))?;
-
-                for (path, guest_base) in mapped_file_cow {
-                    sandbox.map_file_cow(&path, guest_base)?;
-                }
-
-                sandbox
-            }
+            host_funcs
         };
 
-        for region in mapped_memory_regions {
-            // SAFETY: the caller of `mapped_memory_region` guaranteed each region
-            // stays valid and unmodified for the lifetime of this sandbox.
-            unsafe { sandbox.map_region(&region)? };
-        }
+        #[cfg(feature = "process-isolation")]
+        let process_runtime = host_funcs.inner().process_runtime.clone();
 
-        Ok(sandbox)
+        let result = (|| {
+            let mut sandbox = match source {
+                Source::GuestBinary(guest_binary) => {
+                    let env = GuestEnvironment {
+                        init_data: init_data.as_ref().map(|(data, flags)| GuestBlob {
+                            data,
+                            permissions: *flags,
+                        }),
+                        guest_binary,
+                    };
+
+                    let mut uninitialized_sandbox = UninitializedSandbox::new(env, Some(cfg))?;
+
+                    uninitialized_sandbox.host_funcs =
+                        Arc::new(Mutex::new(host_funcs.into_inner()));
+
+                    for (path, guest_base) in mapped_file_cow {
+                        uninitialized_sandbox.map_file_cow(&path, guest_base)?;
+                    }
+
+                    if let Some(log_level) = guest_log_level {
+                        uninitialized_sandbox.set_max_guest_log_level(log_level);
+                    }
+
+                    uninitialized_sandbox.evolve()?
+                }
+                Source::Snapshot(snapshot) => {
+                    if init_data.is_some() {
+                        return Err(new_error!(
+                            "init_data has no effect when building from a snapshot, as the snapshot already contains it"
+                        ));
+                    }
+
+                    if let Some(log_level) = guest_log_level {
+                        cfg.set_max_guest_log_level(log_level);
+                    }
+
+                    let mut sandbox = Sandbox::from_snapshot(snapshot, host_funcs, Some(cfg))?;
+
+                    for (path, guest_base) in mapped_file_cow {
+                        sandbox.map_file_cow(&path, guest_base)?;
+                    }
+
+                    sandbox
+                }
+            };
+
+            for region in mapped_memory_regions {
+                // SAFETY: the caller of `mapped_memory_region` guaranteed each region
+                // stays valid and unmodified for the lifetime of this sandbox.
+                unsafe { sandbox.map_region(&region)? };
+            }
+
+            Ok(sandbox)
+        })();
+
+        #[cfg(feature = "process-isolation")]
+        let result = result.map_err(|error| match process_runtime {
+            Some(runtime) => runtime.cleanup_startup_error(error),
+            None => error,
+        });
+        result
+    }
+}
+
+#[cfg(feature = "process-isolation")]
+impl SandboxBuilder {
+    /// Captures configured process definitions without resolving or launching programs.
+    pub fn process_topology(
+        &self,
+    ) -> Result<Option<crate::process::program::ProcessTopologyDefinition>> {
+        let expected = match &self.source {
+            Source::Snapshot(snapshot) => snapshot.process_topology(),
+            Source::GuestBinary(_) => None,
+        };
+        match &self.topology {
+            Some(topology) => topology.configured_definition(expected, &self.host_funcs),
+            None => crate::process::Topology::default()
+                .configured_definition(expected, &self.host_funcs),
+        }
+    }
+
+    /// Permits an explicitly requested trusted Windows sandbox host for this build.
+    ///
+    /// The host runs as the same user without AppContainer filesystem or network
+    /// containment. Job and resource limits remain. Snapshots never grant permission.
+    pub fn allow_trusted_windows_sandbox_host(mut self) -> Self {
+        self.topology
+            .get_or_insert_with(Default::default)
+            .allow_trusted_windows_sandbox_host = true;
+        self
+    }
+
+    /// Resolves native programs from a local OCI store before starting processes.
+    ///
+    /// The target must describe this host and its verified OS dependencies.
+    /// Snapshot reconstruction uses its saved process definitions.
+    pub fn process_programs(
+        mut self,
+        store: crate::process::program::LocalProgramStore,
+        target: crate::process::program::ProgramTarget,
+    ) -> Self {
+        self.topology.get_or_insert_with(Default::default).programs = Some((store, target));
+        self
+    }
+
+    /// Sets the stateless function-worker restart budget for this sandbox.
+    pub fn process_restart_policy(mut self, policy: crate::process::RestartPolicy) -> Self {
+        self.topology
+            .get_or_insert_with(Default::default)
+            .restart_policy = policy;
+        self
+    }
+
+    /// Supplies host-local confinement resources without storing them in snapshots.
+    #[cfg(target_os = "linux")]
+    pub fn linux_process_resources(
+        mut self,
+        resources: crate::process::LinuxProcessResources,
+    ) -> Self {
+        self.topology
+            .get_or_insert_with(Default::default)
+            .linux_resources = Some(resources);
+        self
+    }
+
+    /// Places this sandbox in one constrained process.
+    ///
+    /// Unsupported containment or transport fails before guest initialization.
+    pub fn sandbox_process(mut self, process: crate::process::ProcessOptions) -> Self {
+        self.topology
+            .get_or_insert_with(Default::default)
+            .sandbox(process);
+        self
+    }
+
+    /// Declares a function implemented beside the VM in its dedicated executable.
+    pub fn sandbox_host_function<A: ParameterTuple, O: SupportedReturnType>(
+        mut self,
+        contract: crate::process::HostFunctionContract<A, O>,
+    ) -> Self {
+        self.topology
+            .get_or_insert_with(Default::default)
+            .sandbox_function(contract);
+        self
+    }
+
+    /// Assigns selected host functions to a sandbox-owned constrained process.
+    ///
+    /// Unassigned functions remain beside the VM. Duplicate ownership fails
+    /// before guest initialization.
+    pub fn host_function_process(mut self, process: crate::process::HostFunctionProcess) -> Self {
+        self.topology
+            .get_or_insert_with(Default::default)
+            .functions(process);
+        self
     }
 }
 
@@ -266,12 +443,12 @@ impl SandboxBuilder {
         let func = host_func.into().into();
         let name = name.as_ref().to_string();
 
-        let entry = FunctionEntry {
-            function: func,
-            parameter_types: Args::TYPE,
-            return_type: Output::TYPE,
-        };
+        let entry = FunctionEntry::new(func, Args::TYPE, Output::TYPE);
 
+        #[cfg(feature = "process-isolation")]
+        {
+            self.caller_callbacks = true;
+        }
         self.host_funcs
             .inner_mut()
             .register_host_function(name, entry);
@@ -295,6 +472,10 @@ impl SandboxBuilder {
     /// [`Self::host_print`], which checks the signature at compile time.
     pub fn host_functions(mut self, host_funcs: HostFunctions) -> Self {
         for (func_name, func_entry) in host_funcs.into_iter() {
+            #[cfg(feature = "process-isolation")]
+            {
+                self.caller_callbacks = true;
+            }
             self.host_funcs
                 .inner_mut()
                 .register_host_function(func_name, func_entry);

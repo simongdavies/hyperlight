@@ -170,6 +170,21 @@ build-metadata = ["dep:built"]
 name = "benchmarks"
 harness = false
 
+[[example]]
+name = "process_worker"
+path = "tests/fixtures/process_worker.rs"
+required-features = ["process-isolation"]
+
+[[example]]
+name = "process_child_policy"
+path = "tests/fixtures/process_child_policy.rs"
+required-features = ["process-isolation"]
+
+[[example]]
+name = "sandbox_worker"
+path = "tests/fixtures/sandbox_worker.rs"
+required-features = ["process-isolation"]
+
 [[test]]
 name = "snapshot_goldens"
 path = "tests/snapshot_goldens/main.rs"

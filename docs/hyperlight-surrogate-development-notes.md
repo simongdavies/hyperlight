@@ -9,3 +9,14 @@ These surrogate processes are managed by the host via the [surrogate_process_man
 > **Note:** `HYPERLIGHT_MAX_SURROGATES` is authoritative — if `HYPERLIGHT_INITIAL_SURROGATES` exceeds it, the initial count is silently clamped down to the maximum. For example, setting only `HYPERLIGHT_MAX_SURROGATES=256` limits both the initial pool and the ceiling to 256.
 
 `hyperlight_surrogate.exe` gets built during `hyperlight-host`'s build script, gets embedded into the `hyperlight-host` Rust library via [rust-embed](https://crates.io/crates/rust-embed), and is extracted at runtime next to the executable when the surrogate process manager is initialized. The extracted filename includes a short BLAKE3 hash of the binary content (e.g., `hyperlight_surrogate_a1b2c3d4.exe`) so that multiple hyperlight versions can coexist without file-deletion races.
+
+## Separate sandbox-host processes
+
+With `process-isolation`, each separately launched Windows sandbox-host owns one
+VM. Its clean launch environment sets `HYPERLIGHT_MAX_SURROGATES=0`. This selects
+the existing `WHvMapGpaRange` path. `NoSurrogateGuard` rejects a second live VM in
+that process. Required child-process denial and job limits remain enforced.
+
+This setting applies to the sandbox-host role, including fresh snapshot
+reconstruction. It does not change the calling process environment, its
+multi-VM defaults, or host-function processes.

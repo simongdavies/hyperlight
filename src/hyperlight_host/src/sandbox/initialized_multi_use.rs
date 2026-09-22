@@ -80,7 +80,7 @@ impl SandboxStatus {
 /// memory mappings can leave the sandbox
 /// [`Unrecoverable`](SandboxStatus::Unrecoverable). Further restore attempts and
 /// guest operations are rejected. The sandbox must be discarded.
-pub struct MultiUseSandbox {
+pub struct LocalSandbox {
     status: SandboxStatus,
     pub(crate) host_funcs: Arc<Mutex<FunctionRegistry>>,
     pub(crate) mem_mgr: SandboxMemoryManager<HostSharedMemory>,
@@ -94,6 +94,8 @@ pub struct MultiUseSandbox {
     pt_root_finder: Option<PtRootFinder>,
     /// Runtime guest log-level override reapplied after snapshot restores.
     max_guest_log_level: Option<LevelFilter>,
+    #[cfg(feature = "process-isolation")]
+    process_runtime: Option<Arc<crate::process::ProcessRuntime>>,
 }
 
 /// Callback for discovering page table roots from guest memory.
@@ -108,9 +110,14 @@ pub struct MultiUseSandbox {
 /// empty, only `root_pt_gpa` is used.
 pub type PtRootFinder = Box<dyn Fn(&[u8], &[u8], u64) -> Vec<u64> + Send>;
 
-impl MultiUseSandbox {
+#[cfg(not(feature = "process-isolation"))]
+pub use LocalSandbox as MultiUseSandbox;
+#[cfg(feature = "process-isolation")]
+pub use placement::MultiUseSandbox;
+
+impl LocalSandbox {
     fn check_ready(&self) -> Result<()> {
-        match self.status {
+        match self.status() {
             SandboxStatus::Ready => Ok(()),
             SandboxStatus::Poisoned => Err(HyperlightError::PoisonedSandbox),
             SandboxStatus::Unrecoverable => Err(HyperlightError::UnrecoverableSandbox),
@@ -133,8 +140,21 @@ impl MultiUseSandbox {
         host_funcs: Arc<Mutex<FunctionRegistry>>,
         mgr: SandboxMemoryManager<HostSharedMemory>,
         vm: HyperlightVm,
-    ) -> MultiUseSandbox {
-        Self {
+    ) -> Result<LocalSandbox> {
+        #[cfg(feature = "process-isolation")]
+        let process_runtime = host_funcs
+            .try_lock()
+            .map_err(|error| crate::new_error!("Error locking host_funcs: {error}"))?
+            .process_runtime
+            .clone();
+        #[cfg(feature = "process-isolation")]
+        if process_runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.is_poisoned())
+        {
+            return Err(HyperlightError::UnrecoverableSandbox);
+        }
+        Ok(Self {
             status: SandboxStatus::Ready,
             host_funcs,
             mem_mgr: mgr,
@@ -142,7 +162,9 @@ impl MultiUseSandbox {
             snapshot: None,
             pt_root_finder: None,
             max_guest_log_level: None,
-        }
+            #[cfg(feature = "process-isolation")]
+            process_runtime,
+        })
     }
 
     /// Sets the maximum log level used by future guest calls.
@@ -240,6 +262,11 @@ impl MultiUseSandbox {
 
         use crate::mem::ptr::RawPtr;
         use crate::sandbox::uninitialized_evolve::set_up_hypervisor_partition;
+
+        #[cfg(feature = "process-isolation")]
+        if snapshot.process_topology().is_some() {
+            snapshot.validate_process_topology(host_funcs.inner().process_topology.as_deref())?;
+        }
 
         // Validate that the provided host functions are a superset of
         // those required by the snapshot.
@@ -344,7 +371,7 @@ impl MultiUseSandbox {
             })?;
         }
 
-        let mut sbox = MultiUseSandbox::from_uninit(host_funcs, hshm, vm);
+        let mut sbox = LocalSandbox::from_uninit(host_funcs, hshm, vm)?;
         if let Some(log_level) = max_guest_log_level {
             sbox.log_level(log_level)?;
         }
@@ -437,6 +464,18 @@ impl MultiUseSandbox {
             next_action,
             host_functions,
         )?;
+        #[cfg(feature = "process-isolation")]
+        let memory_snapshot = {
+            let mut snapshot = memory_snapshot;
+            let functions = self
+                .host_funcs
+                .try_lock()
+                .map_err(|error| crate::new_error!("Error locking host_funcs: {error}"))?;
+            if let Some(topology) = &functions.process_topology {
+                snapshot.set_process_topology((**topology).clone())?;
+            }
+            snapshot
+        };
         let snapshot = Arc::new(memory_snapshot);
         self.snapshot = Some(snapshot.clone());
         Ok(snapshot)
@@ -547,7 +586,7 @@ impl MultiUseSandbox {
     /// ```
     #[instrument(err(Debug), skip_all, parent = Span::current())]
     pub fn restore(&mut self, snapshot: Arc<Snapshot>) -> Result<()> {
-        if self.status.is_unrecoverable() {
+        if self.status().is_unrecoverable() {
             return Err(HyperlightError::UnrecoverableSandbox);
         }
 
@@ -579,6 +618,10 @@ impl MultiUseSandbox {
                 .host_funcs
                 .try_lock()
                 .map_err(|e| crate::new_error!("Error locking host_funcs: {}", e))?;
+            #[cfg(feature = "process-isolation")]
+            if snapshot.process_topology().is_some() {
+                snapshot.validate_process_topology(host_funcs.process_topology.as_deref())?;
+            }
             snapshot.validate_host_functions(&host_funcs)?;
         }
 
@@ -633,8 +676,12 @@ impl MultiUseSandbox {
             self.mem_mgr.request_guest_log_level_update(log_level)?;
         }
 
-        // The restored snapshot is now our most current snapshot
         self.snapshot = Some(snapshot.clone());
+        #[cfg(feature = "process-isolation")]
+        if snapshot.process_topology().is_none() && self.process_runtime.is_some() {
+            // Guest-only restore preserves live workers. Recapture their topology.
+            self.snapshot = None;
+        }
 
         // Clear poison state when successfully restoring from snapshot.
         //
@@ -908,7 +955,7 @@ impl MultiUseSandbox {
         })
     }
 
-    fn call_guest_function_by_name_no_reset(
+    pub(crate) fn call_guest_function_by_name_no_reset(
         &mut self,
         function_name: &str,
         return_type: ReturnType,
@@ -938,6 +985,15 @@ impl MultiUseSandbox {
             let dispatch_res = self
                 .vm
                 .dispatch_call_from_host(&mut self.mem_mgr, &self.host_funcs);
+
+            #[cfg(feature = "process-isolation")]
+            if self
+                .process_runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.is_poisoned())
+            {
+                return Err(HyperlightError::UnrecoverableSandbox);
+            }
 
             // Convert dispatch errors to HyperlightErrors to maintain backwards compatibility
             // but first determine if sandbox should be poisoned
@@ -1121,11 +1177,26 @@ impl MultiUseSandbox {
     /// * [`Unrecoverable`](SandboxStatus::Unrecoverable) rejects all further
     ///   operations, including restore. The sandbox must be discarded.
     pub fn status(&self) -> SandboxStatus {
+        #[cfg(feature = "process-isolation")]
+        if self
+            .process_runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.is_poisoned())
+        {
+            return SandboxStatus::Unrecoverable;
+        }
         self.status
+    }
+
+    #[cfg(feature = "process-isolation")]
+    fn process_reports(&self) -> Vec<crate::process::ProcessReport> {
+        self.process_runtime
+            .as_ref()
+            .map_or_else(Vec::new, |runtime| runtime.reports())
     }
 }
 
-impl Callable for MultiUseSandbox {
+impl Callable for LocalSandbox {
     fn call<Output: SupportedReturnType>(
         &mut self,
         func_name: &str,
@@ -1136,9 +1207,307 @@ impl Callable for MultiUseSandbox {
     }
 }
 
-impl std::fmt::Debug for MultiUseSandbox {
+impl std::fmt::Debug for LocalSandbox {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MultiUseSandbox").finish()
+    }
+}
+
+#[cfg(feature = "process-isolation")]
+mod placement {
+    use super::*;
+    use crate::process::SandboxProcess;
+
+    /// A call-driven sandbox whose VM is local or in a dedicated process.
+    ///
+    /// A lost sandbox process is terminal. Reconstructing a snapshot creates a
+    /// new sandbox and new native workers. Restoring an existing sandbox changes
+    /// guest state only.
+    pub struct MultiUseSandbox {
+        placement: Placement,
+    }
+
+    #[expect(
+        clippy::large_enum_variant,
+        reason = "Local placement must not allocate a wrapper"
+    )]
+    enum Placement {
+        Local(LocalSandbox),
+        Process(Box<SandboxProcess>),
+    }
+
+    #[test]
+    fn local_placement_storage_overhead_is_bounded() {
+        let local = std::mem::size_of::<LocalSandbox>();
+        let placement = std::mem::size_of::<Placement>();
+        eprintln!("local={local} placement={placement}");
+        assert!(placement <= local + std::mem::align_of::<LocalSandbox>());
+    }
+
+    impl MultiUseSandbox {
+        pub(crate) fn from_uninit(
+            host_funcs: Arc<Mutex<FunctionRegistry>>,
+            mgr: SandboxMemoryManager<HostSharedMemory>,
+            vm: HyperlightVm,
+        ) -> Result<Self> {
+            Ok(Self {
+                placement: Placement::Local(LocalSandbox::from_uninit(host_funcs, mgr, vm)?),
+            })
+        }
+
+        pub(crate) fn from_process(process: SandboxProcess) -> Self {
+            Self {
+                placement: Placement::Process(Box::new(process)),
+            }
+        }
+
+        pub(crate) fn local_mut(&mut self) -> Result<&mut LocalSandbox> {
+            match &mut self.placement {
+                Placement::Local(local) => Ok(local),
+                Placement::Process(_) => Err(crate::new_error!(
+                    "Caller-local closures cannot be installed in a sandbox process"
+                )),
+            }
+        }
+
+        pub(crate) fn into_local(self) -> Result<LocalSandbox> {
+            match self.placement {
+                Placement::Local(local) => Ok(local),
+                Placement::Process(_) => Err(crate::new_error!("Expected an executable-local VM")),
+            }
+        }
+
+        /// Creates a local sandbox using existing executable-local bindings.
+        pub fn from_snapshot(
+            snapshot: Arc<Snapshot>,
+            host_funcs: crate::HostFunctions,
+            config: Option<crate::sandbox::SandboxConfiguration>,
+        ) -> Result<Self> {
+            if snapshot
+                .process_topology()
+                .is_some_and(|topology| topology.sandbox().is_some())
+            {
+                return Err(crate::new_error!(
+                    "A dedicated sandbox snapshot must be reconstructed through SandboxBuilder"
+                ));
+            }
+            Ok(Self {
+                placement: Placement::Local(LocalSandbox::from_snapshot(
+                    snapshot, host_funcs, config,
+                )?),
+            })
+        }
+
+        /// Sets the maximum guest log level.
+        pub fn log_level(&mut self, level: LevelFilter) -> Result<()> {
+            match &mut self.placement {
+                Placement::Local(local) => local.log_level(level),
+                Placement::Process(process) => process.log_level(level),
+            }
+        }
+
+        /// Installs a local page-table callback.
+        ///
+        /// # Panics
+        ///
+        /// Panics for a dedicated sandbox. Closures must be installed in its
+        /// executable before serving requests.
+        pub fn set_pt_root_finder(&mut self, finder: PtRootFinder) {
+            match &mut self.placement {
+                Placement::Local(local) => local.set_pt_root_finder(finder),
+                Placement::Process(_) => {
+                    panic!("Page-table callbacks must be installed in the sandbox executable")
+                }
+            }
+        }
+
+        /// Captures guest state and immutable process definitions.
+        pub fn snapshot(&mut self) -> Result<Arc<Snapshot>> {
+            match &mut self.placement {
+                Placement::Local(local) => local.snapshot(),
+                Placement::Process(process) => process.snapshot(),
+            }
+        }
+
+        /// Restores guest state without restarting native workers.
+        pub fn restore(&mut self, snapshot: Arc<Snapshot>) -> Result<()> {
+            match &mut self.placement {
+                Placement::Local(local) => local.restore(snapshot),
+                Placement::Process(process) => process.restore(snapshot),
+            }
+        }
+
+        /// Returns effective controls for ready native processes owned by this sandbox.
+        pub fn process_reports(&self) -> Vec<crate::process::ProcessReport> {
+            match &self.placement {
+                Placement::Local(local) => local.process_reports(),
+                Placement::Process(process) => process.process_reports(),
+            }
+        }
+
+        #[cfg(all(test, target_os = "windows"))]
+        pub(crate) fn terminate_worker_for_test(&self, index: usize) -> Result<()> {
+            match &self.placement {
+                Placement::Local(local) => local
+                    .process_runtime
+                    .as_ref()
+                    .unwrap()
+                    .terminate_worker_for_test(index),
+                Placement::Process(process) => process.terminate_worker_for_test(index),
+            }
+        }
+
+        /// Calls a guest function, retaining guest state between calls.
+        pub fn call<Output: SupportedReturnType>(
+            &mut self,
+            name: &str,
+            args: impl ParameterTuple,
+        ) -> Result<Output> {
+            match &mut self.placement {
+                Placement::Local(local) => local.call(name, args),
+                Placement::Process(process) => {
+                    Output::from_value(process.call(name, Output::TYPE, args.into_value())?)
+                        .map_err(Into::into)
+                }
+            }
+        }
+
+        #[doc(hidden)]
+        #[deprecated(since = "0.8.0", note = "Use call and snapshot/restore.")]
+        pub fn call_guest_function_by_name<Output: SupportedReturnType>(
+            &mut self,
+            name: &str,
+            args: impl ParameterTuple,
+        ) -> Result<Output> {
+            let snapshot = self.snapshot()?;
+            let result = self.call(name, args);
+            self.restore(snapshot)?;
+            result
+        }
+
+        /// Maps caller memory into a local VM.
+        ///
+        /// Dedicated sandboxes reject caller pointers before dereferencing them.
+        ///
+        /// # Safety
+        ///
+        /// The caller must keep the region valid and unmodified for the sandbox's lifetime.
+        pub unsafe fn map_region(&mut self, region: &MemoryRegion) -> Result<()> {
+            match &mut self.placement {
+                Placement::Local(local) => {
+                    // SAFETY: the caller provides the same lifetime contract.
+                    unsafe { local.map_region(region) }
+                }
+                Placement::Process(_) => Err(crate::new_error!(
+                    "Caller-address memory mappings are unavailable in a sandbox process"
+                )),
+            }
+        }
+
+        /// Maps a local file into the VM.
+        pub fn map_file_cow(&mut self, path: &Path, base: u64) -> Result<u64> {
+            match &mut self.placement {
+                Placement::Local(local) => local.map_file_cow(path, base),
+                Placement::Process(_) => Err(crate::new_error!(
+                    "Late file mappings require executable-local sandbox configuration"
+                )),
+            }
+        }
+
+        /// Calls a function whose signature is known only at runtime.
+        #[cfg(feature = "fuzzing")]
+        pub fn call_type_erased_guest_function_by_name(
+            &mut self,
+            name: &str,
+            output: ReturnType,
+            args: Vec<ParameterValue>,
+        ) -> Result<ReturnValue> {
+            match &mut self.placement {
+                Placement::Local(local) => {
+                    local.call_type_erased_guest_function_by_name(name, output, args)
+                }
+                Placement::Process(process) => process.call(name, output, args),
+            }
+        }
+
+        /// Returns a handle that interrupts execution in the VM-owning process.
+        pub fn interrupt_handle(&self) -> Arc<dyn InterruptHandle> {
+            match &self.placement {
+                Placement::Local(local) => local.interrupt_handle(),
+                Placement::Process(process) => process.interrupt_handle(),
+            }
+        }
+
+        /// Generates a dump in the VM-owning process.
+        #[cfg(crashdump)]
+        pub fn generate_crashdump(&mut self) -> Result<()> {
+            match &mut self.placement {
+                Placement::Local(local) => local.generate_crashdump(),
+                Placement::Process(process) => process.generate_crashdump(),
+            }
+        }
+
+        /// Generates a dump in a caller-local directory.
+        #[cfg(crashdump)]
+        pub fn generate_crashdump_to_dir(&mut self, dir: impl Into<PathBuf>) -> Result<()> {
+            match &mut self.placement {
+                Placement::Local(local) => local.generate_crashdump_to_dir(dir),
+                Placement::Process(_) => Err(crate::new_error!(
+                    "A caller-local crashdump directory is unavailable in a sandbox process"
+                )),
+            }
+        }
+
+        /// Returns whether the sandbox requires a successful restore before reuse.
+        ///
+        /// Use [`Self::status`] to distinguish terminal process loss.
+        #[deprecated(since = "0.17.0", note = "use status().is_poisoned()")]
+        pub fn poisoned(&self) -> bool {
+            self.status().is_poisoned()
+        }
+
+        /// Reports guest health or terminal native-process loss.
+        pub fn status(&self) -> SandboxStatus {
+            match &self.placement {
+                Placement::Local(local) => local.status(),
+                Placement::Process(process) => process.status(),
+            }
+        }
+    }
+
+    impl Callable for MultiUseSandbox {
+        fn call<Output: SupportedReturnType>(
+            &mut self,
+            name: &str,
+            args: impl ParameterTuple,
+        ) -> Result<Output> {
+            self.call(name, args)
+        }
+    }
+
+    impl std::fmt::Debug for MultiUseSandbox {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.debug_struct("MultiUseSandbox").finish()
+        }
+    }
+
+    // White-box local VM tests retain access to the representation they inspect.
+    #[cfg(test)]
+    impl std::ops::Deref for MultiUseSandbox {
+        type Target = LocalSandbox;
+        fn deref(&self) -> &Self::Target {
+            match &self.placement {
+                Placement::Local(local) => local,
+                Placement::Process(_) => panic!("test expected a local sandbox"),
+            }
+        }
+    }
+
+    #[cfg(test)]
+    impl std::ops::DerefMut for MultiUseSandbox {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            self.local_mut().expect("test expected a local sandbox")
+        }
     }
 }
 

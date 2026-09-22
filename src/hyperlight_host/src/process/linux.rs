@@ -1,0 +1,474 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The Hyperlight Authors.
+
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
+use std::os::fd::OwnedFd;
+use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use sha2::{Digest, Sha256};
+
+use super::ProcessControl;
+use super::launch::{ControlOutcome, ControlResult, PreparedProcess, ProcessGuard};
+use super::linux_domain::Domain;
+use super::linux_output::Output;
+use super::program::{ProcessDefinition, ProgramRole, ValidatedProgram};
+use crate::{Result, new_error};
+
+const MAX_HELPER_BYTES: u64 = 64 * 1024 * 1024;
+
+#[cfg(test)]
+#[path = "linux_tests.rs"]
+mod tests;
+
+/// Host-local resources for Linux process confinement.
+///
+/// The caller supplies a delegated cgroup2 directory and an explicitly trusted
+/// Minijail build. These resources are not part of a portable guest snapshot.
+#[derive(Clone, Debug)]
+pub struct LinuxProcessResources {
+    delegated_root: PathBuf,
+    helper: Arc<[u8]>,
+    hypervisor_device: Option<PathBuf>,
+}
+
+impl LinuxProcessResources {
+    /// Copies helper bytes after verifying their SHA-256 digest.
+    ///
+    /// The helper must enforce required Landlock and seccomp without soft-failure
+    /// or sanitizer bypasses. No helper is downloaded or resolved through PATH.
+    pub fn new(
+        delegated_root: impl Into<PathBuf>,
+        helper: impl AsRef<Path>,
+        expected_sha256: [u8; 32],
+    ) -> Result<Self> {
+        let mut bytes = Vec::new();
+        File::open(helper)?
+            .take(MAX_HELPER_BYTES + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.is_empty() || bytes.len() as u64 > MAX_HELPER_BYTES {
+            return Err(new_error!("Confinement helper has an invalid size"));
+        }
+        let actual: [u8; 32] = Sha256::digest(&bytes).into();
+        if actual != expected_sha256 {
+            return Err(new_error!("Confinement helper SHA-256 does not match"));
+        }
+        let delegated_root = delegated_root.into();
+        if !delegated_root.is_absolute() {
+            return Err(new_error!("Delegated cgroup directory must be absolute"));
+        }
+        Ok(Self {
+            delegated_root,
+            helper: bytes.into(),
+            hypervisor_device: None,
+        })
+    }
+
+    /// Grants the sandbox-host role access to one hypervisor device.
+    ///
+    /// Function workers receive no hypervisor device. Only `/dev/kvm` and
+    /// `/dev/mshv` are accepted.
+    pub fn hypervisor_device(mut self, device: impl Into<PathBuf>) -> Result<Self> {
+        let device = device.into();
+        if device != Path::new("/dev/kvm") && device != Path::new("/dev/mshv") {
+            return Err(new_error!("Unsupported hypervisor device: {device:?}"));
+        }
+        if !fs::symlink_metadata(&device)?.file_type().is_char_device() {
+            return Err(new_error!("Hypervisor device must be a character device"));
+        }
+        self.hypervisor_device = Some(device);
+        Ok(self)
+    }
+}
+
+struct Image {
+    directory: tempfile::TempDir,
+    helper: PathBuf,
+    process_filter: PathBuf,
+    root: PathBuf,
+    readable: Vec<String>,
+}
+
+impl Image {
+    fn stage(
+        resources: &LinuxProcessResources,
+        program: &ValidatedProgram,
+        deny_child_processes: bool,
+    ) -> Result<Self> {
+        // The image and supervisor are siblings. The worker cannot see its helper.
+        let directory = tempfile::Builder::new()
+            .prefix("hyperlight-process-")
+            .tempdir()?;
+        let helper = directory.path().join("supervisor");
+        write_image_file(&helper, &resources.helper, 0o500)?;
+        let process_filter = directory.path().join("process-filter");
+        write_image_file(
+            &process_filter,
+            &syscall_filter(deny_child_processes),
+            0o400,
+        )?;
+        let root = directory.path().join("root");
+        fs::create_dir(&root)?;
+        write_image_file(&root.join("program"), program.executable(), 0o500)?;
+        let mut readable = vec!["/program".to_owned()];
+        for file in program.runtime_files() {
+            let destination = root.join(file.image_path().trim_start_matches('/'));
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            write_image_file(&destination, file.bytes(), 0o500)?;
+            readable.push(file.image_path().to_owned());
+        }
+        for name in ["proc", "tmp", "dev"] {
+            fs::create_dir_all(root.join(name))?;
+        }
+        Ok(Self {
+            directory,
+            helper,
+            process_filter,
+            root,
+            readable,
+        })
+    }
+
+    fn arguments(
+        &self,
+        role: ProgramRole,
+        resources: &LinuxProcessResources,
+        deny_network: bool,
+    ) -> Result<Vec<String>> {
+        let root = self
+            .root
+            .to_str()
+            .ok_or_else(|| new_error!("Confinement image path is not UTF-8"))?;
+        if root.contains(',') {
+            return Err(new_error!(
+                "Confinement image path contains a bind separator"
+            ));
+        }
+        let mut arguments = [
+            "-U",
+            "-m",
+            "-M",
+            "-I",
+            "-l",
+            "-w",
+            "-n",
+            "-c",
+            "0",
+            "--ambient",
+            "-P",
+            root,
+            "-b",
+            &format!("{root},/,1"),
+            "-k",
+            "proc,/proc,proc,15",
+            "--landlock-abi",
+            "5",
+            "--require-landlock",
+            "--preserve-fd",
+            "3",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        arguments.extend([
+            "--seccomp-bpf-binary".to_owned(),
+            self.process_filter
+                .to_str()
+                .ok_or_else(|| new_error!("Process filter path is not UTF-8"))?
+                .to_owned(),
+        ]);
+        if deny_network {
+            arguments.push("-e".to_owned());
+        }
+        for path in &self.readable {
+            arguments.extend(["--fs-path-rx".to_owned(), path.clone()]);
+        }
+        arguments.extend(["--fs-path-ro".to_owned(), "/proc".to_owned()]);
+        if role == ProgramRole::SandboxHost {
+            arguments.extend([
+                "-k".to_owned(),
+                "tmpfs,/tmp,tmpfs,14,mode=700".to_owned(),
+                "--fs-path-rw".to_owned(),
+                "/tmp".to_owned(),
+            ]);
+            let device = resources.hypervisor_device.as_ref().ok_or_else(|| {
+                new_error!("A sandbox process requires an explicit hypervisor device")
+            })?;
+            if !fs::symlink_metadata(device)?.file_type().is_char_device() {
+                return Err(new_error!("Hypervisor device is not a character device"));
+            }
+            let path = device
+                .to_str()
+                .ok_or_else(|| new_error!("Hypervisor device path is not UTF-8"))?;
+            arguments.extend([
+                "-b".to_owned(),
+                format!("{path},{path},1"),
+                // ABI 5 requires IOCTL_DEV on this validated character device.
+                "--fs-path-advanced-rw".to_owned(),
+                path.to_owned(),
+            ]);
+        }
+        arguments
+            .extend(["-T", "static", "--logging", "stderr", "--", "/program"].map(str::to_owned));
+        Ok(arguments)
+    }
+}
+
+fn syscall_filter(deny_child_processes: bool) -> Vec<u8> {
+    #[cfg(target_arch = "x86_64")]
+    const ARCH: u32 = 0xc000_003e;
+    #[cfg(target_arch = "aarch64")]
+    const ARCH: u32 = 0xc000_00b7;
+    const LOAD: u16 = (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16;
+    const EQUAL: u16 = (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16;
+    const SET: u16 = (libc::BPF_JMP | libc::BPF_JSET | libc::BPF_K) as u16;
+    const RETURN: u16 = (libc::BPF_RET | libc::BPF_K) as u16;
+    const DENIED: u32 = libc::SECCOMP_RET_ERRNO | libc::EPERM as u32;
+    const UNAVAILABLE: u32 = libc::SECCOMP_RET_ERRNO | libc::ENOSYS as u32;
+
+    // seccomp_data contains nr at 0, arch at 4 and args[0] at 16.
+    let mut filter = vec![
+        (LOAD, 0, 0, 4),
+        (EQUAL, 1, 0, ARCH),
+        (RETURN, 0, 0, libc::SECCOMP_RET_KILL_PROCESS),
+        (LOAD, 0, 0, 0),
+    ];
+    #[cfg(target_arch = "x86_64")]
+    filter.extend([
+        (SET, 0, 1, 0x4000_0000), // x32 shares the x86-64 audit architecture.
+        (RETURN, 0, 0, DENIED),
+    ]);
+    for syscall in [libc::SYS_keyctl, libc::SYS_add_key, libc::SYS_request_key] {
+        filter.extend([(EQUAL, 0, 1, syscall as u32), (RETURN, 0, 0, DENIED)]);
+    }
+    if deny_child_processes {
+        #[cfg(target_arch = "x86_64")]
+        filter.extend([
+            (EQUAL, 0, 1, libc::SYS_fork as u32),
+            (RETURN, 0, 0, DENIED),
+            (EQUAL, 0, 1, libc::SYS_vfork as u32),
+            (RETURN, 0, 0, DENIED),
+        ]);
+        filter.extend([
+            // BPF cannot inspect clone3's pointed-to flags. glibc retries clone on ENOSYS.
+            (EQUAL, 0, 1, libc::SYS_clone3 as u32),
+            (RETURN, 0, 0, UNAVAILABLE),
+            (EQUAL, 1, 0, libc::SYS_clone as u32),
+            (RETURN, 0, 0, libc::SECCOMP_RET_ALLOW),
+            (LOAD, 0, 0, 16),
+            (SET, 1, 0, libc::CLONE_THREAD as u32),
+            (RETURN, 0, 0, DENIED),
+        ]);
+    }
+    filter.push((RETURN, 0, 0, libc::SECCOMP_RET_ALLOW));
+    filter
+        .into_iter()
+        .flat_map(|(code, jt, jf, value)| {
+            let code = code.to_ne_bytes();
+            let value = value.to_ne_bytes();
+            [
+                code[0], code[1], jt, jf, value[0], value[1], value[2], value[3],
+            ]
+        })
+        .collect()
+}
+
+fn write_image_file(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(bytes)?;
+    file.set_permissions(fs::Permissions::from_mode(mode))?;
+    Ok(())
+}
+
+struct Profile {
+    enrollment: Arc<OwnedFd>,
+}
+
+impl mesh_process::SandboxProfile for Profile {
+    fn apply(&mut self, builder: &mut pal::unix::process::Builder<'_>) {
+        builder
+            .stdin(pal::unix::process::Stdio::Null)
+            .inherit_env(false)
+            .set_close_fds(true)
+            .set_cgroup_procs(self.enrollment.clone());
+    }
+}
+
+struct Guard {
+    domain: Domain,
+    image: Mutex<Option<Image>>,
+    output: Output,
+    retain: AtomicBool,
+}
+
+impl ProcessGuard for Guard {
+    fn start_launch(&self) {
+        self.retain.store(true, Ordering::Release);
+        self.domain.retain();
+    }
+
+    fn terminate_domain(&self) -> Result<()> {
+        self.domain.terminate_domain()
+    }
+
+    fn wait_empty(&self, deadline: Instant) -> Result<()> {
+        self.domain.wait_empty(deadline)
+    }
+
+    fn release_resources(&self, deadline: Instant) -> Result<()> {
+        self.domain.remove(deadline)?;
+        self.output.finish()?;
+        let mut image = self
+            .image
+            .lock()
+            .map_err(|_| new_error!("Process image ownership is poisoned"))?;
+        if let Some(staged) = &*image {
+            fs::remove_dir_all(staged.directory.path())?;
+        }
+        image.take();
+        self.retain.store(false, Ordering::Release);
+        Ok(())
+    }
+}
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        let termination = self.terminate_domain();
+        let cleanup = if self.retain.load(Ordering::Acquire) {
+            Err(new_error!(
+                "Root cleanup has not authorized resource release"
+            ))
+        } else {
+            self.release_resources(Instant::now() + Duration::from_secs(30))
+        };
+        if termination.is_err() || cleanup.is_err() {
+            self.domain.retain();
+            tracing::error!(
+                ?termination,
+                ?cleanup,
+                "Linux confinement cleanup incomplete"
+            );
+            if let Some(image) = self
+                .image
+                .get_mut()
+                .unwrap_or_else(|error| error.into_inner())
+                .take()
+            {
+                let path = image.directory.keep();
+                tracing::error!(?path, "Retaining process image after incomplete cleanup");
+            }
+        }
+    }
+}
+
+pub(super) fn prepare(
+    role: ProgramRole,
+    definition: &ProcessDefinition,
+    program: &ValidatedProgram,
+    resources: &LinuxProcessResources,
+) -> Result<PreparedProcess> {
+    let profile = definition.profile();
+    profile.validate()?;
+    let domain = Domain::create(&resources.delegated_root)?;
+    let mut controls = Vec::new();
+    for request in &profile.controls {
+        let unsupported = match request.control {
+            ProcessControl::MemoryLimit(_)
+                if !resources.delegated_root.join("memory.max").exists() =>
+            {
+                Some("The memory controller is unavailable")
+            }
+            ProcessControl::CpuBudget { quota, period }
+                if quota.as_nanos() % 1000 != 0
+                    || period.as_nanos() % 1000 != 0
+                    || quota.as_micros() < 1000
+                    || !(1000..=1_000_000).contains(&period.as_micros()) =>
+            {
+                Some(
+                    "CPU periods require 1-1000 ms and quotas at least 1 ms, in exact microseconds",
+                )
+            }
+            ProcessControl::CpuBudget { .. }
+                if !resources.delegated_root.join("cpu.max").exists() =>
+            {
+                Some("The CPU controller is unavailable")
+            }
+            _ => None,
+        };
+        if let Some(reason) = unsupported {
+            if request.required {
+                return Err(new_error!(
+                    "Required control for '{}' is unavailable: {reason}",
+                    definition.name()
+                ));
+            }
+            controls.push(ControlOutcome {
+                requested: request.clone(),
+                result: ControlResult::NotApplied {
+                    reason: reason.to_owned(),
+                },
+            });
+            continue;
+        }
+        match request.control {
+            ProcessControl::MemoryLimit(_) | ProcessControl::CpuBudget { .. } => {
+                controls.push(domain.configure(request)?);
+            }
+            ProcessControl::DenyNetwork => controls.push(ControlOutcome {
+                requested: request.clone(),
+                result: ControlResult::Applied {
+                    effective: ProcessControl::DenyNetwork,
+                    mechanism: "Private network namespace with no configured interfaces".to_owned(),
+                },
+            }),
+            ProcessControl::DenyChildProcesses => controls.push(ControlOutcome {
+                requested: request.clone(),
+                result: ControlResult::Applied {
+                    effective: ProcessControl::DenyChildProcesses,
+                    mechanism: "Native-ABI seccomp before exec, inherited by threads: \
+                        fork/vfork and clone without CLONE_THREAD return EPERM; \
+                        clone3 returns ENOSYS for libc clone fallback"
+                        .to_owned(),
+                },
+            }),
+        }
+    }
+    let deny_child_processes = profile
+        .controls
+        .iter()
+        .any(|request| request.control == ProcessControl::DenyChildProcesses);
+    let image = Image::stage(resources, program, deny_child_processes)?;
+    let arguments = image.arguments(role, resources, true)?;
+    let (output, writer) = Output::new(definition.name())?;
+    let config = mesh_process::ProcessConfig::new_with_sandbox(
+        definition.name(),
+        Box::new(Profile {
+            enrollment: domain.procs_fd(),
+        }),
+    )
+    .process_name(&image.helper)
+    .args(arguments)
+    .skip_worker_arg(true)
+    .stdout(Some(writer.try_clone()?))
+    .stderr(Some(writer));
+    Ok(PreparedProcess {
+        config,
+        guard: Arc::new(Guard {
+            domain,
+            image: Mutex::new(Some(image)),
+            output,
+            retain: AtomicBool::new(false),
+        }),
+        controls,
+    })
+}

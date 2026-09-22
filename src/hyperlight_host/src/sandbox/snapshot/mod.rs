@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2025 The Hyperlight Authors.
 
-mod file;
+pub(crate) mod file;
 mod file_tests;
 mod tripwires;
 
@@ -26,6 +26,8 @@ use crate::mem::layout::SandboxMemoryLayout;
 use crate::mem::memory_region::{GuestMemoryRegion, MemoryRegion, MemoryRegionFlags};
 use crate::mem::mgr::{GuestPageTableBuffer, SnapshotSharedMemory};
 use crate::mem::shared_mem::{ReadonlySharedMemory, SharedMemory};
+#[cfg(feature = "process-isolation")]
+use crate::process::program::ProcessTopologyDefinition;
 use crate::sandbox::SandboxConfiguration;
 use crate::sandbox::uninitialized::{GuestBinary, GuestEnvironment};
 
@@ -110,6 +112,9 @@ pub struct Snapshot {
     /// `HostFunctions` set that is missing required functions or
     /// has mismatched signatures.
     host_functions: HostFunctionDetails,
+    /// Native process declarations only. Guest restore never rewinds workers.
+    #[cfg(feature = "process-isolation")]
+    process_topology: Option<ProcessTopologyDefinition>,
 }
 impl core::convert::AsRef<Snapshot> for Snapshot {
     fn as_ref(&self) -> &Self {
@@ -284,6 +289,46 @@ fn map_specials(pt_buf: &GuestPageTableBuffer, scratch_size: usize) {
 }
 
 impl Snapshot {
+    /// Attaches immutable process definitions without accessing a program store.
+    #[cfg(feature = "process-isolation")]
+    pub fn with_process_topology(mut self, topology: ProcessTopologyDefinition) -> Result<Self> {
+        self.set_process_topology(topology)?;
+        Ok(self)
+    }
+
+    #[cfg(feature = "process-isolation")]
+    pub(crate) fn set_process_topology(
+        &mut self,
+        topology: ProcessTopologyDefinition,
+    ) -> Result<()> {
+        topology.validate_host_functions(&self.host_functions)?;
+        self.process_topology = Some(topology);
+        Ok(())
+    }
+
+    /// Definitions retained from capture or disk. They contain no native state.
+    #[cfg(feature = "process-isolation")]
+    pub fn process_topology(&self) -> Option<&ProcessTopologyDefinition> {
+        self.process_topology.as_ref()
+    }
+
+    /// Requires the same owners, programs, profiles and contracts before rebinding.
+    #[cfg(feature = "process-isolation")]
+    pub fn validate_process_topology(
+        &self,
+        actual: Option<&ProcessTopologyDefinition>,
+    ) -> Result<()> {
+        if self.process_topology.as_ref() != actual {
+            return Err(crate::new_error!(
+                "Snapshot process topology does not match registration"
+            ));
+        }
+        if let Some(actual) = actual {
+            actual.validate_host_functions(&self.host_functions)?;
+        }
+        Ok(())
+    }
+
     /// Create a new snapshot from the guest binary identified by `env`. With the configuration
     /// specified in `cfg`.
     pub(crate) fn from_env<'b>(
@@ -390,6 +435,8 @@ impl Snapshot {
             next_action: NextAction::Initialise(entrypoint_gva),
             original_entrypoint: entrypoint_gva,
             snapshot_generation: 0,
+            #[cfg(feature = "process-isolation")]
+            process_topology: None,
             host_functions: HostFunctionDetails {
                 host_functions: None,
             },
@@ -580,6 +627,8 @@ impl Snapshot {
             original_entrypoint,
             snapshot_generation,
             host_functions,
+            #[cfg(feature = "process-isolation")]
+            process_topology: None,
         })
     }
 

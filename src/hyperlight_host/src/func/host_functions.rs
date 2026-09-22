@@ -33,11 +33,10 @@ impl Registerable for UninitializedSandbox {
             .try_lock()
             .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?;
 
-        let entry = FunctionEntry {
-            function: hf.into().into(),
-            parameter_types: Args::TYPE,
-            return_type: Output::TYPE,
-        };
+        #[cfg(feature = "process-isolation")]
+        hfs.validate_local_registration(name)?;
+
+        let entry = FunctionEntry::new(hf.into().into(), Args::TYPE, Output::TYPE);
 
         (*hfs).register_host_function(name.to_string(), entry);
         Ok(())
@@ -69,23 +68,26 @@ impl Registerable for crate::MultiUseSandbox {
         name: &str,
         hf: impl Into<HostFunction<Output, Args>>,
     ) -> Result<()> {
-        let mut hfs = self
+        #[cfg(feature = "process-isolation")]
+        let sandbox = self.local_mut()?;
+        #[cfg(not(feature = "process-isolation"))]
+        let sandbox = self;
+        let mut hfs = sandbox
             .host_funcs
             .try_lock()
             .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?;
 
-        let entry = FunctionEntry {
-            function: hf.into().into(),
-            parameter_types: Args::TYPE,
-            return_type: Output::TYPE,
-        };
+        #[cfg(feature = "process-isolation")]
+        hfs.validate_local_registration(name)?;
+
+        let entry = FunctionEntry::new(hf.into().into(), Args::TYPE, Output::TYPE);
 
         (*hfs).register_host_function(name.to_string(), entry);
 
         // Registration mutates the host-function set captured in
         // snapshots. Invalidate the cached snapshot so the next
         // `snapshot()` call reflects the updated registry.
-        self.snapshot = None;
+        sandbox.snapshot = None;
         Ok(())
     }
 }
@@ -96,11 +98,10 @@ impl Registerable for crate::HostFunctions {
         name: &str,
         hf: impl Into<HostFunction<Output, Args>>,
     ) -> Result<()> {
-        let entry = FunctionEntry {
-            function: hf.into().into(),
-            parameter_types: Args::TYPE,
-            return_type: Output::TYPE,
-        };
+        #[cfg(feature = "process-isolation")]
+        self.inner().validate_local_registration(name)?;
+
+        let entry = FunctionEntry::new(hf.into().into(), Args::TYPE, Output::TYPE);
 
         self.inner_mut()
             .register_host_function(name.to_string(), entry);
@@ -159,6 +160,15 @@ where
 }
 
 impl TypeErasedHostFunction {
+    #[cfg(feature = "process-isolation")]
+    pub(crate) fn new(
+        function: impl Fn(Vec<ParameterValue>) -> Result<ReturnValue> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            func: Box::new(function),
+        }
+    }
+
     pub(crate) fn call(&self, args: Vec<ParameterValue>) -> Result<ReturnValue> {
         (self.func)(args)
     }
@@ -238,17 +248,14 @@ pub(crate) fn register_host_function<Args: ParameterTuple, Output: SupportedRetu
 ) -> Result<()> {
     let func = func.into().into();
 
-    let entry = FunctionEntry {
-        function: func,
-        parameter_types: Args::TYPE,
-        return_type: Output::TYPE,
-    };
-
-    sandbox
+    let entry = FunctionEntry::new(func, Args::TYPE, Output::TYPE);
+    let mut functions = sandbox
         .host_funcs
         .try_lock()
-        .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?
-        .register_host_function(name.to_string(), entry);
+        .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?;
+    #[cfg(feature = "process-isolation")]
+    functions.validate_local_registration(name)?;
+    functions.register_host_function(name.to_string(), entry);
 
     Ok(())
 }

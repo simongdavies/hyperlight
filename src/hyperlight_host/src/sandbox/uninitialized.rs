@@ -167,6 +167,11 @@ impl UninitializedSandbox {
         cfg: Option<SandboxConfiguration>,
         #[cfg(crashdump)] binary_path: Option<PathBuf>,
     ) -> Result<Self> {
+        #[cfg(feature = "process-isolation")]
+        if snapshot.process_topology().is_some() {
+            snapshot.validate_process_topology(None)?;
+        }
+
         #[cfg(feature = "build-metadata")]
         log_build_details();
 

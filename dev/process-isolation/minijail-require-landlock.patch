@@ -1,0 +1,204 @@
+diff --git a/libminijail.c b/libminijail.c
+index 3ad4cec4f702b6ef5c284d5aed165fb643fc62b6..bdfbc66e2da6cc7cd814f1ce87f386bf7616b34c 100644
+--- a/libminijail.c
++++ b/libminijail.c
+@@ -184,6 +184,7 @@ struct minijail {
+ 		bool setsid : 1;
+ 		bool using_minimalistic_mountns : 1;
+ 		bool enable_fs_restrictions : 1;
++		bool require_landlock : 1;
+ 		bool enable_profile_fs_restrictions : 1;
+ 		bool enable_default_runtime : 1;
+ 		bool enable_new_sessions : 1;
+@@ -371,8 +372,19 @@ void minijail_preenter(struct minijail *j)
+ 	free_remounts_list(j);
+ }
+ 
++static void fail_required_landlock(const char *reason)
++{
++	warn("required Landlock: %s", reason);
++	/* abort() cannot reliably terminate PID 1 in a new PID namespace. */
++	_exit(MINIJAIL_ERR_JAIL);
++}
++
+ static int get_effective_landlock_abi(struct minijail *j)
+ {
++	if (j->flags.require_landlock &&
++	    (j->target_landlock_abi < 1 ||
++	     j->target_landlock_abi > LANDLOCK_ABI_FS_IOCTL_DEV_SUPPORTED))
++		fail_required_landlock("target ABI must be between 1 and 5");
+ 	if (j->effective_landlock_abi < 0) {
+ 		const int abi = landlock_create_ruleset(
+ 		    NULL, 0, LANDLOCK_CREATE_RULESET_VERSION);
+@@ -386,12 +398,20 @@ static int get_effective_landlock_abi(struct minijail *j)
+ 		}
+ 		j->effective_landlock_abi = MIN(system_abi, target);
+ 	}
++	if (j->flags.require_landlock &&
++	    j->effective_landlock_abi < j->target_landlock_abi)
++		fail_required_landlock("target ABI is unavailable");
+ 	return j->effective_landlock_abi;
+ }
+ 
+ /* Sets fs_rules_fd to an empty ruleset, if Landlock is available. */
+ static int setup_fs_rules_fd(struct minijail *j)
+ {
++	/* Strict launches must query support in the enforcing process. */
++	if (j->flags.require_landlock) {
++		close_and_reset(&j->fs_rules_fd);
++		j->effective_landlock_abi = -1;
++	}
+ 	int effective_abi = get_effective_landlock_abi(j);
+ 	struct minijail_landlock_ruleset_attr ruleset_attr = {
+ 	    .handled_access_fs = landlock_get_handled_fs_mask(effective_abi),
+@@ -400,6 +420,8 @@ static int setup_fs_rules_fd(struct minijail *j)
+ 	j->fs_rules_fd =
+ 	    landlock_create_ruleset(&ruleset_attr, sizeof(ruleset_attr), 0);
+ 	if (j->fs_rules_fd < 0) {
++		if (j->flags.require_landlock)
++			fail_required_landlock("ruleset creation failed");
+ 		/*
+ 		 * As of Landlock ABI=3, the useful errors we expect here are
+ 		 * ENOSYS or EOPNOTSUPP. In both cases, Landlock is not
+@@ -539,10 +561,21 @@ struct minijail API *minijail_new(void)
+ 
+ void API minijail_set_landlock_abi(struct minijail *j, int abi)
+ {
++	if (j->flags.require_landlock && j->fs_rules_head)
++		fail_required_landlock("set target ABI before adding rules");
+ 	j->target_landlock_abi = abi;
+ 	j->effective_landlock_abi = -1;
+ }
+ 
++void API minijail_require_landlock(struct minijail *j)
++{
++	j->flags.require_landlock = true;
++	j->effective_landlock_abi = -1;
++	/* Refresh a ruleset that may have been created in best-effort mode. */
++	if (j->fs_rules_head)
++		setup_fs_rules_fd(j);
++}
++
+ void API minijail_change_uid(struct minijail *j, uid_t uid)
+ {
+ 	if (uid == 0)
+@@ -2879,14 +2912,19 @@ static void apply_landlock_restrictions(const struct minijail *j)
+ 	/* The ruleset_fd needs to be mutable so use a stack copy from now on.
+ 	 */
+ 	int ruleset_fd = j->fs_rules_fd;
++	if (j->flags.require_landlock &&
++	    (!j->flags.enable_fs_restrictions || !r || ruleset_fd < 0))
++		fail_required_landlock("needs an enabled, initialized ruleset");
+ 	if (!j->flags.enable_fs_restrictions || !r) {
+ 		return;
+ 	}
+ 
+-	if (minijail_is_fs_restriction_available()) {
++	if (j->flags.require_landlock || minijail_is_fs_restriction_available()) {
+ 		while (r) {
+-			populate_ruleset_internal(r->path, ruleset_fd,
+-						  r->landlock_flags);
++			if (!populate_ruleset_internal(r->path, ruleset_fd,
++						       r->landlock_flags) &&
++			    j->flags.require_landlock)
++				fail_required_landlock("filesystem rule failed");
+ 			r = r->next;
+ 		}
+ 	}
+@@ -2896,6 +2934,8 @@ static void apply_landlock_restrictions(const struct minijail *j)
+ 			info("applying Landlock to process %s", j->filename);
+ 		}
+ 		if (landlock_restrict_self(ruleset_fd, 0)) {
++			if (j->flags.require_landlock)
++				fail_required_landlock("restrict_self failed");
+ 			pdie("failed to enforce ruleset");
+ 		}
+ 		close(ruleset_fd);
+@@ -3894,6 +3934,10 @@ static int minijail_run_internal(struct minijail *j,
+ 	int do_init = j->flags.do_init && !j->flags.run_as_init;
+ 	int use_preload = config->use_preload;
+ 
++	/* Preload applies some restrictions only after the workload exec. */
++	if (j->flags.require_landlock && use_preload)
++		fail_required_landlock("needs a no-preload launch (-T static)");
++
+ 	if (config->filename != NULL && config->elf_fd != -1) {
+ 		die("filename and elf_fd cannot be set at the same time");
+ 	}
+diff --git a/libminijail.h b/libminijail.h
+index dbafff79b65fad6aa608cd2e5750661975ab2161..e36220a5e07cd923e5e0d51277b28573061d649e 100644
+--- a/libminijail.h
++++ b/libminijail.h
+@@ -299,6 +299,14 @@ bool minijail_is_fs_restriction_available(void);
+ void minijail_set_landlock_abi(struct minijail *j, int abi)
+     MINIJAIL_ATTRIBUTE_NONNULL();
+ 
++/*
++ * Require the target ABI (1..5), ruleset creation, every rule, and enforcement.
++ * Failure is fatal. Requires filesystem rules and a no-preload launch.
++ * Set the target ABI before adding rules when this mode is enabled.
++ */
++void minijail_require_landlock(struct minijail *j)
++    MINIJAIL_ATTRIBUTE_NONNULL();
++
+ /* Adds a read-execute path. */
+ int minijail_add_fs_restriction_rx(struct minijail *j, const char *path)
+     MINIJAIL_ATTRIBUTE_NONNULL();
+diff --git a/minijail0_cli.c b/minijail0_cli.c
+index 43be005e308270b6a7170f298ace457e2950a7fa..e3e2ef9195111838aaf716b0b2b02182b329fbfc 100644
+--- a/minijail0_cli.c
++++ b/minijail0_cli.c
+@@ -515,6 +515,7 @@ enum {
+ 	OPT_GEN_CONFIG,
+ 	OPT_LOGGING,
+ 	OPT_LANDLOCK_ABI,
++	OPT_REQUIRE_LANDLOCK,
+ 	OPT_NO_DEFAULT_RUNTIME,
+ 	OPT_NO_FS_RESTRICTIONS,
+ 	OPT_NO_NEW_SESSIONS,
+@@ -561,6 +562,7 @@ static const struct option long_options[] = {
+     {"fs-path-rw", required_argument, 0, OPT_FS_PATH_RW},
+     {"fs-path-advanced-rw", required_argument, 0, OPT_FS_PATH_ADVANCED_RW},
+     {"landlock-abi", required_argument, 0, OPT_LANDLOCK_ABI},
++    {"require-landlock", no_argument, 0, OPT_REQUIRE_LANDLOCK},
+     {"no-default-runtime-environment", no_argument, 0, OPT_NO_DEFAULT_RUNTIME},
+     {"no-fs-restrictions", no_argument, 0, OPT_NO_FS_RESTRICTIONS},
+     {"no-new-sessions", no_argument, 0, OPT_NO_NEW_SESSIONS},
+@@ -705,6 +707,9 @@ static const char help_text[] =
+ "               Defaults to 2 to prevent implicit behavior changes\n"
+ "               when running on newer kernels. Set to 3 or 5 to\n"
+ "               explicitly enable newer restrictions.\n"
++"  --require-landlock\n"
++"               Require the target ABI and every filesystem restriction.\n"
++"               Fail before workload exec on error. Requires -T static.\n"
+ "  --no-fs-restrictions\n"
+ "               Disables path-based filesystem restrictions.\n"
+ "  --no-default-runtime-environment\n"
+@@ -910,6 +915,7 @@ int parse_args(struct minijail *j, int argc, char *const argv[],
+ 	char *config_path = NULL;
+ 	bool fs_path_flag_used = false;
+ 	bool fs_path_rules_enabled = true;
++	bool require_landlock = false;
+ 
+ 	while ((opt = getopt_conf_or_cli(argc, argv, &conf_entry_list,
+ 					 &conf_index)) != -1) {
+@@ -1193,6 +1199,9 @@ int parse_args(struct minijail *j, int argc, char *const argv[],
+ 			minijail_set_landlock_abi(j, abi);
+ 			break;
+ 		}
++		case OPT_REQUIRE_LANDLOCK:
++			require_landlock = true;
++			break;
+ 		case OPT_PROFILE:
+ 			use_profile(j, optarg, &pivot_root, chroot, &tmp_size);
+ 			break;
+@@ -1482,6 +1491,9 @@ int parse_args(struct minijail *j, int argc, char *const argv[],
+ 	/* Add Landlock rules for each processed mount arg. */
+ 	minijail_add_minimalistic_mountns_fs_rules(j);
+ 
++	if (require_landlock)
++		minijail_require_landlock(j);
++
+ 	/*
+ 	 * Copy our current env to the child if its |*envp| has not
+ 	 * already been initialized from --env-(reset|add) usage.

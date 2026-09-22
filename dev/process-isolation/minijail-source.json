@@ -1,0 +1,16 @@
+{
+  "source_commit": "8d20993c7189a948995bd20901abecc041e1a28e",
+  "base_helper_sha256": "9ae4f2ae33322b50690d682f881595cf61ca1be04326bff88f4592a22c4f4f05",
+  "patch_sha256": "f95409720cc074229231ef8b01decad19773cbc83b4faa200edee8bca1483e1a",
+  "tested_helper_sha256": "d16432b3f6fcf1b0859f36dae50440863e6bff441b67eab688b02275d5e951b6",
+  "rebuilt_base_control_sha256": "97007d424bb92450599bf2c5e4b2db9adda7095fca48f73b83b57046eab026d8",
+  "toolchain": {
+    "distribution": "WSL Ubuntu-24.04",
+    "architecture": "x86_64",
+    "gcc": "13.3.0-6ubuntu2~24.04.1",
+    "binutils": "2.42",
+    "make": "4.3",
+    "libcap": "2.66",
+    "python": "3.12.3"
+  }
+}

@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+* Optional sandbox-host and host-function process placement with typed contracts,
+  OS controls, immutable program references and snapshot reconstruction.
+  Final-owner Drop uses bounded best-effort cleanup. Unconfirmed cleanup can
+  leave descendants or resources without a retained retry owner.
+  Portable operation errors retain their variants across sandbox placements.
+  The feature adds a `HyperlightError::ProcessCleanup` variant for retained owners.
+* Explicit trusted Windows sandbox-host policy with per-build authorization.
+  Host-function processes remain confined. Snapshot metadata cannot authorize trust.
+* Process-aware snapshot config v2 retains the config v1 compatibility path.
+  Guest memory keeps ABI 3 and encoding v1. Loading v2 requires `process-isolation`.
+* Linux `DenyChildProcesses` permits runtime threads through native `clone`.
+  Process creation is denied. `clone3` returns `ENOSYS` for libc fallback.
+
 ### Changed
 * Support overriding the guest log level when building or restoring initialized snapshots. Persisted snapshots use ABI version 3 and must be regenerated.
 * `Snapshot::save` now writes the guest memory blob sparsely, skipping all-zero
