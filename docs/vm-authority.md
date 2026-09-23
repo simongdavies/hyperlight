@@ -73,10 +73,10 @@ worker reads its owned bytes and calls `SandboxBuilder::from_bytes` only after
 installing current-generation VM authority. No guest path, embedded guest, or
 provider runtime-file fallback exists.
 
-`NestedSandboxCompose("boom", 2)` returns exactly:
+`NestedSandboxCompose("compose", 2)` returns exactly:
 
 ```text
-inner-guest-function(process-host-function(boom),process-host-function(boom))
+inner-guest-function(process-host-function(compose),process-host-function(compose))
 ```
 
 The inner guest passes that final string to its co-located host function. The

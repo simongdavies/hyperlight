@@ -173,12 +173,12 @@ Run these commands in an ordinary non-elevated PowerShell session from the
 repository root. No service installation or privileged setup is required.
 
 ```powershell
-just build-rust-guests debug
-just move-rust-guests debug
-cargo +1.95 build --locked -p hyperlight-host --features process-isolation --example process_placement
+just build-rust-guests release
+just move-rust-guests release
+cargo +1.95 build --release --locked -p hyperlight-host --features process-isolation --example process_placement
 
-$Guest = (Resolve-Path 'src\tests\rust_guests\bin\debug\simpleguest').Path
-$Example = (Resolve-Path 'target\debug\examples\process_placement.exe').Path
+$Guest = (Resolve-Path 'src\tests\rust_guests\bin\release\simpleguest').Path
+$Example = (Resolve-Path 'target\release\examples\process_placement.exe').Path
 $RunRoot = Join-Path (Resolve-Path 'target').Path ("pq-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $RunRoot -ErrorAction Stop | Out-Null
 
@@ -201,13 +201,23 @@ registry and application-manifest opt-ins required by Windows long-path mode.
 
 ## Windows six-mode campaign
 
+The fast demo runs a small live call set in each mode. Interactive mode pauses
+while each topology is live. Use `--noninteractive` for automation.
+
 ```powershell
-& $Example local $Guest (Join-Path $RunRoot 'local')
-& $Example function-worker $Guest (Join-Path $RunRoot 'function-worker')
-& $Example worker-children-allowed $Guest (Join-Path $RunRoot 'worker-children-allowed')
-& $Example worker-children-blocked $Guest (Join-Path $RunRoot 'worker-children-blocked')
-& $Example vm-host $Guest (Join-Path $RunRoot 'vm-host') --allow-windows-vm-host
-& $Example vm-host-and-function-worker $Guest (Join-Path $RunRoot 'vm-host-and-function-worker') --allow-windows-vm-host
+& $Example demo $Guest --allow-windows-vm-host
+& $Example demo $Guest --noninteractive --allow-windows-vm-host
+```
+
+The exhaustive path adds recovery, snapshot reconstruction and cleanup checks:
+
+```powershell
+& $Example qualify local $Guest (Join-Path $RunRoot 'local')
+& $Example qualify function-worker $Guest (Join-Path $RunRoot 'function-worker')
+& $Example qualify worker-children-allowed $Guest (Join-Path $RunRoot 'worker-children-allowed')
+& $Example qualify worker-children-blocked $Guest (Join-Path $RunRoot 'worker-children-blocked')
+& $Example qualify vm-host $Guest (Join-Path $RunRoot 'vm-host') --allow-windows-vm-host
+& $Example qualify vm-host-and-function-worker $Guest (Join-Path $RunRoot 'vm-host-and-function-worker') --allow-windows-vm-host
 ```
 
 The explicit flag acknowledges that the VM-owning process runs outside
@@ -318,10 +328,10 @@ python3 dev/process-isolation/build_minijail.py \
 python3 -u dev/process-isolation/test_minijail.py \
   target/minijail-validation/minijail/minijail0
 
-cargo +1.95 build --locked -p hyperlight-host --features process-isolation \
+cargo +1.95 build --release --locked -p hyperlight-host --features process-isolation \
   --example process_placement
-just build-rust-guests debug
-just move-rust-guests debug
+just build-rust-guests release
+just move-rust-guests release
 ```
 
 Prerequisites are systemd 254 or newer, cgroup v2 with `cpu`, `memory` and
@@ -470,11 +480,11 @@ git clone --branch "$HYPERLIGHT_REF" --single-branch \
   "$HYPERLIGHT_REPOSITORY_URL" hyperlight-process-demo
 cd hyperlight-process-demo
 
-cargo +1.95 build --locked -p hyperlight-host --features process-isolation \
+cargo +1.95 build --release --locked -p hyperlight-host --features process-isolation \
   --example process_placement
-just build-rust-guests debug
-just move-rust-guests debug
-export GUEST="$PWD/src/tests/rust_guests/bin/debug/simpleguest"
+just build-rust-guests release
+just move-rust-guests release
+export GUEST="$PWD/src/tests/rust_guests/bin/release/simpleguest"
 test -s "$GUEST"
 mkdir -p target/process-demo
 export RUN_ROOT="$PWD/target/process-demo/$(date -u +%Y%m%dT%H%M%S)-$(cat /proc/sys/kernel/random/uuid)"
@@ -483,15 +493,24 @@ export RUN_ROOT="$PWD/target/process-demo/$(date -u +%Y%m%dT%H%M%S)-$(cat /proc/
 `Cargo.toml` and `Cargo.lock` pin the required Mesh/OpenVMM revision. Do not add a
 path override or replace it with upstream main.
 
-## Run all modes
+## Fast demo and exhaustive qualification
 
 The installation captures root-owned copies of the built example and guest.
-One command runs those installed bits in `local` and all five process-backed
-modes, verifies reports and snapshot reconstruction, and checks that each
-transient unit is cleaned up. It does not depend on a source checkout:
+The fast demo runs a small live call set in `local` and all five process-backed
+modes. It prints concise topology and capability details. Interactive mode
+pauses while each topology is live. The noninteractive form is suitable for
+automation:
 
 ```bash
-hyperlight-run examples --all
+hyperlight-run demo
+hyperlight-run demo --noninteractive
+```
+
+The exhaustive command verifies reports, recovery, snapshot reconstruction and
+transient-unit cleanup. `examples --all` remains a compatibility alias:
+
+```bash
+hyperlight-run qualify --all
 ```
 
 Results are written below a new timestamped
@@ -516,8 +535,8 @@ Use the launcher directly for an application:
 
 ```bash
 hyperlight-run run -- \
-  target/debug/examples/process_placement \
-  worker "$PWD/src/tests/rust_guests/bin/debug/simpleguest" \
+  target/release/examples/process_placement \
+  qualify worker "$PWD/src/tests/rust_guests/bin/release/simpleguest" \
   "$PWD/target/process-demo/worker"
 ```
 
@@ -528,16 +547,16 @@ Run `hyperlight-run --help` for aggregate ceiling and deadline options.
 `local` needs no process provider or OS launcher:
 
 ```bash
-target/debug/examples/process_placement \
-  local "$GUEST" "$RUN_ROOT/local"
+target/release/examples/process_placement \
+  qualify local "$GUEST" "$RUN_ROOT/local"
 ```
 
 Each output directory must be new. Create only its parent. To preserve and retry:
 
 ```bash
 mv "$RUN_ROOT/local" "$RUN_ROOT/local.saved"
-target/debug/examples/process_placement \
-  local "$GUEST" "$RUN_ROOT/local"
+target/release/examples/process_placement \
+  qualify local "$GUEST" "$RUN_ROOT/local"
 ```
 
 ## Process-backed command payloads
@@ -546,20 +565,20 @@ Run each payload with `hyperlight-run run --`. The qualification command above i
 the supported full campaign.
 
 ```bash
-hyperlight-run run -- target/debug/examples/process_placement \
-  worker "$GUEST" target/process-demo/worker
+hyperlight-run run -- target/release/examples/process_placement \
+  qualify worker "$GUEST" target/process-demo/worker
 
-hyperlight-run run -- target/debug/examples/process_placement \
-  sandbox "$GUEST" target/process-demo/sandbox
+hyperlight-run run -- target/release/examples/process_placement \
+  qualify sandbox "$GUEST" target/process-demo/sandbox
 
-hyperlight-run run -- target/debug/examples/process_placement \
-  sandbox-worker "$GUEST" target/process-demo/sandbox-worker
+hyperlight-run run -- target/release/examples/process_placement \
+  qualify sandbox-worker "$GUEST" target/process-demo/sandbox-worker
 
-hyperlight-run run -- target/debug/examples/process_placement \
-  children-allow "$GUEST" target/process-demo/children-allow
+hyperlight-run run -- target/release/examples/process_placement \
+  qualify children-allow "$GUEST" target/process-demo/children-allow
 
-hyperlight-run run -- target/debug/examples/process_placement \
-  children-deny "$GUEST" target/process-demo/children-deny
+hyperlight-run run -- target/release/examples/process_placement \
+  qualify children-deny "$GUEST" target/process-demo/children-deny
 ```
 
 Provider discovery fails closed before guest initialization when the supervisor
@@ -779,8 +798,8 @@ Worker and sandbox fixtures require inherited `ProcessStartup`. They are not
 standalone commands.
 
 Failure/replacement and idempotency behavior is exercised by the process runtime
-tests and the bounded `isolation_bench` recovery mode. The six-mode demo kills
-and replaces the function worker in `sandbox-worker`.
+tests, the exhaustive process-placement qualification and the bounded
+`isolation_bench` recovery mode.
 
 ## Measurement tools
 

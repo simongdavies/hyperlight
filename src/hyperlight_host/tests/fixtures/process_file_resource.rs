@@ -37,16 +37,17 @@ fn anonymous_file() -> Result<std::fs::File> {
     Ok(tempfile::tempfile()?)
 }
 
-fn run_worker(startup: ProcessStartup) -> Result<()> {
-    if startup.name()? != WORKER {
-        return Err(new_error!("Unexpected file-resource worker name"));
+fn qualification_rights() -> Result<Option<OsResourceRights>> {
+    match std::env::var("HYPERLIGHT_TEST_RESOURCE_RIGHTS").as_deref() {
+        Ok("read") => Ok(Some(OsResourceRights::READ)),
+        Ok("write") => Ok(Some(OsResourceRights::WRITE)),
+        Ok("read-write") => Ok(Some(RIGHTS)),
+        Err(_) => Ok(None),
+        Ok(value) => Err(new_error!("Unknown test resource rights '{value}'")),
     }
-    let rights = match std::env::var("HYPERLIGHT_TEST_RESOURCE_RIGHTS").as_deref() {
-        Ok("read") => OsResourceRights::READ,
-        Ok("write") => OsResourceRights::WRITE,
-        Ok("read-write") | Err(_) => RIGHTS,
-        Ok(value) => return Err(new_error!("Unknown test resource rights '{value}'")),
-    };
+}
+
+fn run_qualification_worker(startup: ProcessStartup, rights: OsResourceRights) -> Result<()> {
     let mut manifest = ProcessResourceManifest::new().with_file(rights)?;
     if std::env::var("HYPERLIGHT_TEST_RESOURCE_EXPORTS").as_deref() != Ok("disabled") {
         manifest = manifest
@@ -95,6 +96,75 @@ fn run_worker(startup: ProcessStartup) -> Result<()> {
     )
 }
 
+fn run_scenario_worker(startup: ProcessStartup) -> Result<()> {
+    let manifest = ProcessResourceManifest::new()
+        .with_file(RIGHTS)?
+        .with_file(OsResourceRights::READ)?;
+    ProcessHostFunctions::run_with_resources(
+        startup,
+        [ECHO.erase()],
+        manifest,
+        move |resources, functions| {
+            let ids = resources.ids();
+            let [read_write_id, read_only_id] = ids.as_slice() else {
+                return Err(new_error!(
+                    "The resource-transfer scenario requires exactly two resources"
+                ));
+            };
+            let read_write = resources.take_file(*read_write_id, RIGHTS)?;
+            let read_only = resources.take_file(*read_only_id, OsResourceRights::READ)?;
+            let files = Arc::new(Mutex::new((read_write, read_only)));
+            functions.bind(ECHO, move |input: String| -> Result<String> {
+                let mut files = files
+                    .lock()
+                    .map_err(|error| new_error!("Transferred file lock failed: {error}"))?;
+                let (read_write, read_only) = &mut *files;
+                read_write.seek(SeekFrom::Start(0))?;
+                let mut writable_value = String::new();
+                read_write.read_to_string(&mut writable_value)?;
+                read_write.seek(SeekFrom::End(0))?;
+                write!(read_write, "{input}")?;
+                read_write.flush()?;
+
+                read_only.seek(SeekFrom::Start(0))?;
+                let mut read_only_value = String::new();
+                read_only.read_to_string(&mut read_only_value)?;
+                let denial = match read_only.write_all(input.as_bytes()) {
+                    Ok(()) => {
+                        return Err(new_error!(
+                            "Read-only capability unexpectedly permitted a write"
+                        ));
+                    }
+                    Err(denial) => denial,
+                };
+                #[cfg(unix)]
+                let expected_denial = denial.kind() == std::io::ErrorKind::PermissionDenied
+                    || denial.raw_os_error() == Some(libc::EBADF);
+                #[cfg(not(unix))]
+                let expected_denial = denial.kind() == std::io::ErrorKind::PermissionDenied;
+                if !expected_denial {
+                    return Err(new_error!(
+                        "Read-only capability returned an unexpected write error: {denial}"
+                    ));
+                }
+                Ok(format!(
+                    "read-write={writable_value};read-only={read_only_value};write-denied=true"
+                ))
+            })
+        },
+    )
+}
+
+fn run_worker(startup: ProcessStartup) -> Result<()> {
+    if startup.name()? != WORKER {
+        return Err(new_error!("Unexpected file-resource worker name"));
+    }
+    match qualification_rights()? {
+        Some(rights) => run_qualification_worker(startup, rights),
+        None => run_scenario_worker(startup),
+    }
+}
+
 fn profile() -> ProcessProfile {
     ProcessProfile::new(vec![RequestedControl {
         control: ProcessControl::MemoryLimit(512 << 20),
@@ -104,74 +174,73 @@ fn profile() -> ProcessProfile {
 
 fn run_controller() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
-    let [guest, path, input] = args.as_slice() else {
+    let [guest, read_write_path, read_only_path, input] = args.as_slice() else {
         return Err(new_error!(
-            "Usage: process_file_resource GUEST EXISTING_FILE INPUT"
+            "Usage: process_file_resource GUEST READ_WRITE_FILE READ_ONLY_FILE INPUT"
         ));
     };
     let input = input
         .to_str()
         .ok_or_else(|| new_error!("Input must be valid UTF-8"))?
         .to_owned();
-    let path = Path::new(path);
-    let mut file = OpenOptions::new().read(true).write(true).open(path)?;
-    let verification = file.try_clone()?;
-    file.seek(SeekFrom::Start(0))?;
-    let mut original = String::new();
-    file.read_to_string(&mut original)?;
+    let read_write_path = Path::new(read_write_path);
+    let read_only_path = Path::new(read_only_path);
+    let mut read_write = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(read_write_path)?;
+    let read_write_verification = read_write.try_clone()?;
+    read_write.seek(SeekFrom::Start(0))?;
+    let mut writable_original = String::new();
+    read_write.read_to_string(&mut writable_original)?;
+    let mut read_only = OpenOptions::new().read(true).open(read_only_path)?;
+    let mut read_only_verification = read_only.try_clone()?;
+    let mut read_only_original = String::new();
+    read_only.read_to_string(&mut read_only_original)?;
 
     let mut provider = MeshProcessProvider::discover().map_err(|error| {
         new_error!(
             "Process provider setup failed: {error}. See dev/process-isolation/QUICKSTART.md"
         )
     })?;
-    provider.register_file(WORKER, file, RIGHTS)?;
-    provider.allow_file_exports(
-        WORKER,
-        OsResourceExportPolicy::files(OsResourceRights::READ, 1)?,
-    )?;
-
-    std::fs::remove_file(path).map_err(|error| {
-        new_error!(
-            "The input path must be removable after opening to prove no path reopen: {error}"
-        )
-    })?;
+    provider.register_file(WORKER, read_write, RIGHTS)?;
+    provider.register_file(WORKER, read_only, OsResourceRights::READ)?;
     let worker =
         HostFunctionProcess::new(ProcessOptions::for_provider(WORKER, profile())).function(ECHO);
     let mut sandbox = SandboxBuilder::from_file(guest)
         .mesh_process_provider(provider.clone())
         .host_function_process(worker)
         .build()?;
-    let worker_read = sandbox.call::<String>("RoundTripHostString", input.clone())?;
-    if worker_read != original {
+    let result = sandbox.call::<String>("RoundTripHostString", input.clone())?;
+    let expected_result =
+        format!("read-write={writable_original};read-only={read_only_original};write-denied=true");
+    if result != expected_result {
         return Err(new_error!(
-            "Worker did not read the transferred file object"
+            "Typed resource transfer returned '{result}', expected '{expected_result}'"
         ));
     }
-
-    let mut exported = provider
-        .take_exported_file(WORKER)?
-        .ok_or_else(|| new_error!("Worker did not export its pathname-free result object"))?;
-    let generation = exported.id().generation();
-    let expected = format!("{original}[generation={generation}]{input}");
-    let mut verification = verification;
-    verification.seek(SeekFrom::Start(0))?;
-    let mut actual = String::new();
-    verification.read_to_string(&mut actual)?;
-    if actual != expected {
+    let mut read_write_verification = read_write_verification;
+    read_write_verification.seek(SeekFrom::Start(0))?;
+    let mut writable_actual = String::new();
+    read_write_verification.read_to_string(&mut writable_actual)?;
+    if writable_actual != format!("{writable_original}{input}") {
         return Err(new_error!(
-            "Calling host did not observe the worker write through the transferred object"
+            "Read/write capability did not update its resource"
         ));
     }
-    let mut exported_result = String::new();
-    exported.seek(SeekFrom::Start(0))?;
-    exported.read_to_string(&mut exported_result)?;
-    if exported_result != expected {
-        return Err(new_error!(
-            "Calling host did not receive the exact worker result object"
-        ));
+    read_only_verification.seek(SeekFrom::Start(0))?;
+    let mut read_only_actual = String::new();
+    read_only_verification.read_to_string(&mut read_only_actual)?;
+    if read_only_actual != read_only_original {
+        return Err(new_error!("Read-only capability changed its resource"));
     }
-    println!("Bidirectional file capability transfer verified after removing the input path");
+    println!("Typed resource capability transfer:");
+    println!("  read/write capability: read and write succeeded");
+    println!("  read-only capability: read succeeded");
+    println!(
+        "  read-only capability write: denied ({})",
+        std::io::ErrorKind::PermissionDenied
+    );
     Ok(())
 }
 

@@ -9,6 +9,7 @@ tasks_max=512
 cpu_quota=400%
 runtime_max=5min
 stop_timeout=30
+use_pty=0
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 
 usage() {
@@ -17,6 +18,8 @@ Usage: hyperlight-run [OPTIONS] -- COMMAND [ARG...]
        hyperlight-run run [OPTIONS] -- COMMAND [ARG...]
        hyperlight-run init [--plan] [--user USER] [--source PATH]
        hyperlight-run check
+       hyperlight-run demo [--noninteractive] [--details]
+       hyperlight-run qualify --all
        hyperlight-run examples --all
        hyperlight-run uninstall [--plan] [--user USER]
 
@@ -25,7 +28,9 @@ Run an unprivileged Hyperlight application in a bounded delegated systemd unit.
 Commands:
   init                   Validate and perform the one-time operator installation
   check                  Validate the installed integration and host prerequisites
-  examples --all         Run installed local plus all process-backed examples
+  demo                   Run the fast interactive six-mode presentation
+  qualify --all          Run exhaustive six-mode qualification
+  examples --all         Compatibility alias for qualify --all
   run                    Explicit form of the normal application launch
   uninstall              Remove installed integration assets and policy
 
@@ -100,6 +105,51 @@ if [[ ${1-} == examples ]]; then
     exec python3 /usr/libexec/hyperlight/qualify_linux.py
 fi
 
+if [[ ${1-} == qualify ]]; then
+    shift
+    if [[ ${1-} == -h || ${1-} == --help ]]; then
+        echo "Usage: hyperlight-run qualify --all"
+        exit 0
+    fi
+    [[ ${1-} == --all && $# == 1 ]] ||
+        { echo "hyperlight-run: usage: hyperlight-run qualify --all" >&2; exit 2; }
+    [[ -f /usr/libexec/hyperlight/qualify_linux.py ]] ||
+        { echo "hyperlight-run: integration is not installed; run hyperlight-run init" >&2; exit 1; }
+    exec python3 /usr/libexec/hyperlight/qualify_linux.py
+fi
+
+if [[ ${1-} == demo ]]; then
+    shift
+    demo_options=()
+    noninteractive=0
+    while (($#)); do
+        case "$1" in
+            --noninteractive)
+                noninteractive=1
+                demo_options+=("$1")
+                shift
+                ;;
+            --details|--verbose) demo_options+=("$1"); shift ;;
+            -h|--help)
+                echo "Usage: hyperlight-run demo [--noninteractive] [--details]"
+                exit 0
+                ;;
+            *) echo "hyperlight-run: unknown demo option: $1" >&2; exit 2 ;;
+        esac
+    done
+    [[ -x /usr/libexec/hyperlight/process_placement &&
+       -f /usr/libexec/hyperlight/simpleguest ]] ||
+        { echo "hyperlight-run: integration is not installed; run hyperlight-run init" >&2; exit 1; }
+    if ((!noninteractive)); then
+        [[ -t 0 && -t 1 ]] ||
+            { echo "hyperlight-run: interactive demo requires a terminal; use --noninteractive" >&2; exit 1; }
+        use_pty=1
+    fi
+    set -- --runtime-max 5min -- \
+        /usr/libexec/hyperlight/process_placement demo \
+        /usr/libexec/hyperlight/simpleguest "${demo_options[@]}"
+fi
+
 if [[ ${1-} == uninstall ]]; then
     shift
     [[ ${EUID} -ne 0 ]] ||
@@ -159,15 +209,17 @@ if [[ -n ${HYPERLIGHT_MESH_PROCESS_CGROUP_ROOT-} ||
     echo "hyperlight-run: internal provider variables must not be set by the caller" >&2
     exit 1
 fi
-if ! systemctl --user is-system-running --quiet &&
-   ! systemctl --user is-system-running 2>/dev/null | grep -Eq '^(running|degraded)$'; then
+systemd_state=$(systemctl --user is-system-running --no-pager 2>/dev/null || true)
+if [[ $systemd_state != running && $systemd_state != degraded ]]; then
     echo "hyperlight-run: the user systemd manager is unavailable; run hyperlight-run check" >&2
     exit 1
 fi
 
 unit="hyperlight-$(date +%s)-$$-$RANDOM"
+stdio_option=(--pipe)
+((use_pty)) && stdio_option=(--pty)
 set +e
-systemd-run --user --wait --collect --pipe --same-dir \
+systemd-run --user --wait --collect "${stdio_option[@]}" --same-dir \
     --unit="$unit" --service-type=exec \
     --property="MemoryMax=$memory_max" \
     --property="TasksMax=$tasks_max" \

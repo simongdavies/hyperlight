@@ -8,6 +8,7 @@ mod isolation_bench_contracts;
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod demo {
+    use std::io::{BufRead, IsTerminal, Write};
     #[cfg(target_os = "linux")]
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::path::Path;
@@ -27,6 +28,8 @@ mod demo {
     const PID: HostFunctionContract<(), u32> =
         HostFunctionContract::new("ProcessId", Idempotency::Idempotent);
     const WINDOWS_VM_HOST_CONSENT: &str = "--allow-windows-vm-host";
+    const NONINTERACTIVE: &str = "--noninteractive";
+    const DETAILS: &str = "--details";
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Scenario {
@@ -39,6 +42,15 @@ mod demo {
     }
 
     impl Scenario {
+        const ALL: [Self; 6] = [
+            Self::Local,
+            Self::FunctionWorker,
+            Self::VmHost,
+            Self::VmHostAndFunctionWorker,
+            Self::WorkerChildrenAllowed,
+            Self::WorkerChildrenBlocked,
+        ];
+
         fn parse(name: &str) -> Result<Self> {
             match name {
                 "local" => Ok(Self::Local),
@@ -509,6 +521,216 @@ mod demo {
         }
     }
 
+    fn human_size(bytes: u64) -> String {
+        if bytes.is_multiple_of(1 << 20) {
+            format!("{} MiB", bytes >> 20)
+        } else {
+            format!("{bytes} bytes")
+        }
+    }
+
+    fn control_explanation(control: &ProcessControl) -> String {
+        match control {
+            ProcessControl::MemoryLimit(bytes) => {
+                #[cfg(target_os = "linux")]
+                return format!(
+                    "Memory is capped at {} by the process cgroup.",
+                    human_size(*bytes)
+                );
+                #[cfg(target_os = "windows")]
+                return format!(
+                    "Memory is capped at {} by a Windows Job object.",
+                    human_size(*bytes)
+                );
+            }
+            ProcessControl::CpuBudget { quota, period } => format!(
+                "CPU time is capped at {} ms in each {} ms period by the process cgroup.",
+                quota.as_millis(),
+                period.as_millis()
+            ),
+            ProcessControl::DenyNetwork => {
+                #[cfg(target_os = "linux")]
+                return "Network access is blocked by a private network namespace.".to_owned();
+                #[cfg(target_os = "windows")]
+                return "Network access is blocked because the AppContainer has no network capability."
+                    .to_owned();
+            }
+            ProcessControl::DenyChildProcesses => {
+                #[cfg(target_os = "linux")]
+                return "New processes are blocked by a seccomp rule. Threads remain available."
+                    .to_owned();
+                #[cfg(target_os = "windows")]
+                return "New processes are blocked by the Windows Job child-process policy."
+                    .to_owned();
+            }
+        }
+    }
+
+    fn role_name(report: &ProcessReport) -> &'static str {
+        match report.role {
+            hyperlight_host::process::program::ProgramRole::SandboxHost => "VM sandbox host",
+            hyperlight_host::process::program::ProgramRole::FunctionWorker => "function worker",
+        }
+    }
+
+    fn process_access_explanation(scenario: Scenario, report: &ProcessReport) -> Vec<String> {
+        let mut lines = Vec::new();
+        match report.role {
+            hyperlight_host::process::program::ProgramRole::FunctionWorker => {
+                lines.push(
+                    "Receives only the declared host-function calls and their serialized values."
+                        .to_owned(),
+                );
+                #[cfg(target_os = "linux")]
+                lines.push(
+                    "Sees its provider-staged program and runtime files. A private mount namespace and Landlock rules block paths outside the allowlist."
+                        .to_owned(),
+                );
+                #[cfg(target_os = "windows")]
+                lines.push(
+                    "Runs in AppContainer with provider-staged files. It cannot browse the controller's ordinary filesystem."
+                        .to_owned(),
+                );
+            }
+            hyperlight_host::process::program::ProgramRole::SandboxHost => {
+                lines.push(
+                    "Owns the VM and receives only the declared guest and host-function endpoints."
+                        .to_owned(),
+                );
+                #[cfg(target_os = "linux")]
+                lines.push(
+                    "Sees provider-staged runtime files and the delegated hypervisor device. A private mount namespace and Landlock rules block paths outside the allowlist."
+                        .to_owned(),
+                );
+                #[cfg(target_os = "windows")]
+                lines.push(
+                    "Runs as an ordinary non-elevated process so WHP remains available. It is not an AppContainer filesystem or network boundary."
+                        .to_owned(),
+                );
+                if scenario == Scenario::VmHost {
+                    lines.push(
+                        "The host functions share this process and therefore share its access."
+                            .to_owned(),
+                    );
+                }
+            }
+        }
+        for outcome in &report.controls {
+            if matches!(outcome.result, ControlResult::Applied { .. }) {
+                lines.push(control_explanation(&outcome.requested.control));
+            }
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(percent) = report.windows_cpu_rate_limit_percent() {
+            lines.push(format!(
+                "CPU use is capped at {percent}% of aggregate host capacity by the Windows Job."
+            ));
+        }
+        lines
+    }
+
+    fn inspection_commands(reports: &[ProcessReport]) -> Vec<String> {
+        let pids = reports
+            .iter()
+            .map(|report| report.root_process_id.to_string())
+            .collect::<Vec<_>>();
+        #[cfg(target_os = "linux")]
+        {
+            if pids.is_empty() {
+                return vec![format!("ps -o pid,ppid,stat,cmd -p {}", std::process::id())];
+            }
+            let joined = pids.join(",");
+            vec![
+                format!("ps -o pid,ppid,stat,cmd -p {joined}"),
+                format!("for p in {}; do cat /proc/$p/cgroup; done", pids.join(" ")),
+                format!("for p in {}; do ls -l /proc/$p/ns; done", pids.join(" ")),
+            ]
+        }
+        #[cfg(target_os = "windows")]
+        {
+            if pids.is_empty() {
+                return vec![format!(
+                    "Get-Process -Id {} | Format-List Id,ProcessName,Path",
+                    std::process::id()
+                )];
+            }
+            vec![format!(
+                "Get-Process -Id {} | Format-Table Id,ProcessName,Path",
+                pids.join(",")
+            )]
+        }
+    }
+
+    fn print_demo_topology(scenario: Scenario, reports: &[ProcessReport], details: bool) {
+        let controller = std::process::id();
+        println!("  Controller PID: {controller}");
+        if reports.is_empty() {
+            println!("  VM: controller PID {controller}");
+            println!("  Host functions: controller PID {controller}");
+            println!("  Access: the VM remains the guest security boundary.");
+            println!(
+                "  Native limits: no per-role limits. The controller keeps its ambient access. An outer launcher may bound the whole application."
+            );
+        } else {
+            for report in reports {
+                println!(
+                    "  {} PID {}: launched and owned by controller PID {}",
+                    role_name(report),
+                    report.root_process_id,
+                    controller
+                );
+                for line in process_access_explanation(scenario, report) {
+                    println!("    {line}");
+                }
+                if details {
+                    println!("    Technical boundary: {}", report.effective_isolation());
+                    for control in &report.controls {
+                        match &control.result {
+                            ControlResult::Applied {
+                                effective,
+                                mechanism,
+                            } => println!("    Detail: {effective:?} via {mechanism}"),
+                            ControlResult::NotApplied { reason } => println!(
+                                "    Detail: {:?} was not applied: {reason}",
+                                control.requested.control
+                            ),
+                        }
+                    }
+                }
+            }
+        }
+        println!("  Inspect from a second terminal:");
+        for command in inspection_commands(reports) {
+            println!("    {command}");
+        }
+    }
+
+    fn wait_for_inspection<R: BufRead, W: Write>(
+        noninteractive: bool,
+        stdin_is_terminal: bool,
+        input: &mut R,
+        output: &mut W,
+    ) -> Result<()> {
+        if noninteractive {
+            return Ok(());
+        }
+        if !stdin_is_terminal {
+            return Err(new_error!(
+                "Interactive demo input is not a terminal. Run with {NONINTERACTIVE} for CI or redirected input"
+            ));
+        }
+        write!(output, "  Press Enter to stop this mode and continue... ")?;
+        output.flush()?;
+        let mut line = String::new();
+        if input.read_line(&mut line)? == 0 {
+            return Err(new_error!(
+                "Interactive demo input closed before Enter. Run with {NONINTERACTIVE} when no operator is present"
+            ));
+        }
+        writeln!(output)?;
+        Ok(())
+    }
+
     fn validate_consent(scenario: Scenario, consent: bool) -> Result<()> {
         if cfg!(target_os = "windows") && scenario.dedicated_vm_host() && !consent {
             return Err(new_error!(
@@ -593,9 +815,19 @@ mod demo {
             println!("{}", help_text());
             return Ok(());
         }
+        if args.first().is_some_and(|argument| argument == "demo") {
+            return run_demo(&args[1..]);
+        }
+        if args.first().is_some_and(|argument| argument == "qualify") {
+            return run_qualification(&args[1..]);
+        }
+        run_qualification(&args)
+    }
+
+    fn parse_qualification_args(args: &[std::ffi::OsString]) -> Result<(Scenario, &Path, &Path)> {
         if !(args.len() == 3 || args.len() == 4) {
             return Err(new_error!(
-                "Usage: process_placement MODE GUEST NEW_OUTPUT_DIRECTORY \
+                "Usage: process_placement qualify MODE GUEST NEW_OUTPUT_DIRECTORY \
                  [--allow-windows-vm-host]"
             ));
         }
@@ -611,25 +843,16 @@ mod demo {
             return Err(new_error!("Unknown option '{}'", args[3].to_string_lossy()));
         }
         validate_consent(scenario, consent)?;
+        Ok((scenario, Path::new(&args[1]), Path::new(&args[2])))
+    }
+
+    fn build_sandbox(
+        scenario: Scenario,
+        guest: &Path,
+    ) -> Result<(MultiUseSandbox, Option<MeshProcessProvider>)> {
         let dedicated = scenario.dedicated_vm_host();
         let remote = scenario.remote_functions();
         let child_policy = scenario.child_policy();
-        let guest_input = Path::new(&args[1]);
-        let guest = std::fs::canonicalize(guest_input).map_err(|error| {
-            new_error!(
-                "Guest binary {} is unavailable: {error}. Build the guest and pass its existing path",
-                guest_input.display()
-            )
-        })?;
-        let output = Path::new(&args[2]);
-        validate_output_path(output)?;
-        create_output(output)?;
-        println!("Mode: {}. {}", scenario.name(), scenario.description());
-        if cfg!(target_os = "windows") && scenario == Scenario::VmHost {
-            println!(
-                "Security note: co-located host functions share the VM host. They do not have AppContainer filesystem or network isolation."
-            );
-        }
         let provider = (dedicated || remote)
             .then(MeshProcessProvider::discover)
             .transpose()?;
@@ -695,7 +918,104 @@ mod demo {
                     .sandbox_host_function(ECHO);
             }
         }
-        let mut sandbox = builder.build()?;
+        Ok((builder.build()?, provider))
+    }
+
+    fn run_demo(args: &[std::ffi::OsString]) -> Result<()> {
+        let mut guest = None;
+        let mut noninteractive = false;
+        let mut details = false;
+        let mut consent = false;
+        for argument in args {
+            match argument.to_str() {
+                Some(NONINTERACTIVE) => noninteractive = true,
+                Some(DETAILS) | Some("--verbose") => details = true,
+                Some(WINDOWS_VM_HOST_CONSENT) => consent = true,
+                Some(value) if value.starts_with('-') => {
+                    return Err(new_error!("Unknown demo option '{value}'"));
+                }
+                Some(_) if guest.is_none() => guest = Some(Path::new(argument)),
+                Some(value) => return Err(new_error!("Unexpected demo argument '{value}'")),
+                None => return Err(new_error!("Demo arguments must be valid Unicode")),
+            }
+        }
+        let guest = guest.ok_or_else(|| {
+            new_error!(
+                "Usage: process_placement demo GUEST [{NONINTERACTIVE}] [{DETAILS}] [{WINDOWS_VM_HOST_CONSENT}]"
+            )
+        })?;
+        if consent && !cfg!(target_os = "windows") {
+            return Err(new_error!(
+                "{WINDOWS_VM_HOST_CONSENT} is valid only on Windows"
+            ));
+        }
+        if cfg!(target_os = "windows") && !consent {
+            return Err(new_error!(
+                "The six-mode Windows demo requires {WINDOWS_VM_HOST_CONSENT} because two modes use a WHP-compatible VM host outside AppContainer"
+            ));
+        }
+        if !noninteractive && !std::io::stdin().is_terminal() {
+            return Err(new_error!(
+                "Interactive demo input is not a terminal. Run with {NONINTERACTIVE} for CI or redirected input"
+            ));
+        }
+        let guest = std::fs::canonicalize(guest).map_err(|error| {
+            new_error!(
+                "Guest binary {} is unavailable: {error}. Build the release guest and pass its existing path",
+                guest.display()
+            )
+        })?;
+        println!();
+        println!("Hyperlight process placement demo");
+        println!(
+            "Six modes. A small live call set per mode. Native processes stay alive for inspection."
+        );
+        for (index, scenario) in Scenario::ALL.into_iter().enumerate() {
+            println!();
+            println!("[{}/6] {}", index + 1, scenario.name().to_ascii_uppercase());
+            println!("{}", scenario.description());
+            let (mut sandbox, _) = build_sandbox(scenario, &guest)?;
+            check_calls(&mut sandbox, scenario.child_policy())?;
+            let reports = sandbox.process_reports();
+            check_independent_domains(scenario, &reports)?;
+            println!("  PASS Add(17, 25) = 42");
+            print_demo_topology(scenario, &reports, details);
+            wait_for_inspection(
+                noninteractive,
+                std::io::stdin().is_terminal(),
+                &mut std::io::stdin().lock(),
+                &mut std::io::stdout().lock(),
+            )?;
+            sandbox.shutdown()?;
+            drop(sandbox);
+            verify_processes_stopped(&reports)?;
+            println!("  PASS shutdown and native-process cleanup");
+        }
+        println!();
+        println!("PASS all six process placement modes");
+        Ok(())
+    }
+
+    fn run_qualification(args: &[std::ffi::OsString]) -> Result<()> {
+        let (scenario, guest_input, output) = parse_qualification_args(args)?;
+        let guest = std::fs::canonicalize(guest_input).map_err(|error| {
+            new_error!(
+                "Guest binary {} is unavailable: {error}. Build the guest and pass its existing path",
+                guest_input.display()
+            )
+        })?;
+        validate_output_path(output)?;
+        create_output(output)?;
+        println!("Mode: {}. {}", scenario.name(), scenario.description());
+        if cfg!(target_os = "windows") && scenario == Scenario::VmHost {
+            println!(
+                "Security note: co-located host functions share the VM host. They do not have AppContainer filesystem or network isolation."
+            );
+        }
+        let dedicated = scenario.dedicated_vm_host();
+        let remote = scenario.remote_functions();
+        let child_policy = scenario.child_policy();
+        let (mut sandbox, provider) = build_sandbox(scenario, &guest)?;
         check_calls(&mut sandbox, child_policy)?;
         let original_reports = sandbox.process_reports();
         print_reports("Original process report", &original_reports);
@@ -759,7 +1079,10 @@ mod demo {
     }
 
     fn help_text() -> &'static str {
-        "Usage: process_placement MODE GUEST NEW_OUTPUT_DIRECTORY [--allow-windows-vm-host]\n\
+        "Usage:\n\
+  process_placement demo GUEST [--noninteractive] [--details] [--allow-windows-vm-host]\n\
+  process_placement qualify MODE GUEST NEW_OUTPUT_DIRECTORY [--allow-windows-vm-host]\n\
+  process_placement MODE GUEST NEW_OUTPUT_DIRECTORY [--allow-windows-vm-host]\n\
 \n\
 Modes:\n\
   local                         VM and host functions use the caller process\n\
@@ -769,8 +1092,11 @@ Modes:\n\
   worker-children-allowed       Confined function worker may create child processes\n\
   worker-children-blocked       Confined function worker cannot create child processes\n\
 \n\
-The output directory must not exist. Windows VM-host modes require\n\
---allow-windows-vm-host because the VM host runs outside AppContainer."
+The demo runs all six modes and pauses while each topology is live. Use\n\
+--noninteractive for CI or redirected input. Qualification retains snapshot,\n\
+reconstruction, recovery and cleanup checks. Its output directory must not exist.\n\
+Windows demos and VM-host qualification require --allow-windows-vm-host because\n\
+the VM host runs outside AppContainer."
     }
 
     fn verify_processes_stopped(reports: &[ProcessReport]) -> Result<()> {
@@ -909,6 +1235,50 @@ The output directory must not exist. Windows VM-host modes require\n\
                 assert!(help.contains(mode));
             }
             assert!(help.contains("--allow-windows-vm-host"));
+            assert!(help.contains("demo GUEST"));
+            assert!(help.contains("qualify MODE"));
+            assert!(help.contains("--noninteractive"));
+        }
+
+        #[test]
+        fn demo_dispatch_contains_all_six_modes() {
+            assert_eq!(Scenario::ALL.len(), 6);
+            for scenario in Scenario::ALL {
+                assert_eq!(Scenario::parse(scenario.name()).unwrap(), scenario);
+            }
+        }
+
+        #[test]
+        fn noninteractive_pause_returns_without_input() {
+            let mut input = std::io::Cursor::new(Vec::<u8>::new());
+            let mut output = Vec::new();
+            wait_for_inspection(true, false, &mut input, &mut output).unwrap();
+            assert!(output.is_empty());
+        }
+
+        #[test]
+        fn interactive_pause_requires_a_terminal_and_enter() {
+            let mut input = std::io::Cursor::new(Vec::<u8>::new());
+            let mut output = Vec::new();
+            assert!(
+                wait_for_inspection(false, false, &mut input, &mut output)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("--noninteractive")
+            );
+
+            let mut input = std::io::Cursor::new(b"\n".to_vec());
+            wait_for_inspection(false, true, &mut input, &mut output).unwrap();
+            assert!(String::from_utf8(output).unwrap().contains("Press Enter"));
+        }
+
+        #[test]
+        fn controls_have_plain_english_explanations() {
+            let memory = control_explanation(&ProcessControl::MemoryLimit(512 << 20));
+            assert!(memory.contains("512 MiB"));
+            let child = control_explanation(&ProcessControl::DenyChildProcesses);
+            assert!(child.contains("process"));
+            assert!(!child.contains("ProcessControl"));
         }
 
         #[test]

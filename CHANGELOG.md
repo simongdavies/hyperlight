@@ -34,6 +34,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 * A nested-sandbox example runs an inner Hyperlight VM and its host callback in
   one process-bound function worker. Guest bytes and exported results use
   generation-bound file capabilities without path fallback.
+* The process-placement example provides a fast six-mode demo with concise
+  topology and capability output. Installed Linux assets use release builds.
+  Exhaustive recovery and snapshot qualification remains a separate command.
 
 ### Changed
 * Support overriding the guest log level when building or restoring initialized snapshots. Persisted snapshots use ABI version 3 and must be regenerated.

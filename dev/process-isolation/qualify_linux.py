@@ -73,11 +73,13 @@ def main():
     for mode in modes:
         destination = output / mode
         if mode == "local":
-            command = [str(EXECUTABLE), mode, str(GUEST), str(destination)]
+            command = [
+                str(EXECUTABLE), "qualify", mode, str(GUEST), str(destination)
+            ]
         else:
             command = [
                 launcher, "--runtime-max", "10min", "--",
-                str(EXECUTABLE), mode, str(GUEST), str(destination),
+                str(EXECUTABLE), "qualify", mode, str(GUEST), str(destination),
             ]
         try:
             run(command, timeout=MODE_TIMEOUT)

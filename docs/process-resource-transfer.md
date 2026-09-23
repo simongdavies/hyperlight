@@ -88,18 +88,20 @@ rights and does not expose its raw descriptor or handle. The export is a live
 shared file object, not a byte snapshot. Seek to the required offset before
 reading it.
 
-`process_file_resource` is a runnable end-to-end example:
+`process_file_resource` is a runnable typed resource capability transfer
+example:
 
 ```text
 cargo run -p hyperlight-host --features process-isolation \
-  --example process_file_resource -- GUEST EXISTING_FILE INPUT
+  --example process_file_resource -- \
+  GUEST READ_WRITE_FILE READ_ONLY_FILE INPUT
 ```
 
-The controller opens and retains the input object, removes its path, launches
-the worker, verifies worker reads and writes through the same object, and
-verifies the exact pathname-free result object exported by the worker. The
-Linux worker creates that result with `memfd_create`, so it needs no writable
-filesystem path.
+The host supplies two file resources with different rights. The worker reads
+and writes through the read/write capability, reads through the read-only
+capability, and explicitly proves that a write through the read-only
+capability is rejected by the operating system. The host verifies the
+permitted write and that the read-only resource is unchanged.
 Provider setup errors link to `dev/process-isolation/QUICKSTART.md`.
 
 ## Platform operator flow

@@ -55,9 +55,9 @@ INSTALLED_ASSETS = {
     ),
 }
 REPOSITORY_EXAMPLE_ASSETS = {
-    ROOT / "target/debug/examples/process_placement":
+    ROOT / "target/release/examples/process_placement":
         (LIBEXEC / "process_placement", 0o755),
-    ROOT / "src/tests/rust_guests/bin/debug/simpleguest":
+    ROOT / "src/tests/rust_guests/bin/release/simpleguest":
         (LIBEXEC / "simpleguest", 0o755),
 }
 LEGACY_TOOLS = [

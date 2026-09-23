@@ -815,13 +815,17 @@ fn run_controller() -> Result<()> {
     let mut sandbox = configured_builder(&guest, provider.clone())
         .build()
         .map_err(|error| new_error!("Nested outer sandbox construction failed: {error}"))?;
-    let first = verify_call(&mut sandbox, &provider, "boom", 1)?;
-    let repeated = verify_call(&mut sandbox, &provider, "boom", 2)?;
+    let first = verify_call(&mut sandbox, &provider, "compose", 1)?;
+    let repeated = verify_call(&mut sandbox, &provider, "compose", 2)?;
     if repeated.pids != first.pids || repeated.resource_generation != first.resource_generation {
         return Err(new_error!(
             "Repeated calls changed the worker or resource generation"
         ));
     }
+    println!(
+        "Nested sandbox composition: outer guest -> process-bound worker -> inner Hyperlight sandbox in worker process; result={}",
+        expected("compose", 2)
+    );
 
     let snapshot = sandbox.snapshot()?;
     let layout = output.join("snapshot");
