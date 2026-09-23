@@ -16,6 +16,8 @@
 //! * <https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute>
 //! * <https://learn.microsoft.com/windows/win32/api/userenv/nf-userenv-createappcontainerprofile>
 //! * <https://learn.microsoft.com/windows/win32/api/userenv/nf-userenv-deleteappcontainerprofile>
+//! * <https://learn.microsoft.com/windows/win32/api/securitybaseapi/nf-securitybaseapi-gettokeninformation>
+//! * <https://learn.microsoft.com/windows/win32/api/winnt/ne-winnt-token_information_class>
 //! * <https://learn.microsoft.com/windows/win32/api/winnt/ns-winnt-jobobject_extended_limit_information>
 //! * <https://learn.microsoft.com/windows/win32/api/winnt/ns-winnt-jobobject_cpu_rate_control_information>
 
@@ -71,7 +73,9 @@ use windows_sys::Win32::UI::Shell::{
     FOLDERID_LocalAppData, FOLDERID_Windows, SHGetKnownFolderPath,
 };
 
-use super::launch::{ControlOutcome, ControlResult, PreparedProcess, ProcessGuard};
+use super::launch::{
+    ControlOutcome, ControlResult, PreparedProcess, ProcessGuard, WindowsProcessPolicyReport,
+};
 use super::program::{ProcessDefinition, ProcessTopologyDefinition, ProgramRole, ValidatedProgram};
 use super::{ProcessControl, ProcessProfile, WindowsSandboxHostPolicy};
 use crate::{Result, new_error};
@@ -158,6 +162,7 @@ fn current_user_sid() -> io::Result<String> {
     if length == 0 {
         return Err(io::Error::last_os_error());
     }
+
     // usize alignment suffices for TOKEN_USER and the trailing SID.
     let mut buffer = vec![0usize; (length as usize).div_ceil(size_of::<usize>())];
     // SAFETY: The buffer has the required size and alignment.
@@ -300,11 +305,14 @@ impl Drop for AppContainer {
 
 pub(super) struct WindowsPrincipals {
     sandbox: Option<(String, Option<Arc<AppContainer>>)>,
-    workers: BTreeMap<String, Arc<AppContainer>>,
+    workers: BTreeMap<String, Option<Arc<AppContainer>>>,
 }
 
 impl WindowsPrincipals {
-    pub(super) fn new(topology: &ProcessTopologyDefinition) -> Result<Self> {
+    pub(super) fn new(
+        topology: &ProcessTopologyDefinition,
+        authorized_workers: &std::collections::BTreeSet<String>,
+    ) -> Result<Self> {
         topology.validate()?;
         let sandbox = topology
             .sandbox()
@@ -319,7 +327,14 @@ impl WindowsPrincipals {
         let workers = topology
             .workers()
             .iter()
-            .map(|definition| Ok((definition.name().to_owned(), Arc::new(AppContainer::new()?))))
+            .map(|definition| {
+                let principal = if authorized_workers.contains(definition.name()) {
+                    None
+                } else {
+                    Some(Arc::new(AppContainer::new()?))
+                };
+                Ok((definition.name().to_owned(), principal))
+            })
             .collect::<io::Result<_>>()?;
         Ok(Self { sandbox, workers })
     }
@@ -331,14 +346,16 @@ impl WindowsPrincipals {
                 .as_ref()
                 .filter(|(expected, _)| expected == name)
                 .map(|(_, principal)| principal.clone()),
-            ProgramRole::FunctionWorker => self.workers.get(name).cloned().map(Some),
+            ProgramRole::FunctionWorker => self.workers.get(name).cloned(),
         };
         principal.ok_or_else(|| new_error!("No Windows principal for {role:?} '{name}'"))
     }
 
     fn peers(&self, role: ProgramRole) -> Vec<&AppContainer> {
         match role {
-            ProgramRole::SandboxHost => self.workers.values().map(Arc::as_ref).collect(),
+            ProgramRole::SandboxHost => {
+                self.workers.values().filter_map(Option::as_deref).collect()
+            }
             ProgramRole::FunctionWorker => self
                 .sandbox
                 .iter()
@@ -949,6 +966,7 @@ impl ConfinementJob {
 fn supported_limits(
     profile: &ProcessProfile,
     policy: WindowsSandboxHostPolicy,
+    role: ProgramRole,
 ) -> Result<(Option<usize>, Option<u8>, bool)> {
     profile.validate()?;
     let mut memory = None;
@@ -963,8 +981,13 @@ fn supported_limits(
             }
             ProcessControl::DenyChildProcesses => deny_children = true,
             ProcessControl::DenyNetwork if policy.is_windows_vm_host() && request.required => {
+                let subject = if role == ProgramRole::FunctionWorker {
+                    "A VM-host-authorized Windows function worker"
+                } else {
+                    "A Windows VM host outside AppContainer"
+                };
                 return Err(new_error!(
-                    "A Windows VM host outside AppContainer cannot enforce required network denial"
+                    "{subject} cannot enforce required network denial"
                 ));
             }
             ProcessControl::DenyNetwork => {}
@@ -982,7 +1005,9 @@ fn supported_limits(
 /// Evidence is only reported as applied after the configured CreateProcess succeeds.
 #[derive(Clone, Debug)]
 pub(super) struct WindowsEvidence {
+    pub(super) requested_policy: WindowsSandboxHostPolicy,
     pub(super) policy: WindowsSandboxHostPolicy,
+    pub(super) vm_host_authorized: bool,
     pub(super) appcontainer_name: Option<String>,
     pub(super) appcontainer_sid: Option<String>,
     pub(super) program_digest: String,
@@ -998,6 +1023,7 @@ pub(super) struct WindowsResources {
     job: ConfinementJob,
     image: Option<StagedImage>,
     container: Option<Arc<AppContainer>>,
+    vm_host_authorized: bool,
     deny_children: bool,
     configured: AtomicBool,
     retain: AtomicBool,
@@ -1025,13 +1051,17 @@ impl WindowsResources {
         container: Option<Arc<AppContainer>>,
     ) -> Result<Self> {
         let policy = definition.windows_sandbox_host_policy();
-        let windows_vm_host = policy.is_windows_vm_host();
-        if (windows_vm_host && role != ProgramRole::SandboxHost)
-            || windows_vm_host != container.is_none()
+        let trusted_sandbox = policy.is_windows_vm_host();
+        let vm_authorized_worker = role == ProgramRole::FunctionWorker
+            && policy == WindowsSandboxHostPolicy::AppContainer
+            && container.is_none();
+        if (trusted_sandbox && role != ProgramRole::SandboxHost)
+            || (container.is_none() && !trusted_sandbox && !vm_authorized_worker)
+            || (container.is_some() && trusted_sandbox)
         {
             return Err(new_error!("Windows process policy and principal mismatch"));
         }
-        if windows_vm_host && current_process_is_elevated()? {
+        if container.is_none() && current_process_is_elevated()? {
             return Err(new_error!(
                 "Windows VM hosts require a non-elevated controller process. \
                  Start an ordinary PowerShell session and retry"
@@ -1054,7 +1084,13 @@ impl WindowsResources {
             return Err(new_error!("Windows program contract mismatch"));
         }
         let profile = definition.profile();
-        let (memory, cpu_rate_percent, deny_children) = supported_limits(&profile, policy)?;
+        let effective_policy = if container.is_none() {
+            WindowsSandboxHostPolicy::Trusted
+        } else {
+            WindowsSandboxHostPolicy::AppContainer
+        };
+        let (memory, cpu_rate_percent, deny_children) =
+            supported_limits(&profile, effective_policy, role)?;
         let image = StagedImage::new(program, container.as_deref())?;
         let job = ConfinementJob::new(memory, cpu_rate_percent, deny_children)?;
         #[cfg(test)]
@@ -1082,12 +1118,13 @@ impl WindowsResources {
                 "AppContainer {} SID {}; empty capability allowlist; Mesh requires exact-SID IPC authorization; no inherited environment; null stdio; scoped read/execute image ACL; Windows AppContainer OS-resource baseline",
                 container.name, container.sid
             ),
+            None if role == ProgramRole::FunctionWorker => "VM-host-authorized function worker outside AppContainer; AppContainer filesystem and network isolation unavailable; caller network and same-user filesystem access remain; ordinary non-elevated same-user principal; kill-on-close job; strict handle inheritance; private immutable staging; no inherited environment; null stdio".to_owned(),
             None => format!(
                 "{} outside AppContainer; AppContainer filesystem and network isolation unavailable; caller network and same-user filesystem access remain; kill-on-close job; strict handle inheritance; private immutable staging; no inherited environment; null stdio",
                 super::WINDOWS_VM_HOST_MECHANISM
             ),
         };
-        if role == ProgramRole::SandboxHost {
+        if role == ProgramRole::SandboxHost || vm_authorized_worker {
             baseline.push_str("; one VM per process; HYPERLIGHT_MAX_SURROGATES=0");
         }
         if let Some(percent) = cpu_rate_percent {
@@ -1104,8 +1141,12 @@ impl WindowsResources {
                     "JOB_OBJECT_LIMIT_JOB_MEMORY: {} committed virtual-memory bytes across the job; not RSS",
                     memory.unwrap()
                 ) + "; " + &baseline },
-                ProcessControl::DenyNetwork if windows_vm_host => ControlResult::NotApplied {
-                    reason: "Windows VM host runs outside AppContainer with the caller's network access".to_owned(),
+                ProcessControl::DenyNetwork if container.is_none() => ControlResult::NotApplied {
+                    reason: if role == ProgramRole::FunctionWorker {
+                        "VM-host-authorized function worker runs outside AppContainer with the caller's network access".to_owned()
+                    } else {
+                        "Windows VM host runs outside AppContainer with the caller's network access".to_owned()
+                    },
                 },
                 ProcessControl::DenyNetwork => ControlResult::Applied {
                     effective: ProcessControl::DenyNetwork,
@@ -1122,7 +1163,9 @@ impl WindowsResources {
             ControlOutcome { requested, result }
         }).collect();
         let evidence = WindowsEvidence {
-            policy,
+            requested_policy: policy,
+            policy: effective_policy,
+            vm_host_authorized: vm_authorized_worker,
             appcontainer_name: container.as_ref().map(|container| container.name.clone()),
             appcontainer_sid: container.as_ref().map(|container| container.sid.clone()),
             program_digest: program.artifact().digest().to_string(),
@@ -1133,6 +1176,7 @@ impl WindowsResources {
             job,
             image: Some(image),
             container,
+            vm_host_authorized: vm_authorized_worker,
             deny_children,
             configured: AtomicBool::new(false),
             retain: AtomicBool::new(false),
@@ -1185,7 +1229,7 @@ impl WindowsResources {
                 ));
             }
         }
-        if self.role == ProgramRole::SandboxHost {
+        if self.role == ProgramRole::SandboxHost || self.vm_host_authorized {
             // This process owns one VM. Surrogate pooling would require extra children.
             builder.env("HYPERLIGHT_MAX_SURROGATES", "0");
         }
@@ -1289,13 +1333,20 @@ pub(super) fn prepare(
     )?);
     let evidence = resources.evidence();
     tracing::debug!(
+        requested_policy = ?evidence.requested_policy,
         policy = ?evidence.policy,
+        vm_host_authorized = evidence.vm_host_authorized,
         appcontainer_name = ?evidence.appcontainer_name,
         appcontainer_sid = ?evidence.appcontainer_sid,
         program_digest = %evidence.program_digest,
         "Prepared Windows confinement resources before process creation"
     );
     let controls = evidence.controls.clone();
+    let windows_policy = Some(WindowsProcessPolicyReport {
+        requested: evidence.requested_policy,
+        effective: evidence.policy,
+        vm_host_authorized: evidence.vm_host_authorized,
+    });
     let mut config = ProcessConfig::new_with_sandbox(
         definition.name(),
         Box::new(WindowsProfile(resources.clone())),
@@ -1304,17 +1355,17 @@ pub(super) fn prepare(
     .skip_worker_arg(true);
     for peer in principals.peers(role) {
         let sid = peer.pal_sid()?;
-        config = match evidence.policy {
-            WindowsSandboxHostPolicy::AppContainer => config.app_container_peer(sid.as_ref()),
-            WindowsSandboxHostPolicy::WindowsVmHost => {
-                config.trusted_host_app_container_peer(sid.as_ref())
-            }
+        config = if resources.container.is_some() {
+            config.app_container_peer(sid.as_ref())
+        } else {
+            config.trusted_host_app_container_peer(sid.as_ref())
         };
     }
     Ok(PreparedProcess {
         config,
         guard: resources,
         controls,
+        windows_policy,
         resources: Vec::new(),
         export_authority: None,
         resource_generation: None,
@@ -1529,7 +1580,13 @@ mod tests {
         deny_children: bool,
         policy: WindowsSandboxHostPolicy,
     ) -> WindowsResources {
-        resources_for_role(executable, deny_children, policy, ProgramRole::SandboxHost)
+        resources_for_role(
+            executable,
+            deny_children,
+            policy,
+            ProgramRole::SandboxHost,
+            false,
+        )
     }
 
     fn resources_for_role(
@@ -1537,6 +1594,7 @@ mod tests {
         deny_children: bool,
         policy: WindowsSandboxHostPolicy,
         role: ProgramRole,
+        vm_host_authorized: bool,
     ) -> WindowsResources {
         let root = tempfile::tempdir().unwrap();
         let store = LocalProgramStore::new(root.path());
@@ -1569,7 +1627,7 @@ mod tests {
             },
             RequestedControl {
                 control: ProcessControl::DenyNetwork,
-                required: policy == WindowsSandboxHostPolicy::AppContainer,
+                required: policy == WindowsSandboxHostPolicy::AppContainer && !vm_host_authorized,
             },
         ];
         if deny_children {
@@ -1589,7 +1647,11 @@ mod tests {
         .unwrap()
         .with_windows_sandbox_host_policy(policy);
         let validated = store.validate(&artifact, &target).unwrap();
-        WindowsResources::new(&definition, &validated, role).unwrap()
+        if vm_host_authorized {
+            WindowsResources::with_container(&definition, &validated, role, None).unwrap()
+        } else {
+            WindowsResources::new(&definition, &validated, role).unwrap()
+        }
     }
 
     #[test]
@@ -1632,13 +1694,51 @@ mod tests {
     }
 
     #[test]
+    fn vm_authorized_worker_reports_reduced_isolation() {
+        let worker = resources_for_role(
+            b"unlaunched-fixture",
+            true,
+            WindowsSandboxHostPolicy::AppContainer,
+            ProgramRole::FunctionWorker,
+            true,
+        );
+        assert!(worker.container.is_none());
+        assert!(worker.vm_host_authorized);
+        assert!(worker.evidence.vm_host_authorized);
+        assert_eq!(
+            worker.evidence.requested_policy,
+            WindowsSandboxHostPolicy::AppContainer
+        );
+        assert_eq!(worker.evidence.policy, WindowsSandboxHostPolicy::Trusted);
+        assert!(matches!(
+            worker.evidence.controls[1].result,
+            ControlResult::NotApplied { ref reason }
+                if reason.contains("VM-host-authorized function worker")
+        ));
+    }
+
+    #[test]
     fn trusted_host_rejects_required_network_denial() {
         let profile = ProcessProfile::new([RequestedControl {
             control: ProcessControl::DenyNetwork,
             required: true,
         }]);
-        assert!(supported_limits(&profile, WindowsSandboxHostPolicy::Trusted).is_err());
-        assert!(supported_limits(&profile, WindowsSandboxHostPolicy::AppContainer).is_ok());
+        assert!(
+            supported_limits(
+                &profile,
+                WindowsSandboxHostPolicy::Trusted,
+                ProgramRole::SandboxHost
+            )
+            .is_err()
+        );
+        assert!(
+            supported_limits(
+                &profile,
+                WindowsSandboxHostPolicy::AppContainer,
+                ProgramRole::SandboxHost
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -1704,7 +1804,7 @@ mod tests {
             workers.into(),
         )
         .unwrap();
-        let plan = WindowsPrincipals::new(&topology).unwrap();
+        let plan = WindowsPrincipals::new(&topology, &Default::default()).unwrap();
         let sandbox = plan
             .principal(ProgramRole::SandboxHost, "sandbox")
             .unwrap()
@@ -1744,9 +1844,12 @@ mod tests {
             plan.principal(ProgramRole::FunctionWorker, "sandbox")
                 .is_err()
         );
-        let fresh = WindowsPrincipals::new(&topology).unwrap();
+        let fresh = WindowsPrincipals::new(&topology, &Default::default()).unwrap();
         for (name, principal) in &plan.workers {
-            assert_ne!(principal.sid, fresh.workers[name].sid);
+            assert_ne!(
+                principal.as_ref().unwrap().sid,
+                fresh.workers[name].as_ref().unwrap().sid
+            );
         }
         assert_ne!(
             sandbox.sid,
@@ -1764,7 +1867,7 @@ mod tests {
             topology.workers().to_vec(),
         )
         .unwrap();
-        let trusted = WindowsPrincipals::new(&trusted).unwrap();
+        let trusted = WindowsPrincipals::new(&trusted, &Default::default()).unwrap();
         assert!(
             trusted
                 .principal(ProgramRole::SandboxHost, "sandbox")
@@ -1778,6 +1881,22 @@ mod tests {
                 .principal(ProgramRole::SandboxHost, "wrong-owner")
                 .is_err()
         );
+
+        let authorized = std::collections::BTreeSet::from(["first".to_owned()]);
+        let authorized = WindowsPrincipals::new(&topology, &authorized).unwrap();
+        assert!(
+            authorized
+                .principal(ProgramRole::FunctionWorker, "first")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            authorized
+                .principal(ProgramRole::FunctionWorker, "second")
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(authorized.peers(ProgramRole::SandboxHost).len(), 1);
     }
 
     fn spawn(resources: &WindowsResources, args: &[String]) -> io::Result<pal::windows::Process> {
@@ -1866,7 +1985,14 @@ mod tests {
             },
             required: true,
         }]);
-        assert!(supported_limits(&profile, WindowsSandboxHostPolicy::AppContainer).is_err());
+        assert!(
+            supported_limits(
+                &profile,
+                WindowsSandboxHostPolicy::AppContainer,
+                ProgramRole::SandboxHost
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -2182,12 +2308,29 @@ mod tests {
                 true,
                 WindowsSandboxHostPolicy::AppContainer,
                 role,
+                false,
             );
             let root = spawn(&worker, &["surrogate-mode".into(), expected.into()]).unwrap();
             let exit = wait_root(&root);
             worker.cleanup().unwrap();
             assert_eq!(exit, 0, "{role:?} child environment");
         }
+    }
+
+    #[test]
+    #[ignore = "requires the explicitly compiled Windows confinement probe"]
+    fn native_vm_authorized_worker_uses_launchable_ordinary_token() {
+        let mut worker = resources_for_role(
+            &fixture_bytes(),
+            true,
+            WindowsSandboxHostPolicy::AppContainer,
+            ProgramRole::FunctionWorker,
+            true,
+        );
+        let root = spawn(&worker, &["surrogate-mode".into(), "single".into()]).unwrap();
+        let exit = wait_root(&root);
+        worker.cleanup().unwrap();
+        assert_eq!(exit, 0, "VM-authorized worker token and environment");
     }
 
     #[test]

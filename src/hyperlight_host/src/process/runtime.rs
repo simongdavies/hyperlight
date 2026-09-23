@@ -321,7 +321,7 @@ impl Runtime {
         Ok(runtime)
     }
 
-    async fn spawn_ready(&self, worker: &mut Worker, prepared: PreparedProcess) -> Result<()> {
+    async fn spawn_ready(&self, worker: &mut Worker, mut prepared: PreparedProcess) -> Result<()> {
         self.ensure_active()?;
         if worker.instance.is_some() || worker.pending_launch.is_some() {
             return Err(new_error!(
@@ -355,6 +355,10 @@ impl Runtime {
             .as_ref()
             .map(super::resource::ExportAuthority::declaration);
         worker.resource_generation = resource_generation;
+        prepared.config = prepared.config.env([(
+            std::ffi::OsString::from("HYPERLIGHT_VM_AUTHORITY_GENERATION"),
+            resource_generation.to_string().into(),
+        )]);
         let bootstrap = transport::bootstrap_with_resources(
             definition.functions(),
             resource_generation,
@@ -364,6 +368,7 @@ impl Runtime {
             ready,
         );
         let controls = prepared.controls.clone();
+        let windows_policy = prepared.windows_policy.clone();
         // Readiness failure must leave cleanup ownership in the same worker slot.
         worker.instance = Some(
             match self
@@ -405,6 +410,7 @@ impl Runtime {
             program: definition.program().clone(),
             root_process_id: instance.root.id(),
             controls,
+            windows_policy,
         });
         Ok(())
     }
@@ -604,6 +610,7 @@ impl Runtime {
                 config,
                 guard: Arc::new(TrustedFixtureGuard),
                 controls: vec![],
+                windows_policy: None,
                 resources,
                 export_authority,
                 resource_generation,
@@ -903,6 +910,7 @@ pub(super) fn start_prepared(
                 })?,
                 guard: Arc::new(TrustedFixtureGuard),
                 controls: vec![],
+                windows_policy: None,
                 resources: vec![],
                 export_authority: None,
                 resource_generation: None,

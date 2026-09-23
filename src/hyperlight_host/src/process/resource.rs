@@ -259,6 +259,10 @@ impl RegisteredResource {
         }
     }
 
+    pub(crate) fn kind_and_metadata(&self) -> (u32, &[u8]) {
+        (self.kind, &self.metadata)
+    }
+
     #[cfg(test)]
     pub(super) fn file_with_factory(
         id: ResourceId,
@@ -652,6 +656,7 @@ impl ProcessResources {
                 return Err(new_error!("Process resource identity is duplicated"));
             }
         }
+        super::vm_authority::capture_declared_process_context(generation, declarations)?;
         Ok(Self {
             entries,
             generation: Some(generation),
@@ -747,6 +752,20 @@ impl ProcessResources {
             return Err(new_error!("Typed process resource payload mismatch"));
         };
         Ok(ClaimedTypedResource { metadata, payload })
+    }
+
+    pub(crate) fn unique_typed_id(&self, expected_kind: u32) -> Result<ResourceId> {
+        let mut ids = self
+            .entries
+            .iter()
+            .filter_map(|(id, entry)| (entry.kind == expected_kind).then_some(*id));
+        let id = ids
+            .next()
+            .ok_or_else(|| new_error!("Required typed process resource is missing"))?;
+        if ids.next().is_some() {
+            return Err(new_error!("Typed process resource is duplicated"));
+        }
+        Ok(id)
     }
 
     pub(super) fn is_empty(&self) -> bool {

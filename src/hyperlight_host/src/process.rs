@@ -86,10 +86,13 @@ mod resource;
 mod runtime;
 mod sandbox;
 mod transport;
+mod vm_authority;
 #[cfg(target_os = "windows")]
 mod windows;
 
-pub use launch::{ControlOutcome, ControlResult, ProcessCleanupError, ProcessReport};
+pub use launch::{
+    ControlOutcome, ControlResult, ProcessCleanupError, ProcessReport, WindowsProcessPolicyReport,
+};
 #[cfg(target_os = "linux")]
 pub use linux::LinuxProcessResources;
 pub use provider::MeshProcessProvider;
@@ -108,6 +111,10 @@ pub(crate) use runtime::Runtime as ProcessRuntime;
 pub use sandbox::SandboxHost;
 pub(crate) use sandbox::{SandboxProcess, SandboxSource, SnapshotImage};
 pub use transport::ProcessStartup;
+#[cfg(target_os = "windows")]
+pub use vm_authority::VmHostAuthorization;
+pub use vm_authority::{VmAuthority, VmBackend};
+pub(crate) use vm_authority::{current_vm_backend, take_installed_for_vm};
 
 /// Requested Windows sandbox-host containment. Runtime permission is separate.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

@@ -854,6 +854,7 @@ impl SandboxProcess {
                         .ok_or_else(|| new_error!("Fixture has no replacement configuration"))?,
                     guard: Arc::new(runtime::TrustedFixtureGuard),
                     controls: vec![],
+                    windows_policy: None,
                     resources: vec![],
                     export_authority: None,
                     resource_generation: None,
@@ -902,6 +903,7 @@ impl SandboxProcess {
             config,
             guard,
             controls,
+            windows_policy,
             resources,
             export_authority,
             resource_generation: _,
@@ -920,6 +922,7 @@ impl SandboxProcess {
             program: sandbox.program().clone(),
             root_process_id: root.id(),
             controls,
+            windows_policy,
         };
         let mut process = Self {
             requests: Some(requests),

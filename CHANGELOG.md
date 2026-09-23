@@ -27,6 +27,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   generation-bound Mesh native transfer. Explicit rights, two-phase declaration
   validation, bounded reverse export, and deterministic cleanup keep paths and
   raw native values off function RPC.
+* Function workers can receive generation-bound VM authority. Linux transfers
+  a backend-tagged KVM or MSHV descriptor without device-path fallback. Windows
+  requires explicit WHP authorization and reports the loss of AppContainer
+  filesystem and network isolation.
 
 ### Changed
 * Support overriding the guest log level when building or restoring initialized snapshots. Persisted snapshots use ABI version 3 and must be regenerated.

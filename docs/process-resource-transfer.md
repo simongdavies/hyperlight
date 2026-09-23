@@ -5,6 +5,9 @@ receiving a path, descriptor number, or handle value on function RPC. Each
 object has a provider-session `ResourceId`, an `OsResourceKind`, and explicit
 `OsResourceRights`.
 
+Manifest declarations are positional. Register provider resources in the same
+order as the worker's `ProcessResourceManifest`.
+
 The initial resource kind is an owned file. Linux transfers owned descriptors
 with `SCM_RIGHTS`. Windows transfers restricted handles through Mesh ALPC.
 Ordinary function calls remain byte-only.

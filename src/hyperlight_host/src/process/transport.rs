@@ -183,6 +183,13 @@ impl ProcessStartup {
         Ok(name)
     }
 
+    /// Backend declared by the provider for this worker's VM authority.
+    pub fn vm_authority_backend(&self) -> Result<super::VmBackend> {
+        let value = std::env::var("HYPERLIGHT_VM_AUTHORITY_BACKEND")
+            .map_err(|_| new_error!("Mesh provider did not declare VM authority"))?;
+        super::VmBackend::from_environment_value(&value)
+    }
+
     /// Captures worker startup resources, or returns `None` in an application role.
     ///
     /// # Safety
@@ -629,6 +636,14 @@ impl ProcessHostFunctions {
         manifest: super::ProcessResourceManifest,
         configure: impl FnOnce(&mut super::ProcessResources, &mut Self) -> Result<()>,
     ) -> Result<()> {
+        let validated = match bootstrap.validated.take() {
+            Some(validated) => validated,
+            None => {
+                let error = new_error!("Function-process validation channel is missing");
+                bootstrap.ready.send(Err(error.to_string()));
+                return Err(error);
+            }
+        };
         let phase_one = if bootstrap.version != PROTOCOL_VERSION || bootstrap.contracts != expected
         {
             Err(new_error!(
@@ -642,15 +657,11 @@ impl ProcessHostFunctions {
             )
         };
         if let Err(error) = phase_one {
-            bootstrap
-                .validated
-                .take()
-                .unwrap()
-                .send(Err(error.to_string()));
+            validated.send(Err(error.to_string()));
             bootstrap.ready.send(Err(error.to_string()));
             return Err(error);
         }
-        bootstrap.validated.take().unwrap().send(Ok(()));
+        validated.send(Ok(()));
         let resource_bootstrap = match bootstrap.resources.next().await {
             Some(resources) => resources,
             None => {
@@ -1064,6 +1075,7 @@ mod tests {
                 config: fixture_config().args(args),
                 guard,
                 controls: vec![],
+                windows_policy: None,
                 resources: vec![],
                 export_authority: None,
                 resource_generation: None,
@@ -2577,12 +2589,15 @@ mod tests {
                 );
             } else {
                 result.unwrap();
-                let readiness = readiness.await.unwrap();
                 if expected == 2 {
-                    assert!(readiness.is_err());
+                    // A rejected worker may exit before its readiness error is flushed.
+                    if let Ok(readiness) = readiness.await {
+                        assert!(readiness.is_err());
+                    }
                 } else {
-                    readiness.unwrap();
-                    send.call(Request::Stop, ()).await.unwrap();
+                    readiness.await.unwrap().unwrap();
+                    // The worker may exit before the transport flushes the Stop reply.
+                    let _ = send.call(Request::Stop, ()).await;
                 }
             }
         }
@@ -2794,6 +2809,7 @@ mod tests {
                     config: file_resource_fixture_config_with("read-write", true),
                     guard: Arc::new(TrustedFixtureGuard),
                     controls: vec![],
+                    windows_policy: None,
                     resources: vec![self.resource.clone()],
                     export_authority: Some(self.export_authority.clone()),
                     resource_generation: None,

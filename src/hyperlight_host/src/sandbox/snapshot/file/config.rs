@@ -58,6 +58,14 @@ pub(super) enum Hypervisor {
 
 impl Hypervisor {
     pub(super) fn current() -> Option<Self> {
+        #[cfg(feature = "process-isolation")]
+        if let Some(backend) = crate::process::current_vm_backend() {
+            return Some(match backend {
+                crate::process::VmBackend::Kvm => Self::Kvm,
+                crate::process::VmBackend::Mshv => Self::Mshv,
+                crate::process::VmBackend::Whp => Self::Whp,
+            });
+        }
         #[allow(unused_imports)]
         use crate::hypervisor::virtual_machine::HypervisorType;
         use crate::hypervisor::virtual_machine::get_available_hypervisor;

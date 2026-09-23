@@ -83,6 +83,17 @@ pub struct ControlOutcome {
     pub result: ControlResult,
 }
 
+/// Requested and effective Windows process principal policy.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WindowsProcessPolicyReport {
+    /// Policy requested by the topology.
+    pub requested: super::WindowsSandboxHostPolicy,
+    /// Policy applied to the native process.
+    pub effective: super::WindowsSandboxHostPolicy,
+    /// The worker received explicit generation-bound WHP authorization.
+    pub vm_host_authorized: bool,
+}
+
 /// A ready process and its effective restrictions.
 #[derive(Clone, Debug)]
 pub struct ProcessReport {
@@ -96,6 +107,8 @@ pub struct ProcessReport {
     pub root_process_id: i32,
     /// Requested, effective and explicitly omitted controls.
     pub controls: Vec<ControlOutcome>,
+    /// Windows principal policy. `None` on other platforms.
+    pub windows_policy: Option<WindowsProcessPolicyReport>,
 }
 
 impl ProcessReport {
@@ -103,14 +116,10 @@ impl ProcessReport {
     pub fn effective_isolation(&self) -> &'static str {
         #[cfg(target_os = "windows")]
         {
-            if self.role == ProgramRole::SandboxHost
-                && self.controls.iter().any(|outcome| {
-                    matches!(
-                        &outcome.result,
-                        ControlResult::Applied { mechanism, .. }
-                            if mechanism.contains(super::WINDOWS_VM_HOST_MECHANISM)
-                    )
-                })
+            if self
+                .windows_policy
+                .as_ref()
+                .is_some_and(|policy| policy.effective.is_windows_vm_host())
             {
                 "Ordinary non-elevated Windows VM host outside AppContainer. AppContainer filesystem and network isolation do not apply"
             } else {
@@ -156,6 +165,7 @@ pub(crate) struct PreparedProcess {
     pub config: mesh_process::ProcessConfig,
     pub guard: Arc<dyn ProcessGuard>,
     pub controls: Vec<ControlOutcome>,
+    pub windows_policy: Option<WindowsProcessPolicyReport>,
     pub resources: Vec<super::resource::RegisteredResource>,
     pub export_authority: Option<super::resource::ExportAuthority>,
     pub resource_generation: Option<Arc<std::sync::atomic::AtomicU64>>,
@@ -513,9 +523,22 @@ impl ProcessLauncher for ConfiguredLauncher {
                 .flatten()
                 .cloned()
                 .collect();
+            let vm_backends = prepared
+                .resources
+                .iter()
+                .filter_map(|resource| {
+                    let (kind, metadata) = resource.kind_and_metadata();
+                    super::vm_authority::registered_backend(kind, metadata).transpose()
+                })
+                .collect::<Result<Vec<_>>>()?;
+            if vm_backends.len() > 1 {
+                return Err(crate::new_error!(
+                    "A function worker cannot receive multiple VM authorities"
+                ));
+            }
             prepared.export_authority = self._provider.export_authority(definition.name())?;
             prepared.resource_generation = Some(self._provider.resource_generation.clone());
-            prepared.config = prepared.config.env([
+            let mut environment = vec![
                 (
                     std::ffi::OsString::from("HYPERLIGHT_PROCESS_ROLE"),
                     match role {
@@ -528,7 +551,14 @@ impl ProcessLauncher for ConfiguredLauncher {
                     std::ffi::OsString::from("HYPERLIGHT_PROCESS_NAME"),
                     definition.name().into(),
                 ),
-            ]);
+            ];
+            if let Some(backend) = vm_backends.first() {
+                environment.push((
+                    std::ffi::OsString::from("HYPERLIGHT_VM_AUTHORITY_BACKEND"),
+                    backend.environment_value().into(),
+                ));
+            }
+            prepared.config = prepared.config.env(environment);
             Ok(prepared)
         }
         #[cfg(not(any(target_os = "linux", target_os = "windows")))]

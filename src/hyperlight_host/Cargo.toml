@@ -198,6 +198,11 @@ path = "tests/fixtures/process_file_resource.rs"
 required-features = ["process-isolation"]
 
 [[example]]
+name = "process_vm_authority"
+path = "tests/fixtures/process_vm_authority.rs"
+required-features = ["process-isolation"]
+
+[[example]]
 name = "isolation_bench"
 path = "tests/fixtures/isolation_bench.rs"
 

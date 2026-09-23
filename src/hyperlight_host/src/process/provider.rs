@@ -256,6 +256,37 @@ impl MeshProcessProvider {
         Ok(())
     }
 
+    /// Authorizes one function worker generation to create one VM.
+    ///
+    /// Linux opens a fresh backend device descriptor after each generation is
+    /// reserved. Windows transfers an authenticated no-handle authorization
+    /// marker and selects the ordinary same-user principal for this worker.
+    pub fn register_vm_authority(
+        &mut self,
+        process_name: impl Into<String>,
+        backend: super::VmBackend,
+    ) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        let device = self
+            .inner
+            .linux
+            .as_ref()
+            .and_then(|resources| resources.vm_authority_device(backend))
+            .map(std::path::Path::to_owned)
+            .ok_or_else(|| new_error!("Linux VM authority device is unavailable"))?;
+        let (metadata, factory) = super::vm_authority::registration(
+            backend,
+            #[cfg(target_os = "linux")]
+            device,
+        )?;
+        self.register_typed(
+            process_name,
+            super::vm_authority::VM_AUTHORITY_RESOURCE_KIND,
+            metadata,
+            factory,
+        )
+    }
+
     #[allow(dead_code)]
     pub(crate) fn register_typed(
         &mut self,
@@ -434,11 +465,35 @@ impl MeshProcessProvider {
                 .policies,
             definition.workers().iter().map(|worker| worker.name()),
         )?;
+        #[cfg(target_os = "windows")]
+        let authorized_workers = {
+            let mut authorized = std::collections::BTreeSet::new();
+            for (name, resources) in &self.inner.resources {
+                let mut backends = Vec::new();
+                for resource in resources {
+                    let (kind, metadata) = resource.kind_and_metadata();
+                    if let Some(backend) = super::vm_authority::registered_backend(kind, metadata)?
+                    {
+                        backends.push(backend);
+                    }
+                }
+                if backends.is_empty() {
+                    continue;
+                }
+                if backends != [super::VmBackend::Whp] {
+                    return Err(new_error!(
+                        "Windows worker VM authorization must contain exactly one WHP marker"
+                    ));
+                }
+                authorized.insert(name.clone());
+            }
+            authorized
+        };
         Ok(Arc::new(ConfiguredLauncher {
             store: self.inner.store.clone(),
             target: self.inner.target.clone(),
             #[cfg(target_os = "windows")]
-            windows: super::windows::WindowsPrincipals::new(definition)?,
+            windows: super::windows::WindowsPrincipals::new(definition, &authorized_workers)?,
             #[cfg(target_os = "linux")]
             linux: self.inner.linux.clone(),
             _provider: self.inner.clone(),

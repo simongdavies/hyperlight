@@ -35,6 +35,7 @@ pub struct LinuxProcessResources {
     helper: HelperSource,
     helper_sha256: [u8; 32],
     hypervisor_device: Option<PathBuf>,
+    vm_authority_devices: std::collections::BTreeMap<super::VmBackend, PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -73,6 +74,7 @@ impl LinuxProcessResources {
             helper: HelperSource::Captured(bytes.into()),
             helper_sha256: expected_sha256,
             hypervisor_device: None,
+            vm_authority_devices: Default::default(),
         })
     }
 
@@ -89,14 +91,32 @@ impl LinuxProcessResources {
     /// `/dev/mshv` are accepted.
     pub fn hypervisor_device(mut self, device: impl Into<PathBuf>) -> Result<Self> {
         let device = device.into();
+        self.add_vm_authority_device(&device)?;
+        self.hypervisor_device = Some(device);
+        Ok(self)
+    }
+
+    fn add_vm_authority_device(&mut self, device: &Path) -> Result<()> {
         if device != Path::new("/dev/kvm") && device != Path::new("/dev/mshv") {
             return Err(new_error!("Unsupported hypervisor device: {device:?}"));
         }
         if !fs::symlink_metadata(&device)?.file_type().is_char_device() {
             return Err(new_error!("Hypervisor device must be a character device"));
         }
-        self.hypervisor_device = Some(device);
-        Ok(self)
+        let backend = if device == Path::new("/dev/kvm") {
+            super::VmBackend::Kvm
+        } else {
+            super::VmBackend::Mshv
+        };
+        self.vm_authority_devices
+            .insert(backend, device.to_path_buf());
+        Ok(())
+    }
+
+    pub(super) fn vm_authority_device(&self, backend: super::VmBackend) -> Option<&Path> {
+        self.vm_authority_devices
+            .get(&backend)
+            .map(PathBuf::as_path)
     }
 }
 
@@ -130,8 +150,11 @@ pub(super) fn discover_provider() -> Result<LinuxProcessResources> {
         LinuxProcessResources::new(delegated_root, &helper, digest)?.installed_helper(helper)?;
     for device in [Path::new("/dev/kvm"), Path::new("/dev/mshv")] {
         if device.exists() {
-            resources = resources.hypervisor_device(device)?;
-            break;
+            if resources.hypervisor_device.is_none() {
+                resources = resources.hypervisor_device(device)?;
+            } else if let Err(error) = resources.add_vm_authority_device(device) {
+                tracing::warn!(?device, %error, "Ignoring unusable secondary hypervisor device");
+            }
         }
     }
     Ok(resources)
@@ -857,6 +880,7 @@ pub(super) fn prepare(
             retain: AtomicBool::new(false),
         }),
         controls,
+        windows_policy: None,
         resources: Vec::new(),
         export_authority: None,
         resource_generation: None,
