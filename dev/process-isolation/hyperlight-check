@@ -1,0 +1,147 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The Hyperlight Authors.
+# Internal implementation for `hyperlight-run check`.
+
+set -euo pipefail
+
+failed=0
+check() {
+    if "$@" >/dev/null 2>&1; then
+        echo "PASS $*"
+    else
+        echo "FAIL $*" >&2
+        failed=1
+    fi
+}
+
+[[ ${EUID} -ne 0 ]] || { echo "FAIL run as an ordinary user" >&2; exit 1; }
+if [[ $(stat -fc %T /sys/fs/cgroup 2>/dev/null || true) != cgroup2fs ]]; then
+    echo "FAIL unified cgroup v2 is required at /sys/fs/cgroup" >&2
+    echo "     Hybrid/v1 hosts and containers without a delegated cgroup are unsupported." >&2
+    exit 1
+fi
+echo "PASS unified cgroup v2"
+if ! command -v systemctl >/dev/null; then
+    echo "FAIL the installed launcher requires systemd and a user manager" >&2
+    echo "     A pre-delegated non-systemd launcher is designed but not implemented." >&2
+    exit 1
+fi
+systemd_version=$(systemctl --version | awk 'NR == 1 { print $2 }')
+if [[ $systemd_version =~ ^[0-9]+$ ]] && ((systemd_version >= 254)); then
+    echo "PASS systemd $systemd_version supports delegated subgroups"
+else
+    echo "FAIL systemd 254 or newer is required for DelegateSubgroup" >&2
+    exit 1
+fi
+manager_state=$(systemctl --user is-system-running 2>/dev/null || true)
+if [[ $manager_state == running || $manager_state == degraded ]]; then
+    echo "PASS user systemd manager is $manager_state"
+else
+    echo "FAIL user systemd manager is ${manager_state:-unavailable}" >&2
+    echo "     Containers must receive a delegated cgroup from their runtime." >&2
+    exit 1
+fi
+uid=$(id -u)
+user_root=/sys/fs/cgroup/user.slice/user-"$uid".slice/user@"$uid".service
+if [[ ! -d $user_root || ! -w $user_root/cgroup.procs ]]; then
+    environment=$(systemd-detect-virt --container 2>/dev/null || true)
+    echo "FAIL the user manager has no writable delegated cgroup" >&2
+    [[ -z $environment ]] ||
+        echo "     Detected container environment: $environment" >&2
+    echo "     Delegate cpu, memory and pids from the host runtime. Do not mount host cgroupfs read-write." >&2
+    exit 1
+fi
+check test -x /usr/libexec/hyperlight/minijail0
+check sha256sum -c /usr/libexec/hyperlight/minijail0.sha256
+helper_gid=$(getent group hyperlight | cut -d: -f3)
+if [[ -z $helper_gid ]] || ! id -G | tr ' ' '\n' | grep -qx "$helper_gid"; then
+    echo "FAIL $(id -un) is not in the hyperlight helper group" >&2
+    failed=1
+fi
+for specification in \
+    "/usr/libexec/hyperlight/minijail0 0:${helper_gid:-missing}:750" \
+    "/usr/libexec/hyperlight/minijail0.sha256 0:0:644" \
+    "/usr/libexec/hyperlight/hyperlight-check 0:0:755" \
+    "/usr/libexec/hyperlight/hyperlight-unit-entry 0:0:755" \
+    "/usr/libexec/hyperlight/install_linux.py 0:0:755" \
+    "/usr/libexec/hyperlight/qualify_linux.py 0:0:755" \
+    "/usr/libexec/hyperlight/minijail-require-landlock.patch 0:0:644" \
+    "/usr/libexec/hyperlight/process_placement 0:0:755" \
+    "/usr/libexec/hyperlight/simpleguest 0:0:755" \
+    "/usr/bin/hyperlight-run 0:0:755" \
+    "/var/lib/hyperlight/install-state.json 0:0:600"; do
+    read -r path expected <<<"$specification"
+    if [[ $(stat -c '%u:%g:%a' "$path" 2>/dev/null) == "$expected" ]]; then
+        echo "PASS installed ownership $path"
+    else
+        echo "FAIL invalid ownership or mode: $path" >&2
+        failed=1
+    fi
+done
+controller_failed=0
+for controller in cpu memory pids; do
+    if grep -qw "$controller" "$user_root/cgroup.controllers"; then
+        echo "PASS delegated cgroup controller $controller"
+    else
+        echo "FAIL cgroup controller $controller is not delegated to the user manager" >&2
+        echo "     Log out and back in after installation. WSL users must run wsl --shutdown." >&2
+        failed=1
+        controller_failed=1
+    fi
+done
+if ((controller_failed)); then
+    echo "     Container runtimes must delegate these controllers on the pod subtree." >&2
+    exit 1
+fi
+if [[ -e $user_root/cgroup.kill ]]; then
+    echo "PASS recursive cgroup kill"
+else
+    echo "FAIL cgroup.kill is unavailable; Linux 5.14 or newer is required" >&2
+    failed=1
+fi
+
+landlock_abi=$(python3 -c '
+import ctypes
+libc = ctypes.CDLL(None, use_errno=True)
+result = libc.syscall(444, 0, 0, 1)
+print(result)
+' 2>/dev/null || echo -1)
+if [[ $landlock_abi =~ ^[0-9]+$ ]] && ((landlock_abi >= 5)); then
+    echo "PASS Landlock ABI $landlock_abi"
+else
+    echo "FAIL Landlock ABI 5 is required; Linux 6.10 or newer is normally needed" >&2
+    failed=1
+fi
+
+if /usr/libexec/hyperlight/minijail0 \
+    -U -m -M -I -n -c0 --ambient -T static -- /bin/true; then
+    echo "PASS unprivileged Minijail namespaces"
+else
+    echo "FAIL unprivileged user namespaces are blocked" >&2
+    echo "     Verify the installed AppArmor profile and user namespace policy." >&2
+    failed=1
+fi
+
+device=
+for candidate in /dev/kvm /dev/mshv; do
+    if [[ -c $candidate ]]; then
+        device=$candidate
+        break
+    fi
+done
+if [[ -z $device ]]; then
+    echo "FAIL neither /dev/kvm nor /dev/mshv exists" >&2
+    failed=1
+elif [[ ! -r $device || ! -w $device ]]; then
+    echo "FAIL $device is not readable and writable by $(id -un)" >&2
+    echo "     Log out and back in after installation, then retry." >&2
+    failed=1
+else
+    echo "PASS device access $device"
+fi
+
+if ((failed)); then
+    exit 1
+fi
+echo "Hyperlight Linux integration is ready."

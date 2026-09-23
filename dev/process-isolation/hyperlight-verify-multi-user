@@ -1,0 +1,65 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The Hyperlight Authors.
+
+set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage: sudo dev/process-isolation/hyperlight-verify-multi-user \
+    --pid PID --other-user USER
+
+Verify that USER cannot mutate another user's active Hyperlight delegation or
+the installed integration assets. PID must be a process running under
+hyperlight-run.
+EOF
+}
+
+pid=
+other=
+while (($#)); do
+    case "$1" in
+        --pid) pid=${2:?}; shift 2 ;;
+        --other-user) other=${2:?}; shift 2 ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+[[ ${EUID} -eq 0 ]] || { echo "run with sudo" >&2; exit 1; }
+[[ $pid =~ ^[1-9][0-9]*$ && -n $other ]] || { usage >&2; exit 2; }
+id "$other" >/dev/null
+
+owner_uid=$(awk '/^Uid:/ { print $2 }' "/proc/$pid/status")
+cgroup=$(awk -F: '$1 == "0" { print $3 }' "/proc/$pid/cgroup")
+[[ $cgroup == /user.slice/user-"$owner_uid".slice/*/application ]] ||
+    { echo "PID is not in a Hyperlight user-service subgroup" >&2; exit 1; }
+delegated=${cgroup%/application}
+root=/sys/fs/cgroup$delegated
+[[ -d $root && -z $(cat "$root/cgroup.procs") ]] ||
+    { echo "delegated parent is missing or populated" >&2; exit 1; }
+
+for cgroup_file in \
+    "$root/cgroup.procs" \
+    "$root/application/cgroup.procs" \
+    "$root/provider/cgroup.procs"; do
+    if runuser -u "$other" -- sh -c "printf 0 >'$cgroup_file'" 2>/dev/null; then
+        echo "$other could mutate $cgroup_file" >&2
+        exit 1
+    fi
+done
+for path in /usr/bin/hyperlight-run \
+    /usr/libexec/hyperlight/minijail0 \
+    /usr/libexec/hyperlight/minijail0.sha256 \
+    /usr/libexec/hyperlight/hyperlight-check \
+    /usr/libexec/hyperlight/hyperlight-unit-entry \
+    /usr/libexec/hyperlight; do
+    if runuser -u "$other" -- test -w "$path"; then
+        echo "$other can modify installed asset $path" >&2
+        exit 1
+    fi
+done
+if runuser -u "$other" -- test -x /usr/libexec/hyperlight/minijail0; then
+    echo "$other can execute the AppArmor-authorized helper" >&2
+    exit 1
+fi
+echo "PASS $other cannot mutate UID $owner_uid delegation or installed assets"

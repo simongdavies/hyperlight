@@ -1,0 +1,196 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The Hyperlight Authors.
+
+set -euo pipefail
+
+memory_max=4G
+tasks_max=512
+cpu_quota=400%
+runtime_max=5min
+stop_timeout=30
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+
+usage() {
+    cat <<'EOF'
+Usage: hyperlight-run [OPTIONS] -- COMMAND [ARG...]
+       hyperlight-run run [OPTIONS] -- COMMAND [ARG...]
+       hyperlight-run init [--plan] [--user USER] [--source PATH]
+       hyperlight-run check
+       hyperlight-run examples --all
+       hyperlight-run uninstall [--plan] [--user USER]
+
+Run an unprivileged Hyperlight application in a bounded delegated systemd unit.
+
+Commands:
+  init                   Validate and perform the one-time operator installation
+  check                  Validate the installed integration and host prerequisites
+  examples --all         Run installed local plus all process-backed examples
+  run                    Explicit form of the normal application launch
+  uninstall              Remove installed integration assets and policy
+
+Options:
+  --memory-max VALUE     Aggregate MemoryMax. Default: 4G
+  --tasks-max VALUE      Aggregate TasksMax. Default: 512
+  --cpu-quota VALUE      Aggregate CPUQuota. Default: 400%
+  --runtime-max VALUE    Outer RuntimeMaxSec. Default: 5min
+  --stop-timeout SECONDS TimeoutStopSec. Integer, at least 10. Default: 30
+  -h, --help             Show this help
+EOF
+}
+
+bootstrap_tool() {
+    local name=$1
+    if [[ $script_dir == /usr/bin && -f /usr/libexec/hyperlight/$name ]]; then
+        printf '%s\n' "/usr/libexec/hyperlight/$name"
+    elif [[ -f $script_dir/$name ]]; then
+        printf '%s\n' "$script_dir/$name"
+    elif [[ -f /usr/libexec/hyperlight/$name ]]; then
+        printf '%s\n' "/usr/libexec/hyperlight/$name"
+    else
+        echo "hyperlight-run: $name is unavailable; run init from a Hyperlight checkout" >&2
+        return 1
+    fi
+}
+
+if [[ ${1-} == init ]]; then
+    shift
+    [[ ${EUID} -ne 0 ]] ||
+        { echo "hyperlight-run: init must start as an ordinary user" >&2; exit 1; }
+    plan=0
+    user=$(id -un)
+    source=$PWD/target/minijail-validation/minijail
+    while (($#)); do
+        case "$1" in
+            --plan) plan=1; shift ;;
+            --user) user=${2:?}; shift 2 ;;
+            --source) source=${2:?}; shift 2 ;;
+            -h|--help) usage; exit 0 ;;
+            *) echo "hyperlight-run: unknown init option: $1" >&2; exit 2 ;;
+        esac
+    done
+    installer=$(bootstrap_tool install_linux.py)
+    command=(python3 "$installer" --source "$source" --user "$user")
+    "${command[@]}" --plan
+    ((plan)) && exit 0
+    exec sudo -- "${command[@]}"
+fi
+
+if [[ ${1-} == check ]]; then
+    if [[ ${2-} == -h || ${2-} == --help ]]; then
+        echo "Usage: hyperlight-run check"
+        exit 0
+    fi
+    (($# == 1)) || { echo "hyperlight-run: check takes no arguments" >&2; exit 2; }
+    [[ -x /usr/libexec/hyperlight/hyperlight-check ]] ||
+        { echo "hyperlight-run: integration is not installed; run hyperlight-run init" >&2; exit 1; }
+    exec /usr/libexec/hyperlight/hyperlight-check
+fi
+
+if [[ ${1-} == examples ]]; then
+    shift
+    if [[ ${1-} == -h || ${1-} == --help ]]; then
+        echo "Usage: hyperlight-run examples --all"
+        exit 0
+    fi
+    [[ ${1-} == --all && $# == 1 ]] ||
+        { echo "hyperlight-run: usage: hyperlight-run examples --all" >&2; exit 2; }
+    [[ -f /usr/libexec/hyperlight/qualify_linux.py ]] ||
+        { echo "hyperlight-run: integration is not installed; run hyperlight-run init" >&2; exit 1; }
+    exec python3 /usr/libexec/hyperlight/qualify_linux.py
+fi
+
+if [[ ${1-} == uninstall ]]; then
+    shift
+    [[ ${EUID} -ne 0 ]] ||
+        { echo "hyperlight-run: uninstall must start as an ordinary user" >&2; exit 1; }
+    plan=0
+    user=$(id -un)
+    while (($#)); do
+        case "$1" in
+            --plan) plan=1; shift ;;
+            --user) user=${2:?}; shift 2 ;;
+            -h|--help) usage; exit 0 ;;
+            *) echo "hyperlight-run: unknown uninstall option: $1" >&2; exit 2 ;;
+        esac
+    done
+    installer=/usr/libexec/hyperlight/install_linux.py
+    if [[ ! -f $installer ]]; then
+        installer=$(bootstrap_tool install_linux.py)
+    fi
+    command=(python3 "$installer" --uninstall --user "$user")
+    "${command[@]}" --plan
+    ((plan)) && exit 0
+    exec sudo -- "${command[@]}"
+fi
+
+if [[ ${1-} == run ]]; then
+    shift
+fi
+
+while (($#)); do
+    case "$1" in
+        --memory-max) memory_max=${2:?}; shift 2 ;;
+        --tasks-max) tasks_max=${2:?}; shift 2 ;;
+        --cpu-quota) cpu_quota=${2:?}; shift 2 ;;
+        --runtime-max) runtime_max=${2:?}; shift 2 ;;
+        --stop-timeout) stop_timeout=${2:?}; shift 2 ;;
+        --) shift; break ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "hyperlight-run: unknown option: $1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+if (($# == 0)); then
+    echo "hyperlight-run: COMMAND is required" >&2
+    exit 2
+fi
+if [[ ! $stop_timeout =~ ^[0-9]+$ ]] || ((stop_timeout < 10)); then
+    echo "hyperlight-run: --stop-timeout must be an integer of at least 10 seconds" >&2
+    exit 2
+fi
+if [[ ${EUID} -eq 0 ]]; then
+    echo "hyperlight-run: refusing to run Hyperlight as root" >&2
+    exit 1
+fi
+if [[ -n ${HYPERLIGHT_MESH_PROCESS_CGROUP_ROOT-} ||
+      -n ${HYPERLIGHT_MESH_PROCESS_MINIJAIL-} ||
+      -n ${HYPERLIGHT_MESH_PROCESS_MINIJAIL_SHA256-} ]]; then
+    echo "hyperlight-run: internal provider variables must not be set by the caller" >&2
+    exit 1
+fi
+if ! systemctl --user is-system-running --quiet &&
+   ! systemctl --user is-system-running 2>/dev/null | grep -Eq '^(running|degraded)$'; then
+    echo "hyperlight-run: the user systemd manager is unavailable; run hyperlight-run check" >&2
+    exit 1
+fi
+
+unit="hyperlight-$(date +%s)-$$-$RANDOM"
+set +e
+systemd-run --user --wait --collect --pipe --same-dir \
+    --unit="$unit" --service-type=exec \
+    --property="MemoryMax=$memory_max" \
+    --property="TasksMax=$tasks_max" \
+    --property="CPUQuota=$cpu_quota" \
+    --property="RuntimeMaxSec=$runtime_max" \
+    --property="TimeoutStopSec=${stop_timeout}s" \
+    --property="KillMode=control-group" \
+    --property="Delegate=cpu memory pids" \
+    --property="DelegateSubgroup=application" \
+    --setenv="HYPERLIGHT_STOP_TIMEOUT_SEC=$stop_timeout" \
+    /usr/libexec/hyperlight/hyperlight-unit-entry "$@"
+status=$?
+set -e
+
+load_state=unknown
+for _ in {1..50}; do
+    load_state=$(systemctl --user show -P LoadState "$unit.service" 2>/dev/null ||
+        echo not-found)
+    [[ $load_state == not-found ]] && break
+    sleep 0.1
+done
+if [[ $load_state != not-found ]]; then
+    echo "hyperlight-run: transient unit was not collected: $unit.service ($load_state)" >&2
+    exit 1
+fi
+exit "$status"

@@ -1,0 +1,96 @@
+#!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The Hyperlight Authors.
+
+set -euo pipefail
+
+helper=/usr/libexec/hyperlight/minijail0
+digest_file=/usr/libexec/hyperlight/minijail0.sha256
+
+fail() {
+    echo "hyperlight unit: $*" >&2
+    exit 1
+}
+
+[[ ${EUID} -ne 0 ]] || fail "refusing to run Hyperlight as root"
+[[ -n ${INVOCATION_ID-} ]] || fail "this entrypoint must run in a systemd service"
+[[ ${HYPERLIGHT_STOP_TIMEOUT_SEC-} =~ ^[0-9]+$ ]] ||
+    fail "the launcher did not supply a cleanup timeout"
+stop_timeout=$HYPERLIGHT_STOP_TIMEOUT_SEC
+unset HYPERLIGHT_STOP_TIMEOUT_SEC
+[[ -x $helper && -r $digest_file ]] || fail "the verified helper is not installed"
+read -r expected installed_path extra <"$digest_file"
+[[ -n $expected && $installed_path == "$helper" && -z ${extra-} ]] ||
+    fail "invalid helper digest file"
+actual=$(sha256sum "$helper" | awk '{print $1}')
+[[ $actual == "$expected" ]] || fail "helper integrity check failed"
+helper_gid=$(getent group hyperlight | cut -d: -f3)
+[[ -n $helper_gid && $(stat -c '%u:%g:%a' "$helper") == "0:$helper_gid:750" ]] ||
+    fail "helper must be root:hyperlight mode 0750"
+[[ $(stat -c '%u:%g:%a' "$digest_file") == "0:0:644" ]] ||
+    fail "helper digest must be root-owned mode 0644"
+
+cgroup_path=$(awk -F: '$1 == "0" { print $3 }' /proc/self/cgroup)
+[[ $cgroup_path == */application ]] ||
+    fail "systemd did not place the service in DelegateSubgroup=application"
+delegated_path=${cgroup_path%/application}
+unit_root=/sys/fs/cgroup$delegated_path
+[[ -d $unit_root && -w $unit_root/cgroup.procs ]] ||
+    fail "systemd did not delegate the service cgroup"
+[[ -z $(cat "$unit_root/cgroup.procs") ]] ||
+    fail "the delegated cgroup parent contains processes"
+
+provider_root=$unit_root/provider
+mkdir "$provider_root"
+read_populated() {
+    populated=0
+    [[ -r $provider_root/cgroup.events ]] || return 0
+    populated=1
+    while read -r key value; do
+        [[ $key == populated ]] && populated=$value
+    done <"$provider_root/cgroup.events"
+    return 0
+}
+cleanup() {
+    status=${1:-$?}
+    trap - EXIT INT TERM
+    if [[ -e $provider_root/cgroup.kill ]]; then
+        printf 1 >"$provider_root/cgroup.kill" 2>/dev/null || true
+    else
+        echo "hyperlight unit: recursive cgroup kill is unavailable" >&2
+        status=1
+    fi
+    deadline=$((SECONDS + stop_timeout - 5))
+    while ((SECONDS < deadline)); do
+        read_populated
+        [[ $populated == 0 ]] && break
+        sleep 0.1
+    done
+    read_populated
+    if [[ $populated != 0 ]]; then
+        echo "hyperlight unit: provider subtree remained populated" >&2
+        status=1
+    elif [[ -d $provider_root ]]; then
+        find "$provider_root" -depth -type d -exec rmdir {} + 2>/dev/null || {
+            echo "hyperlight unit: provider subtree removal failed" >&2
+            status=1
+        }
+    fi
+    exit "$status"
+}
+trap 'cleanup $?' EXIT
+trap 'cleanup 130' INT
+trap 'cleanup 143' TERM
+
+printf '%s\n' '+cpu +memory +pids' >"$unit_root/cgroup.subtree_control" ||
+    fail "cpu, memory and pids delegation is unavailable; run hyperlight-run check"
+printf '%s\n' '+cpu +memory +pids' >"$provider_root/cgroup.subtree_control" ||
+    fail "cannot enable provider child-domain controllers"
+[[ -e $provider_root/cgroup.kill ]] ||
+    fail "recursive cgroup kill is unavailable; Linux 5.14 or newer is required"
+
+export HYPERLIGHT_MESH_PROCESS_CGROUP_ROOT=$provider_root
+export HYPERLIGHT_MESH_PROCESS_MINIJAIL=$helper
+export HYPERLIGHT_MESH_PROCESS_MINIJAIL_SHA256=$expected
+
+"$@"

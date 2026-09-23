@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use futures::FutureExt;
 use mesh_process::Mesh;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub(super) use mesh_process::OwnedHost;
@@ -209,7 +208,6 @@ pub(super) async fn launch_owned<T: 'static + mesh::message::MeshField + Send>(
                 owner: CleanupOwner::Launch(UnconfirmedLaunch {
                     pending: Mutex::new(pending),
                     guard,
-                    deadline,
                     released: AtomicBool::new(false),
                 }),
             })
@@ -266,7 +264,6 @@ impl std::fmt::Debug for ProcessCleanupError {
 pub(super) struct UnconfirmedLaunch {
     pending: Mutex<PendingHostLaunch>,
     guard: Arc<dyn ProcessGuard>,
-    deadline: Instant,
     released: AtomicBool,
 }
 
@@ -337,14 +334,21 @@ impl Drop for UnconfirmedLaunch {
             .get_mut()
             .unwrap_or_else(|error| error.into_inner());
         let cancel = pending.cancel();
-        let root = pending.wait_completion().now_or_never();
+        let termination = self.guard.terminate_domain();
+        let cleanup_deadline = Instant::now() + Duration::from_secs(5);
+        let root = futures_lite::future::block_on(
+            mesh::CancelContext::new()
+                .with_timeout(cleanup_deadline.saturating_duration_since(Instant::now()))
+                .until_cancelled(pending.wait_completion()),
+        );
         if let Err(error) = finish_cleanup(
             self.guard.as_ref(),
-            matches!(root, Some(Ok(_))),
-            self.deadline,
+            matches!(root, Ok(Ok(_))),
+            cleanup_deadline,
         ) {
             tracing::error!(
                 ?cancel,
+                ?termination,
                 ?root,
                 ?error,
                 "Final launch cleanup incomplete. Dropping this cleanup owner"
@@ -606,14 +610,20 @@ mod tests {
                 assert_eq!(guard.events(), expected);
                 assert_eq!(Arc::strong_count(&guard), 2);
                 guard.fail_empty.store(false, Ordering::Release);
-                expected.extend(["terminate", "empty"]);
+                expected.extend(["terminate", "terminate", "empty"]);
             }
             drop(error);
             expected.push("release");
             assert_eq!(guard.events(), expected);
             assert_eq!(Arc::strong_count(&guard), 1);
             let deadlines = guard.deadlines.lock().unwrap().clone();
-            assert!(deadlines.iter().all(|deadline| *deadline == deadlines[0]));
+            if fail_empty {
+                assert_eq!(deadlines.len(), 3);
+                assert_eq!(deadlines[1], deadlines[2]);
+                assert!(deadlines[1] > deadlines[0]);
+            } else {
+                assert!(deadlines.iter().all(|deadline| *deadline == deadlines[0]));
+            }
             mesh::CancelContext::new()
                 .with_timeout(Duration::from_secs(5))
                 .until_cancelled(mesh.shutdown())

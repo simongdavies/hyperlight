@@ -32,13 +32,11 @@ qualification and embedder seams. They are not the normal product workflow.
 Snapshots retain immutable program references, never launch authority. A loaded
 snapshot requires a fresh provider from the current host.
 
-Future OpenVMM product integration should enable the existing opt-in
-`process-isolation` feature only in the product package that owns the capability,
-bind a provider or broker to product service lifecycle and authority, package
-worker and broker assets through the product deployment manifest, then inject
-the provider into Mesh. Feature-off builds must keep process placement and its
-backend assets out of the runtime and package. This repository does not modify
-OpenVMM packaging.
+The supported Linux product integration is documented in
+[`QUICKSTART.md`](QUICKSTART.md). A one-time root install supplies immutable
+assets and device group policy. `hyperlight-run` creates a bounded delegated
+transient user service for each ordinary-user application run. There is no
+privileged broker.
 
 macOS process placement is unsupported. App Sandbox is a public static
 code-signing entitlement model, not a dynamic child-placement API.
@@ -98,8 +96,9 @@ seccomp. Namespace or keyring creation failure prevents workload exec.
 A native-ABI seccomp filter always denies `keyctl`, `add_key`, and `request_key`
 with `EPERM`, independently of `DenyChildProcesses`.
 
-The launcher stages the filter beside the trusted helper, outside the workload
-root. Minijail loads it before workload exec. The existing `-I` launch makes
+The launcher stages the filter outside the workload root and executes the
+root-owned trusted helper from its stable installed path. Minijail loads the
+filter before workload exec. The existing `-I` launch makes
 the workload namespace PID 1, without a helper fork after filter installation.
 The calling application owns worker launch and recovery. A dedicated sandbox
 host receives worker endpoints, not a native launch capability.
@@ -231,8 +230,10 @@ leaving a retry capability. Failures are logged, not reported as successful
 release.
 
 Windows kill-on-close requests termination, not observed domain emptiness.
-Linux has no equivalent lifetime guarantee, so descendants or resources can
-remain. Failed file or profile deletion after proven emptiness is resource
+Linux provider cleanup remains bounded best effort when used without the
+supported launcher. `hyperlight-run` adds an outer systemd cgroup lifetime,
+deadline, recursive kill and cleanup verification. Failed file or profile
+deletion after proven emptiness is resource
 residue, not evidence of a running process. The final-owner regression injects
 cleanup failure. It does not demonstrate a production orphan.
 

@@ -8,9 +8,10 @@ mod isolation_bench_contracts;
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod demo {
+    #[cfg(target_os = "linux")]
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::path::Path;
     use std::sync::Arc;
-    #[cfg(target_os = "linux")]
     use std::time::Duration;
 
     use hyperlight_host::process::{
@@ -108,26 +109,32 @@ mod demo {
         }
     }
 
-    fn profile(allow_children: bool, windows_vm_host: bool) -> ProcessProfile {
+    fn profile(
+        memory: u64,
+        _quota: Duration,
+        deny_network: bool,
+        deny_children: bool,
+        windows_vm_host: bool,
+    ) -> ProcessProfile {
         let mut controls = vec![RequestedControl {
-            control: ProcessControl::MemoryLimit(512 << 20),
+            control: ProcessControl::MemoryLimit(memory),
             required: true,
         }];
         #[cfg(target_os = "linux")]
         controls.push(RequestedControl {
             control: ProcessControl::CpuBudget {
-                quota: Duration::from_millis(50),
+                quota: _quota,
                 period: Duration::from_millis(100),
             },
             required: true,
         });
-        if !windows_vm_host {
+        if deny_network && !windows_vm_host {
             controls.push(RequestedControl {
                 control: ProcessControl::DenyNetwork,
                 required: true,
             });
         }
-        if !allow_children {
+        if deny_children {
             controls.push(RequestedControl {
                 control: ProcessControl::DenyChildProcesses,
                 required: true,
@@ -141,8 +148,252 @@ mod demo {
         profile
     }
 
-    fn options(name: &str, allow_children: bool, windows_vm_host: bool) -> ProcessOptions {
-        ProcessOptions::for_provider(name, profile(allow_children, windows_vm_host))
+    fn options(name: &str, profile: ProcessProfile) -> ProcessOptions {
+        ProcessOptions::for_provider(name, profile)
+    }
+
+    fn default_profile(allow_children: bool, windows_vm_host: bool) -> ProcessProfile {
+        profile(
+            512 << 20,
+            Duration::from_millis(50),
+            true,
+            !allow_children,
+            windows_vm_host,
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    fn process_cgroup(pid: i32) -> Result<String> {
+        std::fs::read_to_string(format!("/proc/{pid}/cgroup"))?
+            .lines()
+            .find_map(|line| line.strip_prefix("0::").map(str::to_owned))
+            .ok_or_else(|| new_error!("Process {pid} has no unified cgroup"))
+    }
+
+    fn check_independent_domains(
+        scenario: Scenario,
+        reports: &[hyperlight_host::process::ProcessReport],
+    ) -> Result<()> {
+        if scenario != Scenario::VmHostAndFunctionWorker {
+            return Ok(());
+        }
+        if reports.len() != 2 {
+            return Err(new_error!(
+                "sandbox-worker must report two simultaneous native domains"
+            ));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let left = process_cgroup(reports[0].root_process_id)?;
+            let right = process_cgroup(reports[1].root_process_id)?;
+            if left == right {
+                return Err(new_error!(
+                    "sandbox-worker native roles share one cgroup domain"
+                ));
+            }
+        }
+        let sandbox = reports
+            .iter()
+            .find(|report| {
+                report.role == hyperlight_host::process::program::ProgramRole::SandboxHost
+            })
+            .ok_or_else(|| new_error!("sandbox-worker has no sandbox report"))?;
+        let worker = reports
+            .iter()
+            .find(|report| {
+                report.role == hyperlight_host::process::program::ProgramRole::FunctionWorker
+            })
+            .ok_or_else(|| new_error!("sandbox-worker has no worker report"))?;
+        if sandbox.root_process_id == worker.root_process_id {
+            return Err(new_error!("sandbox-worker reports share one root process"));
+        }
+        #[cfg(target_os = "linux")]
+        let effective = |report: &hyperlight_host::process::ProcessReport| {
+            report
+                .controls
+                .iter()
+                .filter_map(|outcome| match &outcome.result {
+                    hyperlight_host::process::ControlResult::Applied { effective, .. } => {
+                        Some(effective.clone())
+                    }
+                    hyperlight_host::process::ControlResult::NotApplied { .. } => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        #[cfg(target_os = "linux")]
+        let sandbox_controls = effective(sandbox);
+        #[cfg(target_os = "linux")]
+        let worker_controls = effective(worker);
+        #[cfg(target_os = "linux")]
+        let sandbox_expected = [
+            ProcessControl::MemoryLimit(384 << 20),
+            ProcessControl::CpuBudget {
+                quota: Duration::from_millis(60),
+                period: Duration::from_millis(100),
+            },
+            ProcessControl::DenyNetwork,
+            ProcessControl::DenyChildProcesses,
+        ];
+        #[cfg(target_os = "linux")]
+        let worker_expected = [
+            ProcessControl::MemoryLimit(192 << 20),
+            ProcessControl::CpuBudget {
+                quota: Duration::from_millis(30),
+                period: Duration::from_millis(100),
+            },
+        ];
+        #[cfg(target_os = "linux")]
+        if !sandbox_expected
+            .iter()
+            .all(|control| sandbox_controls.contains(control))
+            || !worker_expected
+                .iter()
+                .all(|control| worker_controls.contains(control))
+            || worker_controls.contains(&ProcessControl::DenyNetwork)
+            || worker_controls.contains(&ProcessControl::DenyChildProcesses)
+        {
+            return Err(new_error!(
+                "sandbox-worker domains do not have distinct resource, network and child policies"
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn domain_memberships(
+        reports: &[hyperlight_host::process::ProcessReport],
+    ) -> Result<
+        Vec<(
+            hyperlight_host::process::program::ProgramRole,
+            String,
+            i32,
+            String,
+        )>,
+    > {
+        reports
+            .iter()
+            .map(|report| {
+                Ok((
+                    report.role,
+                    report.name.clone(),
+                    report.root_process_id,
+                    process_cgroup(report.root_process_id)?,
+                ))
+            })
+            .collect()
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn domain_memberships(_reports: &[hyperlight_host::process::ProcessReport]) -> Result<Vec<()>> {
+        Ok(Vec::new())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn check_domain_membership_unchanged(
+        before: &[(
+            hyperlight_host::process::program::ProgramRole,
+            String,
+            i32,
+            String,
+        )],
+        after: &[hyperlight_host::process::ProcessReport],
+    ) -> Result<()> {
+        if before.len() != after.len() {
+            return Err(new_error!("Native process count changed unexpectedly"));
+        }
+        for (role, name, root_process_id, cgroup) in before {
+            let current = after
+                .iter()
+                .find(|report| report.role == *role && report.name == *name)
+                .ok_or_else(|| new_error!("Native process role changed"))?;
+            if current.root_process_id != *root_process_id
+                || process_cgroup(current.root_process_id)? != *cgroup
+            {
+                return Err(new_error!("Native process moved between ownership domains"));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn check_domain_membership_unchanged(
+        _before: &[()],
+        _after: &[hyperlight_host::process::ProcessReport],
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn qualify_worker_recovery(
+        sandbox: &mut MultiUseSandbox,
+        scenario: Scenario,
+        original: Vec<hyperlight_host::process::ProcessReport>,
+    ) -> Result<Vec<hyperlight_host::process::ProcessReport>> {
+        if scenario != Scenario::VmHostAndFunctionWorker {
+            return Ok(original);
+        }
+        let worker = original
+            .iter()
+            .find(|report| {
+                report.role == hyperlight_host::process::program::ProgramRole::FunctionWorker
+            })
+            .ok_or_else(|| new_error!("sandbox-worker has no worker report"))?;
+        let old_domain = Path::new("/sys/fs/cgroup")
+            .join(process_cgroup(worker.root_process_id)?.trim_start_matches('/'));
+        // SAFETY: pidfd_open takes a positive reported process ID and zero flags.
+        let descriptor = unsafe { libc::syscall(libc::SYS_pidfd_open, worker.root_process_id, 0) };
+        if descriptor < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        // SAFETY: pidfd_open returned a fresh descriptor with sole ownership here.
+        let pidfd = unsafe { OwnedFd::from_raw_fd(descriptor as i32) };
+        // SAFETY: the live pidfd pins the process identity. SIGKILL needs no siginfo.
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                pidfd.as_raw_fd(),
+                libc::SIGKILL,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            )
+        };
+        if result != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        if sandbox.call::<i32>("Add", (20, 22))? != 42 {
+            return Err(new_error!("Recovered worker changed callback behavior"));
+        }
+        let recovered = sandbox.process_reports();
+        check_independent_domains(scenario, &recovered)?;
+        for current in &recovered {
+            let previous = original
+                .iter()
+                .find(|report| report.role == current.role && report.name == current.name)
+                .ok_or_else(|| new_error!("Recovered native process role changed"))?;
+            if current.role == hyperlight_host::process::program::ProgramRole::FunctionWorker {
+                if current.root_process_id == previous.root_process_id {
+                    return Err(new_error!("Killed function worker was not replaced"));
+                }
+            } else if current.root_process_id != previous.root_process_id {
+                return Err(new_error!(
+                    "Function-worker recovery replaced the sandbox host"
+                ));
+            }
+        }
+        if old_domain.exists() {
+            return Err(new_error!("Retired worker cgroup was not removed"));
+        }
+        println!("sandbox-worker: isolated worker recovery and retired-domain cleanup passed");
+        Ok(recovered)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn qualify_worker_recovery(
+        _sandbox: &mut MultiUseSandbox,
+        _scenario: Scenario,
+        original: Vec<hyperlight_host::process::ProcessReport>,
+    ) -> Result<Vec<hyperlight_host::process::ProcessReport>> {
+        Ok(original)
     }
 
     fn check_calls(sandbox: &mut MultiUseSandbox, child_policy: bool) -> Result<()> {
@@ -392,12 +643,13 @@ mod demo {
                 Scenario::WorkerChildrenBlocked => "worker-children-blocked",
                 _ => "functions",
             };
-            let mut worker = HostFunctionProcess::new(options(
-                worker_name,
-                scenario == Scenario::WorkerChildrenAllowed,
-                false,
-            ))
-            .function(ADD);
+            let worker_profile = if scenario == Scenario::VmHostAndFunctionWorker {
+                profile(192 << 20, Duration::from_millis(30), false, false, false)
+            } else {
+                default_profile(scenario == Scenario::WorkerChildrenAllowed, false)
+            };
+            let mut worker =
+                HostFunctionProcess::new(options(worker_name, worker_profile)).function(ADD);
             worker = if child_policy {
                 worker.function(PID)
             } else {
@@ -410,14 +662,24 @@ mod demo {
                 .host_function("HostEchoString", echo);
         }
         if dedicated {
+            let sandbox_profile = if scenario == Scenario::VmHostAndFunctionWorker {
+                profile(
+                    384 << 20,
+                    Duration::from_millis(60),
+                    true,
+                    true,
+                    cfg!(target_os = "windows"),
+                )
+            } else {
+                default_profile(false, cfg!(target_os = "windows"))
+            };
             let options = options(
                 if remote {
                     "vm-host-remote"
                 } else {
                     "vm-host-local"
                 },
-                false,
-                cfg!(target_os = "windows"),
+                sandbox_profile,
             );
             #[cfg(target_os = "windows")]
             {
@@ -437,6 +699,12 @@ mod demo {
         check_calls(&mut sandbox, child_policy)?;
         let original_reports = sandbox.process_reports();
         print_reports("Original process report", &original_reports);
+        check_independent_domains(scenario, &original_reports)?;
+        let original_reports = qualify_worker_recovery(&mut sandbox, scenario, original_reports)?;
+        if scenario == Scenario::VmHostAndFunctionWorker {
+            print_reports("Recovered process report", &original_reports);
+        }
+        let original_memberships = domain_memberships(&original_reports)?;
         let state = sandbox.call::<i32>("GetStatic", ())?;
         let snapshot = sandbox.snapshot()?;
         if sandbox.call::<i32>("AddToStatic", 7)? != state + 7 {
@@ -446,6 +714,7 @@ mod demo {
         if sandbox.call::<i32>("GetStatic", ())? != state {
             return Err(new_error!("Guest restore failed"));
         }
+        check_domain_membership_unchanged(&original_memberships, &sandbox.process_reports())?;
         let layout = output.join("snapshot");
         let tag = OciTag::new("placement")?;
         let digest = match &provider {
@@ -477,6 +746,7 @@ mod demo {
         }
         let reconstructed_reports = fresh.process_reports();
         print_reports("Reconstructed process report", &reconstructed_reports);
+        check_independent_domains(scenario, &reconstructed_reports)?;
         fresh.shutdown()?;
         drop(fresh);
         verify_processes_stopped(&reconstructed_reports)?;

@@ -4,7 +4,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::fd::OwnedFd;
-use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -32,12 +32,19 @@ mod tests;
 #[derive(Clone, Debug)]
 pub struct LinuxProcessResources {
     delegated_root: PathBuf,
-    helper: Arc<[u8]>,
+    helper: HelperSource,
+    helper_sha256: [u8; 32],
     hypervisor_device: Option<PathBuf>,
 }
 
+#[derive(Clone, Debug)]
+enum HelperSource {
+    Captured(Arc<[u8]>),
+    Installed(PathBuf),
+}
+
 impl LinuxProcessResources {
-    /// Copies helper bytes after verifying their SHA-256 digest.
+    /// Captures helper bytes after verifying their SHA-256 digest.
     ///
     /// The helper must enforce required Landlock and seccomp without soft-failure
     /// or sanitizer bypasses. No helper is downloaded or resolved through PATH.
@@ -63,9 +70,17 @@ impl LinuxProcessResources {
         }
         Ok(Self {
             delegated_root,
-            helper: bytes.into(),
+            helper: HelperSource::Captured(bytes.into()),
+            helper_sha256: expected_sha256,
             hypervisor_device: None,
         })
+    }
+
+    fn installed_helper(mut self, helper: impl AsRef<Path>) -> Result<Self> {
+        let helper = fs::canonicalize(helper)?;
+        verify_installed_helper(&helper, self.helper_sha256)?;
+        self.helper = HelperSource::Installed(helper);
+        Ok(self)
     }
 
     /// Grants the sandbox-host role access to one hypervisor device.
@@ -111,7 +126,8 @@ pub(super) fn discover_provider() -> Result<LinuxProcessResources> {
     .map_err(|error| new_error!("Invalid Mesh process helper digest: {error}"))?
     .try_into()
     .map_err(|_| new_error!("Mesh process helper SHA-256 must be 32 bytes"))?;
-    let mut resources = LinuxProcessResources::new(delegated_root, helper, digest)?;
+    let mut resources =
+        LinuxProcessResources::new(delegated_root, &helper, digest)?.installed_helper(helper)?;
     for device in [Path::new("/dev/kvm"), Path::new("/dev/mshv")] {
         if device.exists() {
             resources = resources.hypervisor_device(device)?;
@@ -433,12 +449,20 @@ impl Image {
         program: &ValidatedProgram,
         deny_child_processes: bool,
     ) -> Result<Self> {
-        // The image and supervisor are siblings. The worker cannot see its helper.
         let directory = tempfile::Builder::new()
             .prefix("hyperlight-process-")
             .tempdir()?;
-        let helper = directory.path().join("supervisor");
-        write_image_file(&helper, &resources.helper, 0o500)?;
+        let helper = match &resources.helper {
+            HelperSource::Installed(helper) => {
+                verify_installed_helper(helper, resources.helper_sha256)?;
+                helper.clone()
+            }
+            HelperSource::Captured(bytes) => {
+                let helper = directory.path().join("supervisor");
+                write_image_file(&helper, bytes, 0o500)?;
+                helper
+            }
+        };
         let process_filter = directory.path().join("process-filter");
         write_image_file(
             &process_filter,
@@ -552,6 +576,29 @@ impl Image {
             .extend(["-T", "static", "--logging", "stderr", "--", "/program"].map(str::to_owned));
         Ok(arguments)
     }
+}
+
+fn verify_installed_helper(helper: &Path, expected_sha256: [u8; 32]) -> Result<()> {
+    for path in helper.ancestors() {
+        let metadata = fs::symlink_metadata(path)?;
+        if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+            return Err(new_error!(
+                "Installed confinement helper path is not root-owned and immutable: {path:?}"
+            ));
+        }
+    }
+    let mut bytes = Vec::new();
+    File::open(helper)?
+        .take(MAX_HELPER_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_HELPER_BYTES {
+        return Err(new_error!("Confinement helper has an invalid size"));
+    }
+    let actual: [u8; 32] = Sha256::digest(&bytes).into();
+    if actual != expected_sha256 {
+        return Err(new_error!("Confinement helper SHA-256 does not match"));
+    }
+    Ok(())
 }
 
 fn syscall_filter(deny_child_processes: bool) -> Vec<u8> {

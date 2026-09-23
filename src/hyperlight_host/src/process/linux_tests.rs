@@ -451,7 +451,15 @@ fn helper_identity_is_verified_before_launch() {
     let digest: [u8; 32] = Sha256::digest(b"helper").into();
     let resources = LinuxProcessResources::new(directory.path(), &path, digest).unwrap();
     fs::write(path, b"replacement").unwrap();
-    assert_eq!(&*resources.helper, b"helper");
+    assert!(matches!(
+        &resources.helper,
+        HelperSource::Captured(bytes) if &**bytes == b"helper"
+    ));
+    assert!(
+        resources
+            .installed_helper(directory.path().join("helper"))
+            .is_err()
+    );
 }
 
 #[test]
