@@ -456,15 +456,16 @@ impl SupervisedRoute {
                         let replacement = match replacement {
                             Ok(Ok(replacement)) => replacement,
                             other => {
-                                self.runtime.mark_poisoned();
-                                return Err(new_error!(
-                                    "Function-process lifecycle recovery failed: {}",
-                                    match other {
-                                        Ok(Err(error)) => error,
-                                        Err(error) => error.to_string(),
-                                        _ => unreachable!(),
-                                    }
-                                ));
+                                let cause = match other {
+                                    Ok(Err(error)) => error,
+                                    Err(error) => error.to_string(),
+                                    _ => unreachable!(),
+                                };
+                                let error =
+                                    format!("Function-process lifecycle recovery failed: {cause}");
+                                tracing::error!(%error);
+                                self.runtime.mark_poisoned_with_cause(error.clone());
+                                return Err(new_error!("{error}"));
                             }
                         };
                         if replacement.number <= generation.number
@@ -1221,6 +1222,44 @@ mod tests {
                 "prepare"
             ]
         );
+    }
+
+    #[test]
+    fn supervised_refresh_preserves_cleanup_failure_cause() {
+        let directory = tempfile::tempdir().unwrap();
+        let (topology, launcher) = recovery_fixture(
+            directory.path(),
+            "--crash-once",
+            Idempotency::Idempotent,
+            false,
+            false,
+        );
+        let owner = recovery_runtime(&topology, launcher.clone());
+        let client = super::super::runtime::Runtime::new().unwrap();
+        let (mut connections, _supervisor) = supervised_connections(owner.clone(), 1).unwrap();
+        launcher
+            .fail_cleanup
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let routes = register_supervised_routes(
+            connections.remove(0),
+            topology.workers()[0].functions(),
+            client.clone(),
+        )
+        .unwrap();
+        let error = routes
+            .inner()
+            .call_host_function("HostAdd", (10_i32, 32_i32).into_value())
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("lifecycle recovery failed"),
+            "{error}"
+        );
+        let cause = client.poison_cause().unwrap();
+        assert!(cause.contains("cleanup failed"), "{cause}");
+        let owner_cause = owner.poison_cause().unwrap();
+        assert!(cause.contains(&owner_cause), "{cause}");
+        client.mark_poisoned();
+        assert_eq!(client.poison_cause().as_deref(), Some(cause.as_str()));
     }
 
     #[test]

@@ -992,6 +992,13 @@ impl LocalSandbox {
                 .as_ref()
                 .is_some_and(|runtime| runtime.is_poisoned())
             {
+                if let Some(cause) = self
+                    .process_runtime
+                    .as_ref()
+                    .and_then(|runtime| runtime.poison_cause())
+                {
+                    tracing::error!(%cause, "Function-process runtime is unrecoverable");
+                }
                 return Err(HyperlightError::UnrecoverableSandbox);
             }
 

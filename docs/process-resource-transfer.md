@@ -84,7 +84,9 @@ fn use_resources(resources: &mut ProcessResources, value: &str) -> Result<()> {
 
 The calling host takes the oldest pending object with
 `MeshProcessProvider::take_exported_file`. `ExportedFile` enforces the granted
-rights and does not expose its raw descriptor or handle.
+rights and does not expose its raw descriptor or handle. The export is a live
+shared file object, not a byte snapshot. Seek to the required offset before
+reading it.
 
 `process_file_resource` is a runnable end-to-end example:
 

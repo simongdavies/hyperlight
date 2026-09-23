@@ -31,6 +31,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a backend-tagged KVM or MSHV descriptor without device-path fallback. Windows
   requires explicit WHP authorization and reports the loss of AppContainer
   filesystem and network isolation.
+* A nested-sandbox example runs an inner Hyperlight VM and its host callback in
+  one process-bound function worker. Guest bytes and exported results use
+  generation-bound file capabilities without path fallback.
 
 ### Changed
 * Support overriding the guest log level when building or restoring initialized snapshots. Persisted snapshots use ABI version 3 and must be regenerated.

@@ -442,6 +442,26 @@ fn host_echo_bool(v: bool) -> Result<bool>;
 #[host_function("HostEchoString")]
 fn host_echo_string(v: String) -> Result<String>;
 
+#[host_function("NestedSandboxCompose")]
+fn nested_sandbox_compose_host(message: String, repeat: u32) -> Result<String>;
+
+#[host_function("NestedSandboxEvidence")]
+fn nested_sandbox_evidence_host() -> Result<String>;
+
+#[host_function("NestedSandboxComposeRecoverable")]
+fn nested_sandbox_compose_recoverable_host(
+    invocation_key: String,
+    message: String,
+    repeat: u32,
+) -> Result<String>;
+
+#[host_function("NestedSandboxComposeCrashNonIdempotent")]
+fn nested_sandbox_compose_crash_non_idempotent_host(message: String, repeat: u32)
+-> Result<String>;
+
+#[host_function("NestedSandboxExport")]
+fn nested_sandbox_export_host(value: String) -> Result<String>;
+
 #[host_function("HostEchoVecBytes")]
 fn host_echo_vec_bytes(v: Vec<u8>) -> Result<Vec<u8>>;
 
@@ -486,6 +506,49 @@ fn round_trip_host_bool(v: bool) -> Result<bool> {
 #[guest_function("RoundTripHostString")]
 fn round_trip_host_string(v: String) -> Result<String> {
     host_echo_string(v)
+}
+
+#[guest_function("NestedSandboxCompose")]
+fn nested_sandbox_compose(message: String, repeat: u32) -> Result<String> {
+    nested_sandbox_compose_host(message, repeat)
+}
+
+#[guest_function("NestedSandboxEvidence")]
+fn nested_sandbox_evidence() -> Result<String> {
+    nested_sandbox_evidence_host()
+}
+
+#[guest_function("NestedSandboxComposeRecoverable")]
+fn nested_sandbox_compose_recoverable(
+    invocation_key: String,
+    message: String,
+    repeat: u32,
+) -> Result<String> {
+    nested_sandbox_compose_recoverable_host(invocation_key, message, repeat)
+}
+
+#[guest_function("NestedSandboxComposeCrashNonIdempotent")]
+fn nested_sandbox_compose_crash_non_idempotent(message: String, repeat: u32) -> Result<String> {
+    nested_sandbox_compose_crash_non_idempotent_host(message, repeat)
+}
+
+#[guest_function("NestedInnerCompose")]
+fn nested_inner_compose(host_value: String, repeat: u32) -> Result<String> {
+    if repeat == 0 || repeat > 64 {
+        return Err(HyperlightGuestError::new(
+            ErrorCode::GuestError,
+            "Nested sandbox repeat must be between 1 and 64".to_string(),
+        ));
+    }
+    let mut value = String::from("inner-guest-function(");
+    for index in 0..repeat {
+        if index != 0 {
+            value.push(',');
+        }
+        value.push_str(&host_value);
+    }
+    value.push(')');
+    nested_sandbox_export_host(value)
 }
 
 #[guest_function("RoundTripHostVecBytes")]

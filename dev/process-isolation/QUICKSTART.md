@@ -769,6 +769,7 @@ git diff --check
 | `process_worker` | Direct function-worker bootstrap | Internal protocol and qualification tests |
 | `sandbox_worker` | Dedicated sandbox-host bootstrap | Internal protocol and qualification tests |
 | `process_child_policy` | Linux child/thread enforcement probe | Linux qualification tests |
+| `nested_sandbox` | Same-process nested VM, reverse file export and lifecycle proof | Delegated Linux KVM qualification |
 | `isolation_bench` | Controlled placement, resident-memory and recovery measurements | Bounded measurement campaign |
 | `isolation_bench_worker` | Measurement function worker | Launched by the measurement controller |
 | `isolation_bench_sandbox` | Measurement sandbox host | Launched by the measurement controller |

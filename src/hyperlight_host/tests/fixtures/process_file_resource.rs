@@ -164,6 +164,7 @@ fn run_controller() -> Result<()> {
         ));
     }
     let mut exported_result = String::new();
+    exported.seek(SeekFrom::Start(0))?;
     exported.read_to_string(&mut exported_result)?;
     if exported_result != expected {
         return Err(new_error!(

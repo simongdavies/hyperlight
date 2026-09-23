@@ -630,4 +630,28 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[test]
+    #[ignore = "requires built nested fixture, guest, platform process authority, and a usable hypervisor"]
+    fn end_to_end_nested_sandbox_qualification() {
+        let fixture = std::env::var_os("HYPERLIGHT_TEST_NESTED_SANDBOX_FIXTURE")
+            .expect("built nested fixture path");
+        let guest =
+            std::env::var_os("HYPERLIGHT_TEST_NESTED_SANDBOX_GUEST").expect("guest binary path");
+        let output_directory = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(fixture)
+            .arg(guest)
+            .arg(output_directory.path().join("run"))
+            .output()
+            .unwrap();
+        print!("{}", String::from_utf8_lossy(&output.stdout));
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "nested fixture failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }

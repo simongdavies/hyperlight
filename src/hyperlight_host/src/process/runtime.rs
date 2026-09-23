@@ -82,6 +82,7 @@ pub(crate) struct Runtime {
     launcher: Option<Arc<dyn ProcessLauncher>>,
     policy: RestartPolicy,
     poisoned: AtomicBool,
+    poison_cause: Mutex<Option<String>>,
     stopped: AtomicBool,
     cancellation: Mutex<mesh::CancelContext>,
     cancel: Mutex<mesh::Cancel>,
@@ -134,6 +135,7 @@ impl Runtime {
             launcher: None,
             policy: RestartPolicy::default(),
             poisoned: AtomicBool::new(false),
+            poison_cause: Mutex::new(None),
             stopped: AtomicBool::new(false),
             cancellation: Mutex::new(cancellation),
             cancel: Mutex::new(cancel),
@@ -152,6 +154,7 @@ impl Runtime {
             launcher,
             policy,
             poisoned: AtomicBool::new(false),
+            poison_cause: Mutex::new(None),
             stopped: AtomicBool::new(false),
             cancellation: Mutex::new(cancellation),
             cancel: Mutex::new(cancel),
@@ -164,6 +167,40 @@ impl Runtime {
 
     pub(super) fn mark_poisoned(&self) {
         self.poisoned.store(true, Ordering::Release);
+    }
+
+    pub(super) fn mark_poisoned_with_cause(&self, cause: String) {
+        self.store_poison_cause(cause);
+        self.mark_poisoned();
+    }
+
+    pub(crate) fn poison_cause(&self) -> Option<String> {
+        self.poison_cause
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    fn record_poison_cause(&self, error: &HyperlightError) {
+        let mut chain = error.to_string();
+        let mut source = std::error::Error::source(error);
+        while let Some(error) = source {
+            chain.push_str(": ");
+            chain.push_str(&error.to_string());
+            source = error.source();
+        }
+        tracing::error!(error = %chain, error_debug = ?error, "Function-process lifecycle recovery failed");
+        self.store_poison_cause(chain);
+    }
+
+    fn store_poison_cause(&self, chain: String) {
+        let mut cause = self
+            .poison_cause
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if cause.is_none() {
+            *cause = Some(chain);
+        }
     }
 
     pub(super) fn ensure_active(&self) -> Result<()> {
@@ -222,8 +259,13 @@ impl Runtime {
         if observed_generation > worker.generation {
             return Err(new_error!("Unknown future function-process generation"));
         }
-        if observed_generation == worker.generation {
-            self.recover(worker)?;
+        if observed_generation == worker.generation
+            && let Err(error) = self.recover(worker)
+        {
+            if self.is_poisoned() {
+                self.record_poison_cause(&error);
+            }
+            return Err(error);
         }
         Self::generation(worker)
     }

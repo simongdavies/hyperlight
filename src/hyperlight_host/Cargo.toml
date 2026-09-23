@@ -203,6 +203,11 @@ path = "tests/fixtures/process_vm_authority.rs"
 required-features = ["process-isolation"]
 
 [[example]]
+name = "nested_sandbox"
+path = "tests/fixtures/nested_sandbox.rs"
+required-features = ["process-isolation"]
+
+[[example]]
 name = "isolation_bench"
 path = "tests/fixtures/isolation_bench.rs"
 
