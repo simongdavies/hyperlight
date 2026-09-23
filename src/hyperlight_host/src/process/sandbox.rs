@@ -854,6 +854,9 @@ impl SandboxProcess {
                         .ok_or_else(|| new_error!("Fixture has no replacement configuration"))?,
                     guard: Arc::new(runtime::TrustedFixtureGuard),
                     controls: vec![],
+                    resources: vec![],
+                    export_authority: None,
+                    resource_generation: None,
                 })
             }
         }
@@ -899,7 +902,15 @@ impl SandboxProcess {
             config,
             guard,
             controls,
+            resources,
+            export_authority,
+            resource_generation: _,
         } = prepared;
+        if !resources.is_empty() || export_authority.is_some() {
+            return Err(new_error!(
+                "Sandbox host processes cannot receive function-worker resources"
+            ));
+        }
         let root =
             futures_lite::future::block_on(owner.launch_sandbox(config, bootstrap, guard.clone()))?;
         let sandbox = definition.sandbox().unwrap();

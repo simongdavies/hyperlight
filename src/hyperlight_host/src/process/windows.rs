@@ -1315,6 +1315,9 @@ pub(super) fn prepare(
         config,
         guard: resources,
         controls,
+        resources: Vec::new(),
+        export_authority: None,
+        resource_generation: None,
     })
 }
 

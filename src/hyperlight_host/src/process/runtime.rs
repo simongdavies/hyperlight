@@ -93,6 +93,7 @@ struct Worker {
     pending_launch: Option<HyperlightError>,
     attempts: VecDeque<Instant>,
     generation: u64,
+    resource_generation: u64,
 }
 
 struct Instance {
@@ -100,6 +101,7 @@ struct Instance {
     requests: mesh::Sender<transport::Request>,
     guard: Arc<dyn ProcessGuard>,
     report: Option<ProcessReport>,
+    export_handler: Option<super::resource::ExportHandler>,
 }
 
 impl Runtime {
@@ -298,6 +300,7 @@ impl Runtime {
                 pending_launch: None,
                 attempts: VecDeque::new(),
                 generation: 0,
+                resource_generation: 0,
             });
             let result = futures_lite::future::block_on(
                 runtime.spawn_ready(hosts.last_mut().unwrap(), prepared),
@@ -331,19 +334,53 @@ impl Runtime {
             .ok_or_else(|| new_error!("Worker has no recovery definition"))?;
         let (requests, receive) = mesh::channel();
         let (ready, readiness) = mesh::oneshot();
-        let bootstrap = transport::bootstrap(definition.functions(), receive, ready);
+        let resource_generation = match prepared.resource_generation.as_ref() {
+            Some(generation) => generation
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |generation| {
+                    generation.checked_add(1)
+                })
+                .map_err(|_| new_error!("Process resource generation exhausted"))?,
+            None => worker
+                .resource_generation
+                .checked_add(1)
+                .ok_or_else(|| new_error!("Process resource generation exhausted"))?,
+        };
+        let resource_declarations = prepared
+            .resources
+            .iter()
+            .map(|resource| resource.declaration(resource_generation))
+            .collect();
+        let export_policy = prepared
+            .export_authority
+            .as_ref()
+            .map(super::resource::ExportAuthority::declaration);
+        worker.resource_generation = resource_generation;
+        let bootstrap = transport::bootstrap_with_resources(
+            definition.functions(),
+            resource_generation,
+            resource_declarations,
+            export_policy,
+            receive,
+            ready,
+        );
         let controls = prepared.controls.clone();
         // Readiness failure must leave cleanup ownership in the same worker slot.
-        worker.instance = Some(match self.spawn(prepared, bootstrap, requests).await {
-            Ok(instance) => instance,
-            Err(error) if super::launch::has_unconfirmed_launch(&error) => {
-                let message = error.to_string();
-                // RPC diagnostics must not consume the native launch receipt.
-                worker.pending_launch = Some(error);
-                return Err(new_error!("{message}"));
-            }
-            Err(error) => return Err(error),
-        });
+        worker.instance = Some(
+            match self
+                .spawn(prepared, bootstrap, requests, resource_generation)
+                .await
+            {
+                Ok(instance) => instance,
+                Err(error) if super::launch::has_cleanup_owner(&error) => {
+                    let message = error.to_string();
+                    // RPC diagnostics must not consume retained native cleanup ownership.
+                    worker.pending_launch = Some(error);
+                    self.poisoned.store(true, Ordering::Release);
+                    return Err(new_error!("{message}"));
+                }
+                Err(error) => return Err(error),
+            },
+        );
         let instance = worker.instance.as_mut().unwrap();
         let readiness = self
             .cancellation()
@@ -375,16 +412,24 @@ impl Runtime {
     async fn spawn(
         &self,
         prepared: PreparedProcess,
-        bootstrap: transport::Bootstrap,
+        bootstrap: transport::PreparedBootstrap,
         requests: mesh::Sender<transport::Request>,
+        resource_generation: u64,
     ) -> Result<Instance> {
-        let PreparedProcess { config, guard, .. } = prepared;
-        let root = match super::launch::launch_owned(
+        let PreparedProcess {
+            config,
+            guard,
+            resources,
+            export_authority,
+            ..
+        } = prepared;
+        let transport::PreparedBootstrap { wire, mut delivery } = bootstrap;
+        let mut root = match super::launch::launch_owned(
             self.mesh
                 .as_ref()
                 .ok_or_else(|| new_error!("Process runtime stopped"))?,
             config,
-            bootstrap,
+            wire,
             guard.clone(),
             self.cancellation(),
             CONTROL_TIMEOUT,
@@ -399,11 +444,76 @@ impl Runtime {
                 return Err(error);
             }
         };
+        if let Err(error) = self
+            .cancellation()
+            .with_timeout(CONTROL_TIMEOUT)
+            .until_cancelled(delivery.wait_validated())
+            .await
+            .map_err(|error| new_error!("Function-process validation timed out: {error}"))
+            .and_then(|result| result)
+        {
+            let cleanup = super::launch::cleanup_owned(
+                &mut root,
+                guard.as_ref(),
+                Instant::now() + CONTROL_TIMEOUT,
+            )
+            .await;
+            let error =
+                new_error!("Function-process validation failed: {error}; cleanup: {cleanup:?}");
+            return match cleanup {
+                Ok(()) => Err(error),
+                Err(_) => Err(super::launch::retain_confirmed_cleanup(
+                    error,
+                    root,
+                    guard,
+                    Instant::now() + CONTROL_TIMEOUT,
+                )),
+            };
+        }
+        let resource_setup: Result<_> = (|| {
+            let resources = resources
+                .into_iter()
+                .map(|resource| resource.instantiate(resource_generation))
+                .collect::<Result<Vec<_>>>()?;
+            let (exports, export_handler) = match export_authority {
+                Some(authority) => {
+                    let (exports, thread) = authority.start(resource_generation)?;
+                    (Some(exports), Some(thread))
+                }
+                None => (None, None),
+            };
+            Ok((resources, exports, export_handler))
+        })();
+        let (resources, exports, export_handler) = match resource_setup {
+            Ok(setup) => setup,
+            Err(error) => {
+                let cleanup = super::launch::cleanup_owned(
+                    &mut root,
+                    guard.as_ref(),
+                    Instant::now() + CONTROL_TIMEOUT,
+                )
+                .await;
+                let error = new_error!(
+                    "Function-process resource setup failed: {error}; cleanup: {cleanup:?}"
+                );
+                return match cleanup {
+                    Ok(()) => Err(error),
+                    Err(_) => Err(super::launch::retain_confirmed_cleanup(
+                        error,
+                        root,
+                        guard,
+                        Instant::now() + CONTROL_TIMEOUT,
+                    )),
+                };
+            }
+        };
+        delivery.send_resources(resource_generation, resources, exports);
         Ok(Instance {
             root,
             requests,
             guard,
             report: None,
+            export_handler,
         })
     }
 
@@ -411,10 +521,20 @@ impl Runtime {
     async fn launch_guarded(
         &self,
         prepared: PreparedProcess,
-        bootstrap: transport::Bootstrap,
+        bootstrap: transport::PreparedBootstrap,
         requests: mesh::Sender<transport::Request>,
     ) -> Result<i32> {
-        let instance = self.spawn(prepared, bootstrap, requests).await?;
+        let resource_generation = match prepared.resource_generation.as_ref() {
+            Some(generation) => generation
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |generation| {
+                    generation.checked_add(1)
+                })
+                .map_err(|_| new_error!("Process resource generation exhausted"))?,
+            None => 1,
+        };
+        let instance = self
+            .spawn(prepared, bootstrap, requests, resource_generation)
+            .await?;
         let id = instance.root.id();
         self.hosts
             .lock()
@@ -425,6 +545,7 @@ impl Runtime {
                 pending_launch: None,
                 attempts: VecDeque::new(),
                 generation: 0,
+                resource_generation: 0,
             });
         Ok(id)
     }
@@ -441,14 +562,51 @@ impl Runtime {
     pub(super) async fn launch(
         &self,
         config: mesh_process::ProcessConfig,
-        bootstrap: transport::Bootstrap,
+        bootstrap: transport::PreparedBootstrap,
         requests: mesh::Sender<transport::Request>,
+    ) -> Result<i32> {
+        self.launch_with_resources(config, bootstrap, requests, vec![], None)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(super) async fn launch_with_resources(
+        &self,
+        config: mesh_process::ProcessConfig,
+        bootstrap: transport::PreparedBootstrap,
+        requests: mesh::Sender<transport::Request>,
+        resources: Vec<super::resource::RegisteredResource>,
+        export_authority: Option<super::resource::ExportAuthority>,
+    ) -> Result<i32> {
+        self.launch_with_resources_generation(
+            config,
+            bootstrap,
+            requests,
+            resources,
+            export_authority,
+            None,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    pub(super) async fn launch_with_resources_generation(
+        &self,
+        config: mesh_process::ProcessConfig,
+        bootstrap: transport::PreparedBootstrap,
+        requests: mesh::Sender<transport::Request>,
+        resources: Vec<super::resource::RegisteredResource>,
+        export_authority: Option<super::resource::ExportAuthority>,
+        resource_generation: Option<Arc<std::sync::atomic::AtomicU64>>,
     ) -> Result<i32> {
         self.launch_guarded(
             PreparedProcess {
                 config,
                 guard: Arc::new(TrustedFixtureGuard),
                 controls: vec![],
+                resources,
+                export_authority,
+                resource_generation,
             },
             bootstrap,
             requests,
@@ -614,10 +772,7 @@ impl Runtime {
                     worker.instance = None;
                 }
                 if let Some(error) = &worker.pending_launch {
-                    super::launch::retry_unconfirmed_launch(
-                        error,
-                        Instant::now() + CONTROL_TIMEOUT,
-                    )?;
+                    super::launch::retry_retained_cleanup(error, Instant::now() + CONTROL_TIMEOUT)?;
                     worker.pending_launch = None;
                 }
                 Ok(())
@@ -656,6 +811,9 @@ impl Runtime {
 
 async fn cleanup(instance: &mut Instance, graceful: bool) -> Result<()> {
     let deadline = Instant::now() + CONTROL_TIMEOUT;
+    if let Some(handler) = instance.export_handler.as_mut() {
+        handler.stop();
+    }
     if graceful {
         drop(instance.requests.call(transport::Request::Stop, ()));
         let _ = mesh::CancelContext::new()
@@ -663,7 +821,12 @@ async fn cleanup(instance: &mut Instance, graceful: bool) -> Result<()> {
             .until_cancelled(instance.root.wait_root())
             .await;
     }
-    super::launch::cleanup_owned(&mut instance.root, instance.guard.as_ref(), deadline).await
+    super::launch::cleanup_owned(&mut instance.root, instance.guard.as_ref(), deadline).await?;
+    if let Some(handler) = instance.export_handler.as_mut() {
+        handler.join(deadline)?;
+    }
+    instance.export_handler = None;
+    Ok(())
 }
 
 pub(super) fn start_with_policy(
@@ -740,6 +903,9 @@ pub(super) fn start_prepared(
                 })?,
                 guard: Arc::new(TrustedFixtureGuard),
                 controls: vec![],
+                resources: vec![],
+                export_authority: None,
+                resource_generation: None,
             })
         }
     }

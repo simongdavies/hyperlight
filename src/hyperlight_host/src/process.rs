@@ -82,6 +82,7 @@ mod linux_output;
 mod macos;
 pub mod program;
 mod provider;
+mod resource;
 mod runtime;
 mod sandbox;
 mod transport;
@@ -92,6 +93,16 @@ pub use launch::{ControlOutcome, ControlResult, ProcessCleanupError, ProcessRepo
 #[cfg(target_os = "linux")]
 pub use linux::LinuxProcessResources;
 pub use provider::MeshProcessProvider;
+#[allow(unused_imports)]
+pub(crate) use resource::{
+    ClaimedTypedResource, FIRST_TYPED_RESOURCE_KIND, LaunchResourceFactory, NativeResourcePayload,
+    NativeResourceValidator,
+};
+pub use resource::{
+    ExportedFile, OsResourceExportPolicy, OsResourceKind, OsResourceRights,
+    ProcessResourceExporter, ProcessResourceManifest, ProcessResources, ResourceId,
+    TransferredFile,
+};
 pub use runtime::RestartPolicy;
 pub(crate) use runtime::Runtime as ProcessRuntime;
 pub use sandbox::SandboxHost;
@@ -192,11 +203,24 @@ impl<A: ParameterTuple, O: SupportedReturnType> HostFunctionContract<A, O> {
         }
     }
 
+    /// Erases Rust parameter types for pre-resource bootstrap validation.
+    pub const fn erase(self) -> ProcessHostFunctionContract {
+        ProcessHostFunctionContract {
+            definition: self.definition,
+        }
+    }
+
     /// A possibly executed call may replay only with explicit idempotency.
     pub fn permits_replay(&self, outcome: DispatchOutcome) -> bool {
         outcome == DispatchOutcome::NotDispatched
             || self.definition.idempotency == Idempotency::Idempotent
     }
+}
+
+/// Type-erased trusted host-function declaration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProcessHostFunctionContract {
+    definition: FunctionDefinition,
 }
 
 /// What the dispatcher can establish about a failed call.

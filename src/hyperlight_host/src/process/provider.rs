@@ -6,12 +6,18 @@
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use super::launch::{ConfiguredLauncher, ProcessLauncher};
 use super::program::{
     FunctionContractDefinition, LocalProgramStore, ProcessTopologyDefinition, ProgramArtifact,
     ProgramConfig, ProgramFile, ProgramRole, ProgramTarget,
+};
+use super::resource::{
+    ExportAuthority, ExportedFile, LaunchResourceFactory, OsResourceExportPolicy, OsResourceRights,
+    RegisteredResource, ResourceExportSink, ResourceId, WireExportFile,
+    validate_file_contains_rights, validate_file_rights,
 };
 use crate::{Result, new_error};
 
@@ -31,9 +37,22 @@ pub(super) struct Provider {
     target: ProgramTarget,
     current_program: Option<ProgramSource>,
     programs: std::collections::BTreeMap<String, ProgramSource>,
+    resource_session: u128,
+    next_resource_slot: AtomicU32,
+    pub(super) resource_generation: Arc<AtomicU64>,
+    pub(super) resources: std::collections::BTreeMap<String, Vec<RegisteredResource>>,
+    exports: Mutex<ExportState>,
     #[cfg(target_os = "linux")]
     linux: Option<super::LinuxProcessResources>,
     _temporary_store: Option<Arc<tempfile::TempDir>>,
+}
+
+#[derive(Default)]
+struct ExportState {
+    policies: std::collections::BTreeMap<String, OsResourceExportPolicy>,
+    pending: std::collections::BTreeMap<String, std::collections::VecDeque<ExportedFile>>,
+    active_generations: std::collections::BTreeMap<String, u64>,
+    last_generations: std::collections::BTreeMap<String, u64>,
 }
 
 struct ProgramSource {
@@ -114,6 +133,11 @@ impl MeshProcessProvider {
                     target: ProgramTarget::current(Default::default()),
                     current_program,
                     programs: Default::default(),
+                    resource_session: uuid::Uuid::new_v4().as_u128(),
+                    next_resource_slot: AtomicU32::new(0),
+                    resource_generation: Arc::new(AtomicU64::new(1)),
+                    resources: Default::default(),
+                    exports: Default::default(),
                     #[cfg(target_os = "linux")]
                     linux: Some(linux),
                     _temporary_store: temporary_store,
@@ -150,6 +174,11 @@ impl MeshProcessProvider {
                     target,
                     current_program: None,
                     programs: Default::default(),
+                    resource_session: uuid::Uuid::new_v4().as_u128(),
+                    next_resource_slot: AtomicU32::new(0),
+                    resource_generation: Arc::new(AtomicU64::new(1)),
+                    resources: Default::default(),
+                    exports: Default::default(),
                     #[cfg(target_os = "linux")]
                     linux: None,
                     _temporary_store: None,
@@ -194,6 +223,110 @@ impl MeshProcessProvider {
         let source = program_source(executable.as_ref())?;
         provider.programs.insert(name, source);
         Ok(self)
+    }
+
+    /// Moves an already-open file capability into one function worker.
+    ///
+    /// The resource belongs to this provider session. It is not stored in
+    /// snapshots and must be registered again for reconstruction.
+    pub fn register_file(
+        &mut self,
+        process_name: impl Into<String>,
+        file: File,
+        rights: OsResourceRights,
+    ) -> Result<()> {
+        validate_file_rights(&file, rights)?;
+        let process_name = process_name.into();
+        if process_name.is_empty() || process_name.chars().any(char::is_control) {
+            return Err(new_error!(
+                "Resource process name must be nonempty and contain no control characters"
+            ));
+        }
+        let provider = Arc::get_mut(&mut self.inner)
+            .ok_or_else(|| new_error!("Register process resources before cloning the provider"))?;
+        let slot = provider
+            .next_resource_slot
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |slot| {
+                slot.checked_add(1)
+            })
+            .map_err(|_| new_error!("Too many process resources"))?;
+        let resources = provider.resources.entry(process_name).or_default();
+        let id = ResourceId::new(provider.resource_session, slot, 0);
+        resources.push(RegisteredResource::file(id, file, rights));
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn register_typed(
+        &mut self,
+        process_name: impl Into<String>,
+        kind: u32,
+        metadata: Vec<u8>,
+        factory: Arc<dyn LaunchResourceFactory>,
+    ) -> Result<()> {
+        let process_name = process_name.into();
+        if process_name.is_empty() || process_name.chars().any(char::is_control) {
+            return Err(new_error!(
+                "Resource process name must be nonempty and contain no control characters"
+            ));
+        }
+        let provider = Arc::get_mut(&mut self.inner)
+            .ok_or_else(|| new_error!("Register process resources before cloning the provider"))?;
+        let slot = provider
+            .next_resource_slot
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |slot| {
+                slot.checked_add(1)
+            })
+            .map_err(|_| new_error!("Too many process resources"))?;
+        let id = ResourceId::new(provider.resource_session, slot, 0);
+        let resource = RegisteredResource::typed(id, kind, metadata, factory)?;
+        provider
+            .resources
+            .entry(process_name)
+            .or_default()
+            .push(resource);
+        Ok(())
+    }
+
+    /// Authorizes bounded file-capability exports from one function worker.
+    pub fn allow_file_exports(
+        &mut self,
+        process_name: impl Into<String>,
+        policy: OsResourceExportPolicy,
+    ) -> Result<()> {
+        let process_name = process_name.into();
+        if process_name.is_empty() || process_name.chars().any(char::is_control) {
+            return Err(new_error!(
+                "Export process name must be nonempty and contain no control characters"
+            ));
+        }
+        let provider = Arc::get_mut(&mut self.inner)
+            .ok_or_else(|| new_error!("Configure resource exports before cloning the provider"))?;
+        let policies = &mut provider
+            .exports
+            .get_mut()
+            .map_err(|error| new_error!("Resource export lock failed: {error}"))?
+            .policies;
+        if policies.contains_key(&process_name) {
+            return Err(new_error!(
+                "Duplicate resource export policy for '{process_name}'"
+            ));
+        }
+        policies.insert(process_name, policy);
+        Ok(())
+    }
+
+    /// Takes the oldest pending file exported by one function worker.
+    pub fn take_exported_file(&self, process_name: &str) -> Result<Option<ExportedFile>> {
+        let mut exports = self
+            .inner
+            .exports
+            .lock()
+            .map_err(|error| new_error!("Resource export lock failed: {error}"))?;
+        Ok(exports
+            .pending
+            .get_mut(process_name)
+            .and_then(std::collections::VecDeque::pop_front))
     }
 
     /// Adds one verified runtime file to the default application executable.
@@ -283,11 +416,24 @@ impl MeshProcessProvider {
         )
     }
 
-    pub(crate) fn launcher(
+    pub(super) fn launcher(
         &self,
         definition: &ProcessTopologyDefinition,
     ) -> Result<Arc<dyn ProcessLauncher>> {
         definition.validate_programs(&self.inner.store, &self.inner.target)?;
+        validate_resource_owners(
+            &self.inner.resources,
+            definition.workers().iter().map(|worker| worker.name()),
+        )?;
+        validate_resource_owners(
+            &self
+                .inner
+                .exports
+                .lock()
+                .map_err(|error| new_error!("Resource export lock failed: {error}"))?
+                .policies,
+            definition.workers().iter().map(|worker| worker.name()),
+        )?;
         Ok(Arc::new(ConfiguredLauncher {
             store: self.inner.store.clone(),
             target: self.inner.target.clone(),
@@ -298,7 +444,120 @@ impl MeshProcessProvider {
             _provider: self.inner.clone(),
         }))
     }
+}
 
+impl Provider {
+    pub(super) fn export_authority(
+        self: &Arc<Self>,
+        process_name: &str,
+    ) -> Result<Option<ExportAuthority>> {
+        let exports = self
+            .exports
+            .lock()
+            .map_err(|error| new_error!("Resource export lock failed: {error}"))?;
+        Ok(exports
+            .policies
+            .get(process_name)
+            .copied()
+            .map(|policy| ExportAuthority::new(process_name.to_owned(), policy, self.clone())))
+    }
+}
+
+impl ResourceExportSink for Provider {
+    fn begin_generation(&self, process_name: &str, generation: u64) -> Result<()> {
+        if generation == 0 {
+            return Err(new_error!("Resource export generation is invalid"));
+        }
+        let mut exports = self
+            .exports
+            .lock()
+            .map_err(|error| new_error!("Resource export lock failed: {error}"))?;
+        if !exports.policies.contains_key(process_name) {
+            return Err(new_error!("Resource export is not authorized"));
+        }
+        if exports.active_generations.contains_key(process_name) {
+            return Err(new_error!("Resource export generation is already active"));
+        }
+        if exports
+            .last_generations
+            .get(process_name)
+            .is_some_and(|last| generation <= *last)
+        {
+            return Err(new_error!("Resource export generation is stale"));
+        }
+        exports.pending.remove(process_name);
+        exports
+            .last_generations
+            .insert(process_name.to_owned(), generation);
+        exports
+            .active_generations
+            .insert(process_name.to_owned(), generation);
+        Ok(())
+    }
+
+    fn accept_file(
+        &self,
+        process_name: &str,
+        generation: u64,
+        file: WireExportFile,
+    ) -> Result<ResourceId> {
+        if generation == 0 || file.kind != 1 {
+            return Err(new_error!("Resource export kind or generation is invalid"));
+        }
+        let rights = OsResourceRights::from_bits(file.rights)
+            .filter(|rights| !rights.is_empty())
+            .ok_or_else(|| new_error!("Resource export rights are invalid"))?;
+        validate_file_contains_rights(&file.file, rights)?;
+        let mut exports = self
+            .exports
+            .lock()
+            .map_err(|error| new_error!("Resource export lock failed: {error}"))?;
+        let policy = exports
+            .policies
+            .get(process_name)
+            .copied()
+            .ok_or_else(|| new_error!("Resource export is not authorized"))?;
+        if exports.active_generations.get(process_name) != Some(&generation) {
+            return Err(new_error!("Resource export generation is stale"));
+        }
+        if !policy.rights().contains(rights) {
+            return Err(new_error!("Resource export rights exceed policy"));
+        }
+        if exports
+            .pending
+            .get(process_name)
+            .is_some_and(|pending| pending.len() >= policy.max_pending())
+        {
+            return Err(new_error!("Resource export quota is exhausted"));
+        }
+        let slot = self
+            .next_resource_slot
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |slot| {
+                slot.checked_add(1)
+            })
+            .map_err(|_| new_error!("Resource export slots are exhausted"))?;
+        let id = ResourceId::new(self.resource_session, slot, generation);
+        exports
+            .pending
+            .entry(process_name.to_owned())
+            .or_default()
+            .push_back(ExportedFile::new(id, file.file, rights));
+        Ok(id)
+    }
+
+    fn end_generation(&self, process_name: &str, generation: u64) {
+        let Ok(mut exports) = self.exports.lock() else {
+            tracing::error!("Resource export lock failed while ending generation");
+            return;
+        };
+        if exports.active_generations.get(process_name) == Some(&generation) {
+            exports.active_generations.remove(process_name);
+            exports.pending.remove(process_name);
+        }
+    }
+}
+
+impl MeshProcessProvider {
     pub(crate) fn export_programs(
         &self,
         topology: &ProcessTopologyDefinition,
@@ -306,6 +565,21 @@ impl MeshProcessProvider {
     ) -> Result<()> {
         self.inner.store.export(&topology.programs(), destination)
     }
+}
+
+fn validate_resource_owners<'a, V>(
+    resources: &std::collections::BTreeMap<String, V>,
+    workers: impl IntoIterator<Item = &'a str>,
+) -> Result<()> {
+    let workers: std::collections::BTreeSet<_> = workers.into_iter().collect();
+    for process_name in resources.keys() {
+        if !workers.contains(process_name.as_str()) {
+            return Err(new_error!(
+                "Process resource owner '{process_name}' is not a function worker"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn program_source(executable: &std::path::Path) -> Result<ProgramSource> {
@@ -480,7 +754,10 @@ fn add_runtime_file(program: &mut ProgramSource, file: ProgramFile) -> Result<()
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
     use super::*;
+    use crate::process::ProcessResources;
 
     fn provider(packaging: bool) -> MeshProcessProvider {
         let directory = Arc::new(tempfile::tempdir().unwrap());
@@ -490,6 +767,11 @@ mod tests {
                 target: ProgramTarget::current(Default::default()),
                 current_program: None,
                 programs: Default::default(),
+                resource_session: uuid::Uuid::new_v4().as_u128(),
+                next_resource_slot: AtomicU32::new(0),
+                resource_generation: Arc::new(AtomicU64::new(1)),
+                resources: Default::default(),
+                exports: Default::default(),
                 #[cfg(target_os = "linux")]
                 linux: None,
                 _temporary_store: packaging.then_some(directory),
@@ -610,6 +892,274 @@ mod tests {
         let provider = provider(true).with_program("worker", &executable).unwrap();
         let error = provider.with_program("worker", executable).unwrap_err();
         assert!(error.to_string().contains("Duplicate provider program"));
+    }
+
+    #[test]
+    fn file_resources_are_provider_owned_and_session_scoped() {
+        let mut provider = provider(false);
+        provider
+            .register_file(
+                "worker",
+                tempfile::tempfile().unwrap(),
+                OsResourceRights::READ | OsResourceRights::WRITE,
+            )
+            .unwrap();
+        provider
+            .register_file(
+                "worker",
+                tempfile::tempfile().unwrap(),
+                OsResourceRights::READ | OsResourceRights::WRITE,
+            )
+            .unwrap();
+        provider
+            .register_file(
+                "sibling",
+                tempfile::tempfile().unwrap(),
+                OsResourceRights::READ | OsResourceRights::WRITE,
+            )
+            .unwrap();
+        let first = provider.inner.resources["worker"][0].id;
+        let second = provider.inner.resources["worker"][1].id;
+        let sibling = provider.inner.resources["sibling"][0].id;
+        assert_ne!(first, second);
+        assert_ne!(first, sibling);
+        assert_eq!(provider.inner.resources["worker"].len(), 2);
+
+        let mut cloned = provider.clone();
+        assert!(
+            cloned
+                .register_file(
+                    "worker",
+                    tempfile::tempfile().unwrap(),
+                    OsResourceRights::READ | OsResourceRights::WRITE,
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("before cloning")
+        );
+    }
+
+    #[test]
+    fn typed_resource_facade_is_available_to_internal_adapters() {
+        struct MarkerFactory;
+
+        impl crate::process::LaunchResourceFactory for MarkerFactory {
+            fn create(&self, _generation: u64) -> Result<crate::process::NativeResourcePayload> {
+                Ok(crate::process::NativeResourcePayload::AuthorizationMarker)
+            }
+        }
+
+        struct MarkerValidator;
+
+        impl crate::process::NativeResourceValidator for MarkerValidator {
+            fn validate(
+                &self,
+                metadata: &[u8],
+                payload: &crate::process::NativeResourcePayload,
+            ) -> Result<()> {
+                if metadata == b"vm-authority"
+                    && matches!(
+                        payload,
+                        crate::process::NativeResourcePayload::AuthorizationMarker
+                    )
+                {
+                    Ok(())
+                } else {
+                    Err(new_error!("Typed resource marker mismatch"))
+                }
+            }
+        }
+
+        let kind = crate::process::FIRST_TYPED_RESOURCE_KIND;
+        let mut provider = provider(false);
+        provider
+            .register_typed(
+                "worker",
+                kind,
+                b"vm-authority".to_vec(),
+                Arc::new(MarkerFactory),
+            )
+            .unwrap();
+        crate::process::ProcessResourceManifest::new()
+            .with_typed(kind, b"vm-authority".to_vec(), Arc::new(MarkerValidator))
+            .unwrap();
+        let resource = &provider.inner.resources["worker"][0];
+        assert!(matches!(
+            resource.instantiate(1).unwrap().payload,
+            crate::process::NativeResourcePayload::AuthorizationMarker
+        ));
+    }
+
+    #[test]
+    fn resource_owner_must_be_a_declared_function_worker() {
+        let mut provider = provider(false);
+        provider
+            .register_file(
+                "missing-worker",
+                tempfile::tempfile().unwrap(),
+                OsResourceRights::READ | OsResourceRights::WRITE,
+            )
+            .unwrap();
+        let error =
+            validate_resource_owners(&provider.inner.resources, std::iter::empty()).unwrap_err();
+        assert!(error.to_string().contains("is not a function worker"));
+    }
+
+    #[test]
+    fn export_policy_is_bounded_and_provider_owned() {
+        let mut provider = provider(false);
+        provider
+            .allow_file_exports(
+                "worker",
+                OsResourceExportPolicy::files(OsResourceRights::READ, 1).unwrap(),
+            )
+            .unwrap();
+        provider.inner.begin_generation("worker", 7).unwrap();
+        let first = provider
+            .inner
+            .accept_file(
+                "worker",
+                7,
+                WireExportFile {
+                    kind: 1,
+                    rights: OsResourceRights::READ.bits(),
+                    file: tempfile::tempfile().unwrap(),
+                },
+            )
+            .unwrap();
+        assert!(
+            provider
+                .inner
+                .accept_file(
+                    "worker",
+                    7,
+                    WireExportFile {
+                        kind: 1,
+                        rights: OsResourceRights::READ.bits(),
+                        file: tempfile::tempfile().unwrap(),
+                    },
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("quota")
+        );
+        let mut exported = provider.take_exported_file("worker").unwrap().unwrap();
+        assert_eq!(exported.id(), first);
+        assert_eq!(exported.rights(), OsResourceRights::READ);
+        assert_eq!(
+            exported.write_all(b"denied").unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert!(
+            provider
+                .inner
+                .begin_generation("worker", 8)
+                .unwrap_err()
+                .to_string()
+                .contains("already active")
+        );
+        provider.inner.end_generation("worker", 7);
+        provider.inner.begin_generation("worker", 8).unwrap();
+        let second = provider
+            .inner
+            .accept_file(
+                "worker",
+                8,
+                WireExportFile {
+                    kind: 1,
+                    rights: OsResourceRights::READ.bits(),
+                    file: tempfile::tempfile().unwrap(),
+                },
+            )
+            .unwrap();
+        provider.inner.end_generation("worker", 8);
+        assert!(
+            provider
+                .inner
+                .begin_generation("worker", 1)
+                .unwrap_err()
+                .to_string()
+                .contains("stale")
+        );
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn export_policy_rejects_unauthorized_metadata_and_rights() {
+        let mut provider = provider(false);
+        provider
+            .allow_file_exports(
+                "worker",
+                OsResourceExportPolicy::files(OsResourceRights::READ, 1).unwrap(),
+            )
+            .unwrap();
+        provider.inner.begin_generation("worker", 1).unwrap();
+        for (process, generation, kind, rights, expected) in [
+            (
+                "missing",
+                1,
+                1,
+                OsResourceRights::READ.bits(),
+                "not authorized",
+            ),
+            ("worker", 0, 1, OsResourceRights::READ.bits(), "invalid"),
+            ("worker", 1, 99, OsResourceRights::READ.bits(), "invalid"),
+            ("worker", 1, 1, u32::MAX, "invalid"),
+            (
+                "worker",
+                1,
+                1,
+                OsResourceRights::WRITE.bits(),
+                "exceed policy",
+            ),
+        ] {
+            let error = provider
+                .inner
+                .accept_file(
+                    process,
+                    generation,
+                    WireExportFile {
+                        kind,
+                        rights,
+                        file: tempfile::tempfile().unwrap(),
+                    },
+                )
+                .unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+        assert!(provider.take_exported_file("worker").unwrap().is_none());
+    }
+
+    #[test]
+    fn mesh_export_channel_preserves_worker_source() {
+        let mut provider = provider(false);
+        provider
+            .allow_file_exports(
+                "worker",
+                OsResourceExportPolicy::files(OsResourceRights::READ, 1).unwrap(),
+            )
+            .unwrap();
+        let authority = provider.inner.export_authority("worker").unwrap().unwrap();
+        let (sender, handler) = authority.start(13).unwrap();
+        let resources = ProcessResources::from_wire(vec![], Some(sender), 13, &[]).unwrap();
+        let mut source = tempfile::tempfile().unwrap();
+        source.write_all(b"worker result").unwrap();
+        resources
+            .export_file(&source, OsResourceRights::READ)
+            .unwrap();
+        source.write_all(b" retained").unwrap();
+        let mut exported = provider.take_exported_file("worker").unwrap().unwrap();
+        drop(resources);
+        let mut handler = handler;
+        handler.stop();
+        handler
+            .join(std::time::Instant::now() + std::time::Duration::from_secs(1))
+            .unwrap();
+
+        let mut contents = String::new();
+        exported.seek(SeekFrom::Start(0)).unwrap();
+        exported.read_to_string(&mut contents).unwrap();
+        assert_eq!(contents, "worker result retained");
     }
 
     #[test]

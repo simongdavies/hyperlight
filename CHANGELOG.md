@@ -23,6 +23,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 * `MeshProcessProvider` owns native program packaging and platform process
   authority. Applications declare placement, contracts and process constraints.
   Snapshot reconstruction reacquires provider authority from the current host.
+* Process workers can receive provider-owned file capabilities through
+  generation-bound Mesh native transfer. Explicit rights, two-phase declaration
+  validation, bounded reverse export, and deterministic cleanup keep paths and
+  raw native values off function RPC.
 
 ### Changed
 * Support overriding the guest log level when building or restoring initialized snapshots. Persisted snapshots use ABI version 3 and must be regenerated.

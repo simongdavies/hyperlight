@@ -156,6 +156,9 @@ pub(crate) struct PreparedProcess {
     pub config: mesh_process::ProcessConfig,
     pub guard: Arc<dyn ProcessGuard>,
     pub controls: Vec<ControlOutcome>,
+    pub resources: Vec<super::resource::RegisteredResource>,
+    pub export_authority: Option<super::resource::ExportAuthority>,
+    pub resource_generation: Option<Arc<std::sync::atomic::AtomicU64>>,
 }
 
 pub(super) async fn launch_owned<T: 'static + mesh::message::MeshField + Send>(
@@ -237,6 +240,7 @@ pub(super) enum CleanupOwner {
         _owner: Box<super::sandbox::SandboxProcess>,
     },
     Launch(UnconfirmedLaunch),
+    Confirmed(ConfirmedLaunch),
 }
 
 impl ProcessCleanupError {
@@ -265,6 +269,40 @@ pub(super) struct UnconfirmedLaunch {
     pending: Mutex<PendingHostLaunch>,
     guard: Arc<dyn ProcessGuard>,
     released: AtomicBool,
+}
+
+pub(super) struct ConfirmedLaunch {
+    root: Mutex<Option<OwnedHost>>,
+    guard: Arc<dyn ProcessGuard>,
+    deadline: Instant,
+}
+
+impl ConfirmedLaunch {
+    fn retry_cleanup(&self, deadline: Instant) -> Result<()> {
+        let mut root = self.root.lock().unwrap_or_else(|error| error.into_inner());
+        let Some(host) = root.as_mut() else {
+            return Ok(());
+        };
+        futures_lite::future::block_on(cleanup_owned(host, self.guard.as_ref(), deadline))?;
+        root.take();
+        Ok(())
+    }
+}
+
+pub(super) fn retain_confirmed_cleanup(
+    error: HyperlightError,
+    root: OwnedHost,
+    guard: Arc<dyn ProcessGuard>,
+    deadline: Instant,
+) -> HyperlightError {
+    ProcessCleanupError::retain(
+        error,
+        CleanupOwner::Confirmed(ConfirmedLaunch {
+            root: Mutex::new(Some(root)),
+            guard,
+            deadline,
+        }),
+    )
 }
 
 impl UnconfirmedLaunch {
@@ -314,10 +352,11 @@ pub(super) fn has_cleanup_owner(error: &HyperlightError) -> bool {
     }
 }
 
-pub(super) fn retry_unconfirmed_launch(error: &HyperlightError, deadline: Instant) -> Result<()> {
+pub(super) fn retry_retained_cleanup(error: &HyperlightError, deadline: Instant) -> Result<()> {
     match error {
         HyperlightError::ProcessCleanup(error) => match &error.owner {
             CleanupOwner::Launch(launch) => launch.retry_cleanup(deadline),
+            CleanupOwner::Confirmed(launch) => launch.retry_cleanup(deadline),
             _ => Err(new_error!("Expected retained launch cleanup ownership")),
         },
         _ => Err(new_error!("Expected retained launch cleanup ownership")),
@@ -329,6 +368,7 @@ impl Drop for UnconfirmedLaunch {
         if self.released.load(Ordering::Acquire) {
             return;
         }
+
         let pending = self
             .pending
             .get_mut()
@@ -353,6 +393,23 @@ impl Drop for UnconfirmedLaunch {
                 ?error,
                 "Final launch cleanup incomplete. Dropping this cleanup owner"
             );
+        }
+    }
+}
+
+impl Drop for ConfirmedLaunch {
+    fn drop(&mut self) {
+        let root = self
+            .root
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(root) = root.as_mut() else {
+            return;
+        };
+        if let Err(error) =
+            futures_lite::future::block_on(cleanup_owned(root, self.guard.as_ref(), self.deadline))
+        {
+            tracing::error!(%error, "Final confirmed launch cleanup is incomplete");
         }
     }
 }
@@ -403,7 +460,7 @@ fn finish_cleanup(guard: &dyn ProcessGuard, root_complete: bool, deadline: Insta
     guard.release_resources(deadline)
 }
 
-pub(crate) trait ProcessLauncher: Send + Sync {
+pub(super) trait ProcessLauncher: Send + Sync {
     fn prepare(&self, role: ProgramRole, definition: &ProcessDefinition)
     -> Result<PreparedProcess>;
 }
@@ -448,6 +505,16 @@ impl ProcessLauncher for ConfiguredLauncher {
         )?;
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         {
+            prepared.resources = self
+                ._provider
+                .resources
+                .get(definition.name())
+                .into_iter()
+                .flatten()
+                .cloned()
+                .collect();
+            prepared.export_authority = self._provider.export_authority(definition.name())?;
+            prepared.resource_generation = Some(self._provider.resource_generation.clone());
             prepared.config = prepared.config.env([
                 (
                     std::ffi::OsString::from("HYPERLIGHT_PROCESS_ROLE"),

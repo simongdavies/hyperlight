@@ -857,5 +857,8 @@ pub(super) fn prepare(
             retain: AtomicBool::new(false),
         }),
         controls,
+        resources: Vec::new(),
+        export_authority: None,
+        resource_generation: None,
     })
 }

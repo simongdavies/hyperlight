@@ -15,7 +15,7 @@ use crate::func::host_functions::TypeErasedHostFunction;
 use crate::sandbox::host_funcs::FunctionEntry;
 use crate::{HostFunctions, Result, new_error};
 
-const PROTOCOL_VERSION: u32 = 1;
+const PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Debug, MeshPayload, PartialEq, Eq)]
 struct WireContract {
@@ -54,8 +54,52 @@ impl From<&FunctionContractDefinition> for WireContract {
 pub(super) struct Bootstrap {
     version: u32,
     contracts: Vec<WireContract>,
+    generation: u64,
+    resource_declarations: Vec<super::resource::WireResourceDeclaration>,
+    export_policy: Option<super::resource::WireExportPolicy>,
+    validated: Option<mesh::OneshotSender<std::result::Result<(), String>>>,
+    resources: mesh::Receiver<ResourceBootstrap>,
     requests: mesh::Receiver<Request>,
     ready: mesh::OneshotSender<std::result::Result<(), String>>,
+}
+
+#[derive(MeshPayload)]
+pub(super) struct ResourceBootstrap {
+    generation: u64,
+    resources: Vec<super::resource::WireResource>,
+    exports: Option<mesh::Sender<super::resource::ResourceExportRequest>>,
+}
+
+pub(super) struct PreparedBootstrap {
+    pub(super) wire: Bootstrap,
+    pub(super) delivery: ResourceDelivery,
+}
+
+pub(super) struct ResourceDelivery {
+    validated: mesh::OneshotReceiver<std::result::Result<(), String>>,
+    resources: mesh::Sender<ResourceBootstrap>,
+}
+
+impl ResourceDelivery {
+    pub(super) async fn wait_validated(&mut self) -> Result<()> {
+        (&mut self.validated)
+            .await
+            .map_err(|error| new_error!("Function-process validation channel failed: {error}"))?
+            .map_err(|error| new_error!("Function-process manifest rejected: {error}"))
+    }
+
+    pub(super) fn send_resources(
+        &self,
+        generation: u64,
+        resources: Vec<super::resource::WireResource>,
+        exports: Option<mesh::Sender<super::resource::ResourceExportRequest>>,
+    ) {
+        self.resources.send(ResourceBootstrap {
+            generation,
+            resources,
+            exports,
+        });
+    }
 }
 
 #[derive(MeshPayload)]
@@ -100,7 +144,10 @@ pub(super) struct SupervisedConnection {
 }
 
 fn wire_contracts(definitions: &[FunctionContractDefinition]) -> Vec<WireContract> {
-    let mut contracts: Vec<_> = definitions.iter().map(WireContract::from).collect();
+    canonicalize_wire_contracts(definitions.iter().map(WireContract::from).collect())
+}
+
+fn canonicalize_wire_contracts(mut contracts: Vec<WireContract>) -> Vec<WireContract> {
     contracts.sort_by(|left, right| left.name.cmp(&right.name));
     contracts
 }
@@ -149,17 +196,42 @@ impl ProcessStartup {
     }
 }
 
-pub(super) fn bootstrap(
+pub(super) fn bootstrap_with_resources(
+    definitions: &[FunctionContractDefinition],
+    generation: u64,
+    resource_declarations: Vec<super::resource::WireResourceDeclaration>,
+    export_policy: Option<super::resource::WireExportPolicy>,
+    requests: mesh::Receiver<Request>,
+    ready: mesh::OneshotSender<std::result::Result<(), String>>,
+) -> PreparedBootstrap {
+    let (validated, validation) = mesh::oneshot();
+    let (resource_sender, resources) = mesh::channel();
+    PreparedBootstrap {
+        wire: Bootstrap {
+            version: PROTOCOL_VERSION,
+            contracts: wire_contracts(definitions),
+            generation,
+            resource_declarations,
+            export_policy,
+            validated: Some(validated),
+            resources,
+            requests,
+            ready,
+        },
+        delivery: ResourceDelivery {
+            validated: validation,
+            resources: resource_sender,
+        },
+    }
+}
+
+#[cfg(test)]
+fn bootstrap(
     definitions: &[FunctionContractDefinition],
     requests: mesh::Receiver<Request>,
     ready: mesh::OneshotSender<std::result::Result<(), String>>,
-) -> Bootstrap {
-    Bootstrap {
-        version: PROTOCOL_VERSION,
-        contracts: wire_contracts(definitions),
-        requests,
-        ready,
-    }
+) -> PreparedBootstrap {
+    bootstrap_with_resources(definitions, 1, vec![], None, requests, ready)
 }
 
 #[cfg(test)]
@@ -495,24 +567,175 @@ impl ProcessHostFunctions {
     /// Capture startup resources before creating threads. The owned value can
     /// then be passed here after initialization.
     pub fn run(self, startup: ProcessStartup) -> Result<()> {
+        let expected = self.contracts.values().map(WireContract::from).collect();
+        Self::run_configured(
+            startup,
+            expected,
+            super::ProcessResourceManifest::new(),
+            move |resources, functions| {
+                if !resources.is_empty() {
+                    return Err(new_error!(
+                        "Function process received resources without a resource-aware startup"
+                    ));
+                }
+                *functions = self;
+                Ok(())
+            },
+        )
+    }
+
+    /// Configures registrations after receiving process-scoped OS resources.
+    pub fn run_with_resources(
+        startup: ProcessStartup,
+        contracts: impl IntoIterator<Item = super::ProcessHostFunctionContract>,
+        manifest: super::ProcessResourceManifest,
+        configure: impl FnOnce(&mut super::ProcessResources, &mut Self) -> Result<()> + Send + 'static,
+    ) -> Result<()> {
+        let expected = canonicalize_wire_contracts(
+            contracts
+                .into_iter()
+                .map(|contract| {
+                    WireContract::from(&FunctionContractDefinition::from_definition(
+                        &contract.definition,
+                    ))
+                })
+                .collect(),
+        );
+        Self::run_configured(startup, expected, manifest, configure)
+    }
+
+    fn run_configured(
+        startup: ProcessStartup,
+        expected: Vec<WireContract>,
+        manifest: super::ProcessResourceManifest,
+        configure: impl FnOnce(&mut super::ProcessResources, &mut Self) -> Result<()> + Send + 'static,
+    ) -> Result<()> {
         mesh_process::run_mesh_host(
             startup.into_inner(),
             "hyperlight-function",
             // OpenVMM requires anyhow at its callback boundary.
-            async move |bootstrap| self.serve(bootstrap).await.map_err(anyhow::Error::new),
+            async move |bootstrap| {
+                Self::serve_configured(bootstrap, expected, manifest, configure)
+                    .await
+                    .map_err(anyhow::Error::new)
+            },
         )?;
         Err(new_error!("Function-process bootstrap did not enter Mesh"))
     }
 
+    async fn serve_configured(
+        mut bootstrap: Bootstrap,
+        expected: Vec<WireContract>,
+        manifest: super::ProcessResourceManifest,
+        configure: impl FnOnce(&mut super::ProcessResources, &mut Self) -> Result<()>,
+    ) -> Result<()> {
+        let phase_one = if bootstrap.version != PROTOCOL_VERSION || bootstrap.contracts != expected
+        {
+            Err(new_error!(
+                "Function-process protocol or registration manifest mismatch"
+            ))
+        } else {
+            manifest.validate(
+                bootstrap.generation,
+                &bootstrap.resource_declarations,
+                bootstrap.export_policy,
+            )
+        };
+        if let Err(error) = phase_one {
+            bootstrap
+                .validated
+                .take()
+                .unwrap()
+                .send(Err(error.to_string()));
+            bootstrap.ready.send(Err(error.to_string()));
+            return Err(error);
+        }
+        bootstrap.validated.take().unwrap().send(Ok(()));
+        let resource_bootstrap = match bootstrap.resources.next().await {
+            Some(resources) => resources,
+            None => {
+                let error = new_error!("Function-process resource bootstrap channel closed");
+                bootstrap.ready.send(Err(error.to_string()));
+                return Err(error);
+            }
+        };
+        if resource_bootstrap.generation != bootstrap.generation {
+            let error = new_error!("Function-process resource bootstrap generation mismatch");
+            bootstrap.ready.send(Err(error.to_string()));
+            return Err(error);
+        }
+        if let Err(error) = manifest.validate_payloads(
+            &resource_bootstrap.resources,
+            resource_bootstrap.exports.is_some(),
+        ) {
+            bootstrap.ready.send(Err(error.to_string()));
+            return Err(error);
+        }
+        let mut resources = match super::ProcessResources::from_wire(
+            resource_bootstrap.resources,
+            resource_bootstrap.exports,
+            resource_bootstrap.generation,
+            &bootstrap.resource_declarations,
+        ) {
+            Ok(resources) => resources,
+            Err(error) => {
+                bootstrap.ready.send(Err(error.to_string()));
+                return Err(error);
+            }
+        };
+        let mut functions = Self::default();
+        if let Err(error) = configure(&mut resources, &mut functions) {
+            bootstrap.ready.send(Err(error.to_string()));
+            return Err(error);
+        }
+        if !resources.is_empty() {
+            let error = new_error!("Function process did not claim every transferred resource");
+            bootstrap.ready.send(Err(error.to_string()));
+            return Err(error);
+        }
+        functions.serve(bootstrap).await
+    }
+
     async fn serve(self, mut bootstrap: Bootstrap) -> Result<()> {
         let expected: Vec<_> = self.contracts.values().map(WireContract::from).collect();
-        if bootstrap.version != PROTOCOL_VERSION || bootstrap.contracts != expected {
-            bootstrap.ready.send(Err(
-                "Function-process protocol or registration manifest mismatch".to_owned(),
-            ));
-            return Err(new_error!(
+        let phase_one = if bootstrap.version != PROTOCOL_VERSION || bootstrap.contracts != expected
+        {
+            Err(new_error!(
                 "Function-process protocol or registration manifest mismatch"
-            ));
+            ))
+        } else if bootstrap.validated.is_some() {
+            super::ProcessResourceManifest::new().validate(
+                bootstrap.generation,
+                &bootstrap.resource_declarations,
+                bootstrap.export_policy,
+            )
+        } else {
+            Ok(())
+        };
+        if let Err(error) = phase_one {
+            if let Some(validated) = bootstrap.validated.take() {
+                validated.send(Err(error.to_string()));
+            }
+            bootstrap.ready.send(Err(error.to_string()));
+            return Err(error);
+        }
+        if let Some(validated) = bootstrap.validated.take() {
+            validated.send(Ok(()));
+            let resource_bootstrap =
+                bootstrap.resources.next().await.ok_or_else(|| {
+                    new_error!("Function-process resource bootstrap channel closed")
+                })?;
+            let resources = super::ProcessResources::from_wire(
+                resource_bootstrap.resources,
+                resource_bootstrap.exports,
+                resource_bootstrap.generation,
+                &bootstrap.resource_declarations,
+            )?;
+            if !resources.is_empty() || resources.can_export() {
+                return Err(new_error!(
+                    "Function process received resources without a resource-aware startup"
+                ));
+            }
         }
         bootstrap.ready.send(Ok(()));
         while let Some(request) = bootstrap.requests.next().await {
@@ -576,6 +799,9 @@ mod tests {
     }
     use process_contracts::{ADD, PID};
 
+    const ECHO: HostFunctionContract<(String,), String> =
+        HostFunctionContract::new("HostEchoString", Idempotency::NonIdempotent);
+
     fn definitions() -> Vec<FunctionContractDefinition> {
         vec![
             FunctionContractDefinition::from_contract(&ADD),
@@ -592,6 +818,87 @@ mod tests {
     #[tokio::test]
     async fn guest_calls_mesh_child() {
         run_fixture(true).await;
+    }
+
+    #[tokio::test]
+    async fn resource_worker_canonicalizes_reverse_contract_order() {
+        let definitions = definitions();
+        let (requests, worker_requests) = mesh::channel();
+        let (ready, readiness) = mesh::oneshot();
+        let mut prepared =
+            bootstrap_with_resources(&definitions, 1, Vec::new(), None, worker_requests, ready);
+        let expected = canonicalize_wire_contracts(
+            [PID.erase(), ADD.erase()]
+                .into_iter()
+                .map(|contract| {
+                    WireContract::from(&FunctionContractDefinition::from_definition(
+                        &contract.definition,
+                    ))
+                })
+                .collect(),
+        );
+        let worker = ProcessHostFunctions::serve_configured(
+            prepared.wire,
+            expected,
+            super::super::ProcessResourceManifest::new(),
+            |_resources, functions| {
+                functions.bind(PID, std::process::id)?;
+                functions.bind(ADD, |left, right| Ok(left + right))
+            },
+        );
+        let controller = async move {
+            prepared.delivery.wait_validated().await.unwrap();
+            prepared.delivery.send_resources(1, Vec::new(), None);
+            readiness.await.unwrap().unwrap();
+            requests.call(Request::Stop, ()).await.unwrap();
+        };
+        let (worker, ()) = futures::future::join(worker, controller).await;
+        worker.unwrap();
+    }
+
+    #[tokio::test]
+    async fn resource_worker_rejects_duplicate_contract_names() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let configured = Arc::new(AtomicBool::new(false));
+        let definitions = vec![FunctionContractDefinition::from_contract(&ADD)];
+        let (_requests, worker_requests) = mesh::channel();
+        let (ready, readiness) = mesh::oneshot();
+        let mut prepared =
+            bootstrap_with_resources(&definitions, 1, Vec::new(), None, worker_requests, ready);
+        let expected = canonicalize_wire_contracts(
+            [ADD.erase(), ADD.erase()]
+                .into_iter()
+                .map(|contract| {
+                    WireContract::from(&FunctionContractDefinition::from_definition(
+                        &contract.definition,
+                    ))
+                })
+                .collect(),
+        );
+        let configured_for_worker = configured.clone();
+        let worker = ProcessHostFunctions::serve_configured(
+            prepared.wire,
+            expected,
+            super::super::ProcessResourceManifest::new(),
+            move |_resources, _functions| {
+                configured_for_worker.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+        );
+        let controller = async move {
+            assert!(prepared.delivery.wait_validated().await.is_err());
+            assert!(readiness.await.unwrap().is_err());
+        };
+        let (worker, ()) = futures::future::join(worker, controller).await;
+        assert!(
+            worker
+                .unwrap_err()
+                .to_string()
+                .contains("registration manifest mismatch")
+        );
+        assert!(!configured.load(Ordering::SeqCst));
     }
 
     fn fixture_path() -> std::path::PathBuf {
@@ -614,6 +921,60 @@ mod tests {
         mesh_process::ProcessConfig::new("function-test")
             .skip_worker_arg(true)
             .process_name(fixture_path())
+    }
+
+    fn file_resource_fixture_path() -> std::path::PathBuf {
+        let executable = std::env::current_exe().unwrap();
+        let worker = executable
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("examples")
+            .join(format!(
+                "process_file_resource{}",
+                std::env::consts::EXE_SUFFIX
+            ));
+        assert!(
+            worker.is_file(),
+            "Build the resource fixture with cargo build -p hyperlight-host --example process_file_resource --features process-isolation"
+        );
+        worker
+    }
+
+    fn file_resource_fixture_config_with(
+        rights: &str,
+        exports: bool,
+    ) -> mesh_process::ProcessConfig {
+        mesh_process::ProcessConfig::new("file-resource-test")
+            .skip_worker_arg(true)
+            .process_name(file_resource_fixture_path())
+            .env([
+                (
+                    std::ffi::OsString::from("HYPERLIGHT_PROCESS_ROLE"),
+                    std::ffi::OsString::from("worker"),
+                ),
+                (
+                    std::ffi::OsString::from("HYPERLIGHT_PROCESS_NAME"),
+                    std::ffi::OsString::from("file-resource"),
+                ),
+                (
+                    std::ffi::OsString::from("HYPERLIGHT_TEST_RESOURCE_RIGHTS"),
+                    std::ffi::OsString::from(rights),
+                ),
+                (
+                    std::ffi::OsString::from("HYPERLIGHT_TEST_RESOURCE_EXPORTS"),
+                    std::ffi::OsString::from(if exports { "enabled" } else { "disabled" }),
+                ),
+            ])
+    }
+
+    fn file_resource_fixture_config_with_rights(rights: &str) -> mesh_process::ProcessConfig {
+        file_resource_fixture_config_with(rights, false)
+    }
+
+    fn file_resource_fixture_config() -> mesh_process::ProcessConfig {
+        file_resource_fixture_config_with("read-write", false)
     }
 
     struct RecoveryFixture {
@@ -703,6 +1064,9 @@ mod tests {
                 config: fixture_config().args(args),
                 guard,
                 controls: vec![],
+                resources: vec![],
+                export_authority: None,
+                resource_generation: None,
             })
         }
     }
@@ -1059,15 +1423,14 @@ mod tests {
         launcher.fail_cleanup.store(false, Ordering::SeqCst);
         runtime.stop().unwrap();
         assert!(guard.upgrade().is_none());
+        let lifecycle = launcher.lifecycle.lock().unwrap();
         assert_eq!(
-            launcher
-                .lifecycle
-                .lock()
-                .unwrap()
+            lifecycle
                 .iter()
                 .filter(|event| **event == "release")
                 .count(),
-            2
+            2,
+            "{lifecycle:?}"
         );
         assert_eq!(launcher.prepares.load(Ordering::SeqCst), 2);
     }
@@ -1992,15 +2355,7 @@ mod tests {
         let (send, requests) = mesh::channel();
         let (ready, readiness) = mesh::oneshot();
         let config = fixture_config();
-        let bootstrap = Bootstrap {
-            version: PROTOCOL_VERSION,
-            contracts: vec![
-                WireContract::from(&ADD.definition),
-                WireContract::from(&PID.definition),
-            ],
-            requests,
-            ready,
-        };
+        let bootstrap = bootstrap(&definitions(), requests, ready);
         let pid = runtime
             .launch(config, bootstrap, send.clone())
             .await
@@ -2038,6 +2393,543 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mesh_bootstrap_transfers_owned_file_without_a_path() {
+        use std::io::{Read, Seek, SeekFrom};
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("resource.txt");
+        std::fs::write(&path, b"host-content:").unwrap();
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let mut verification = file.try_clone().unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        let resource = super::super::resource::RegisteredResource::file(
+            super::super::resource::ResourceId::new(7, 0, 1),
+            file,
+            super::super::OsResourceRights::READ | super::super::OsResourceRights::WRITE,
+        );
+        let definition = FunctionContractDefinition::from_contract(&ECHO);
+        let runtime = super::super::runtime::Runtime::new().unwrap();
+        let (send, requests) = mesh::channel();
+        let (ready, readiness) = mesh::oneshot();
+        let declaration = resource.declaration(1);
+        runtime
+            .launch_with_resources(
+                file_resource_fixture_config(),
+                bootstrap_with_resources(
+                    std::slice::from_ref(&definition),
+                    1,
+                    vec![declaration],
+                    None,
+                    requests,
+                    ready,
+                ),
+                send.clone(),
+                vec![resource],
+                None,
+            )
+            .await
+            .unwrap();
+        readiness.await.unwrap().unwrap();
+        let original = call_fixture(&send, ECHO, ("worker-write".to_owned(),))
+            .await
+            .unwrap();
+        assert_eq!(original, "host-content:");
+        verification.seek(SeekFrom::Start(0)).unwrap();
+        let mut actual = String::new();
+        verification.read_to_string(&mut actual).unwrap();
+        assert_eq!(actual, "host-content:[generation=1]worker-write");
+        send.call(Request::Stop, ()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn phase_one_rejection_does_not_invoke_resource_factory() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingFactory(Arc<AtomicUsize>);
+
+        impl super::super::resource::LaunchResourceFactory for CountingFactory {
+            fn create(
+                &self,
+                _generation: u64,
+            ) -> Result<super::super::resource::NativeResourcePayload> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(super::super::resource::NativeResourcePayload::AuthorizationMarker)
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let resource = super::super::resource::RegisteredResource::typed(
+            super::super::resource::ResourceId::new(12, 0, 0),
+            super::super::resource::FIRST_TYPED_RESOURCE_KIND,
+            b"marker".to_vec(),
+            Arc::new(CountingFactory(calls.clone())),
+        )
+        .unwrap();
+        let declaration = resource.declaration(1);
+        let definition = FunctionContractDefinition::from_contract(&ECHO);
+        let runtime = super::super::runtime::Runtime::new().unwrap();
+        let (send, requests) = mesh::channel();
+        let (ready, _readiness) = mesh::oneshot();
+        let result = runtime
+            .launch_with_resources(
+                file_resource_fixture_config(),
+                bootstrap_with_resources(
+                    std::slice::from_ref(&definition),
+                    1,
+                    vec![declaration],
+                    None,
+                    requests,
+                    ready,
+                ),
+                send,
+                vec![resource],
+                None,
+            )
+            .await;
+        assert!(result.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn failed_launch_burns_provider_generation_and_reinvokes_factory() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        use super::super::OsResourceRights;
+
+        struct FailingFactory {
+            read_write: std::fs::File,
+            generations: Mutex<Vec<u64>>,
+        }
+
+        impl super::super::resource::LaunchResourceFactory for FailingFactory {
+            fn create(
+                &self,
+                generation: u64,
+            ) -> Result<super::super::resource::NativeResourcePayload> {
+                let mut generations = self.generations.lock().unwrap();
+                generations.push(generation);
+                let attempt = generations.len();
+                drop(generations);
+                match attempt {
+                    1 => Err(new_error!("Intentional resource factory failure")),
+                    2 => Ok(super::super::resource::NativeResourcePayload::AuthorizationMarker),
+                    _ => Ok(super::super::resource::NativeResourcePayload::File(
+                        self.read_write.try_clone()?,
+                    )),
+                }
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("generation.txt");
+        std::fs::write(&path, b"generation").unwrap();
+        let factory = Arc::new(FailingFactory {
+            read_write: std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap(),
+            generations: Mutex::new(Vec::new()),
+        });
+        let generation = Arc::new(AtomicU64::new(1));
+        let definition = FunctionContractDefinition::from_contract(&ECHO);
+
+        for expected in 1..=3 {
+            let resource = super::super::resource::RegisteredResource::file_with_factory(
+                super::super::resource::ResourceId::new(23, 0, 0),
+                OsResourceRights::READ | OsResourceRights::WRITE,
+                factory.clone(),
+            );
+            let declaration = resource.declaration(expected);
+            let runtime = super::super::runtime::Runtime::new().unwrap();
+            let (send, requests) = mesh::channel();
+            let (ready, readiness) = mesh::oneshot();
+            let result = runtime
+                .launch_with_resources_generation(
+                    file_resource_fixture_config(),
+                    bootstrap_with_resources(
+                        std::slice::from_ref(&definition),
+                        expected,
+                        vec![declaration],
+                        None,
+                        requests,
+                        ready,
+                    ),
+                    send.clone(),
+                    vec![resource],
+                    None,
+                    Some(generation.clone()),
+                )
+                .await;
+            if expected == 1 {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("Intentional resource factory failure")
+                );
+            } else {
+                result.unwrap();
+                let readiness = readiness.await.unwrap();
+                if expected == 2 {
+                    assert!(readiness.is_err());
+                } else {
+                    readiness.unwrap();
+                    send.call(Request::Stop, ()).await.unwrap();
+                }
+            }
+        }
+        assert_eq!(*factory.generations.lock().unwrap(), vec![1, 2, 3]);
+        assert_eq!(generation.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn mesh_bootstrap_qualifies_file_rights_matrix() {
+        use std::io::{Read, Seek, SeekFrom};
+
+        for (name, rights, can_read, can_write) in [
+            ("read", super::super::OsResourceRights::READ, true, false),
+            ("write", super::super::OsResourceRights::WRITE, false, true),
+            (
+                "read-write",
+                super::super::OsResourceRights::READ | super::super::OsResourceRights::WRITE,
+                true,
+                true,
+            ),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("resource.txt");
+            std::fs::write(&path, b"host-content:").unwrap();
+            let verification = std::fs::File::open(&path).unwrap();
+            let file = std::fs::OpenOptions::new()
+                .read(can_read)
+                .write(can_write)
+                .open(&path)
+                .unwrap();
+            std::fs::remove_file(&path).unwrap();
+            let registered = super::super::resource::RegisteredResource::file(
+                super::super::resource::ResourceId::new(8, 0, 1),
+                file,
+                rights,
+            );
+            let definition = FunctionContractDefinition::from_contract(&ECHO);
+            let runtime = super::super::runtime::Runtime::new().unwrap();
+            let (send, requests) = mesh::channel();
+            let (ready, readiness) = mesh::oneshot();
+            let declaration = registered.declaration(1);
+            runtime
+                .launch_with_resources(
+                    file_resource_fixture_config_with_rights(name),
+                    bootstrap_with_resources(
+                        std::slice::from_ref(&definition),
+                        1,
+                        vec![declaration],
+                        None,
+                        requests,
+                        ready,
+                    ),
+                    send.clone(),
+                    vec![registered],
+                    None,
+                )
+                .await
+                .unwrap();
+            readiness.await.unwrap().unwrap();
+            let original = call_fixture(&send, ECHO, ("worker-write".to_owned(),))
+                .await
+                .unwrap();
+            assert_eq!(original, if can_read { "host-content:" } else { "" });
+
+            let mut verification = verification;
+            verification.seek(SeekFrom::Start(0)).unwrap();
+            let mut actual = String::new();
+            verification.read_to_string(&mut actual).unwrap();
+            assert_eq!(
+                actual,
+                if can_write {
+                    "host-content:[generation=1]worker-write"
+                } else {
+                    "host-content:"
+                }
+            );
+            send.call(Request::Stop, ()).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn mesh_bootstrap_transfers_pathless_worker_file_to_parent() {
+        use std::io::{Read, Seek, SeekFrom};
+        use std::sync::{Arc, Mutex};
+
+        use super::super::OsResourceRights;
+        use super::super::resource::{
+            ExportAuthority, ResourceExportSink, ResourceId, WireExportFile,
+        };
+
+        #[derive(Default)]
+        struct Sink {
+            files: Mutex<Vec<WireExportFile>>,
+        }
+
+        impl ResourceExportSink for Sink {
+            fn begin_generation(&self, _process_name: &str, _generation: u64) -> Result<()> {
+                Ok(())
+            }
+
+            fn accept_file(
+                &self,
+                _process_name: &str,
+                generation: u64,
+                file: WireExportFile,
+            ) -> Result<ResourceId> {
+                assert_eq!(generation, 1);
+                let mut files = self.files.lock().unwrap();
+                let slot = files.len() as u32;
+                files.push(file);
+                Ok(ResourceId::new(17, slot, generation))
+            }
+
+            fn end_generation(&self, _process_name: &str, _generation: u64) {}
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("resource.txt");
+        std::fs::write(&path, b"host-content:").unwrap();
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let registered = super::super::resource::RegisteredResource::file(
+            ResourceId::new(16, 0, 1),
+            file,
+            OsResourceRights::READ | OsResourceRights::WRITE,
+        );
+        let sink = Arc::new(Sink::default());
+        let authority = ExportAuthority::new(
+            "file-resource".to_owned(),
+            super::super::OsResourceExportPolicy::files(OsResourceRights::READ, 1).unwrap(),
+            sink.clone(),
+        );
+        let declaration = registered.declaration(1);
+        let export_policy = authority.declaration();
+        let definition = FunctionContractDefinition::from_contract(&ECHO);
+        let runtime = super::super::runtime::Runtime::new().unwrap();
+        let (send, requests) = mesh::channel();
+        let (ready, readiness) = mesh::oneshot();
+        runtime
+            .launch_with_resources(
+                file_resource_fixture_config_with("read-write", true),
+                bootstrap_with_resources(
+                    std::slice::from_ref(&definition),
+                    1,
+                    vec![declaration],
+                    Some(export_policy),
+                    requests,
+                    ready,
+                ),
+                send.clone(),
+                vec![registered],
+                Some(authority),
+            )
+            .await
+            .unwrap();
+        readiness.await.unwrap().unwrap();
+        let original = call_fixture(&send, ECHO, ("worker-write".to_owned(),))
+            .await
+            .unwrap();
+        assert_eq!(original, "host-content:");
+        send.call(Request::Stop, ()).await.unwrap();
+        drop(runtime);
+
+        let mut files = sink.files.lock().unwrap();
+        let [exported] = files.as_mut_slice() else {
+            panic!("worker must export exactly one file");
+        };
+        assert_eq!(exported.kind, 1);
+        assert_eq!(exported.rights, OsResourceRights::READ.bits());
+        exported.file.seek(SeekFrom::Start(0)).unwrap();
+        let mut actual = String::new();
+        exported.file.read_to_string(&mut actual).unwrap();
+        assert_eq!(actual, "host-content:[generation=1]worker-write");
+    }
+
+    #[test]
+    fn replacement_receives_fresh_resource_and_export_generations() {
+        use std::io::{Read, Seek, SeekFrom};
+        use std::sync::{Arc, Mutex};
+
+        use super::super::launch::{PreparedProcess, ProcessLauncher};
+        use super::super::program::{
+            FunctionContractDefinition, LocalProgramStore, ProcessDefinition,
+            ProcessTopologyDefinition, ProgramConfig, ProgramRole, ProgramTarget,
+        };
+        use super::super::resource::{
+            ExportAuthority, ResourceExportSink, ResourceId, WireExportFile,
+        };
+        use super::super::runtime::TrustedFixtureGuard;
+        use super::super::{OsResourceRights, ProcessControl, ProcessProfile, RequestedControl};
+
+        struct ResourceLauncher {
+            resource: super::super::resource::RegisteredResource,
+            export_authority: ExportAuthority,
+        }
+
+        impl ProcessLauncher for ResourceLauncher {
+            fn prepare(
+                &self,
+                role: ProgramRole,
+                _definition: &ProcessDefinition,
+            ) -> Result<PreparedProcess> {
+                assert_eq!(role, ProgramRole::FunctionWorker);
+                Ok(PreparedProcess {
+                    config: file_resource_fixture_config_with("read-write", true),
+                    guard: Arc::new(TrustedFixtureGuard),
+                    controls: vec![],
+                    resources: vec![self.resource.clone()],
+                    export_authority: Some(self.export_authority.clone()),
+                    resource_generation: None,
+                })
+            }
+        }
+
+        #[derive(Default)]
+        struct Sink {
+            files: Mutex<Vec<(u64, WireExportFile)>>,
+        }
+
+        impl ResourceExportSink for Sink {
+            fn begin_generation(&self, _process_name: &str, _generation: u64) -> Result<()> {
+                Ok(())
+            }
+
+            fn accept_file(
+                &self,
+                _process_name: &str,
+                generation: u64,
+                file: WireExportFile,
+            ) -> Result<ResourceId> {
+                let mut files = self.files.lock().unwrap();
+                let slot = files.len() as u32;
+                files.push((generation, file));
+                Ok(ResourceId::new(19, slot, generation))
+            }
+
+            fn end_generation(&self, _process_name: &str, _generation: u64) {}
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("resource.txt");
+        std::fs::write(&path, b"host-content:").unwrap();
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let mut verification = file.try_clone().unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        let definition = FunctionContractDefinition::from_contract(&ECHO);
+        let store = LocalProgramStore::new(directory.path().join("programs"));
+        let program = store
+            .package(
+                &ProgramConfig {
+                    schema_version: 1,
+                    role: ProgramRole::FunctionWorker,
+                    target: ProgramTarget::current(Default::default()),
+                    functions: vec![definition.clone()],
+                },
+                &std::fs::read(file_resource_fixture_path()).unwrap(),
+            )
+            .unwrap();
+        let profile = ProcessProfile::new([RequestedControl {
+            control: ProcessControl::DenyChildProcesses,
+            required: true,
+        }]);
+        let topology = ProcessTopologyDefinition::new(
+            None,
+            vec![
+                ProcessDefinition::new(
+                    "file-resource",
+                    program,
+                    &profile,
+                    vec![definition.clone()],
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let sink = Arc::new(Sink::default());
+        let launcher = Arc::new(ResourceLauncher {
+            resource: super::super::resource::RegisteredResource::file(
+                super::super::resource::ResourceId::new(9, 0, 1),
+                file,
+                OsResourceRights::READ | OsResourceRights::WRITE,
+            ),
+            export_authority: ExportAuthority::new(
+                "file-resource".to_owned(),
+                super::super::OsResourceExportPolicy::files(OsResourceRights::READ, 1).unwrap(),
+                sink.clone(),
+            ),
+        });
+        let runtime = super::super::runtime::Runtime::start_workers(
+            topology.workers(),
+            launcher,
+            super::super::RestartPolicy {
+                max_restarts: 5,
+                initial_backoff: Duration::from_millis(1),
+                max_backoff: Duration::from_millis(2),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let first = <String as SupportedReturnType>::from_value(
+            recovery_call(&runtime, &definition, ("first".to_owned(),).into_value()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(first, "host-content:");
+        let mut expected = "host-content:[generation=1]first".to_owned();
+        for generation in 2..=5 {
+            runtime.terminate_fixture_root(0);
+            let input = format!("call-{generation}");
+            let previous = <String as SupportedReturnType>::from_value(
+                recovery_call(&runtime, &definition, (input.clone(),).into_value()).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(previous, expected);
+            expected.push_str(&format!("[generation={generation}]{input}"));
+        }
+
+        verification.seek(SeekFrom::Start(0)).unwrap();
+        let mut actual = String::new();
+        verification.read_to_string(&mut actual).unwrap();
+        assert_eq!(actual, expected);
+        let mut exports = sink.files.lock().unwrap();
+        assert_eq!(
+            exports
+                .iter()
+                .map(|(generation, _)| *generation)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5]
+        );
+        for (generation, export) in exports.iter_mut() {
+            export.file.seek(SeekFrom::Start(0)).unwrap();
+            let mut result = String::new();
+            export.file.read_to_string(&mut result).unwrap();
+            assert!(result.contains(&format!("[generation={generation}]")));
+        }
+    }
+
+    #[tokio::test]
     async fn owned_cleanup_reaps_blocked_startup_and_native_call() {
         for mode in ["--block-before-run", "--block-native"] {
             let mut runtime = super::super::runtime::Runtime::new().unwrap();
@@ -2046,14 +2938,21 @@ mod tests {
             let config = fixture_config().args([mode.into(), marker.clone().into_os_string()]);
             let (send, requests) = mesh::channel();
             let (ready, readiness) = mesh::oneshot();
-            runtime
+            let start = std::time::Instant::now();
+            let launch = runtime
                 .launch(
                     config,
                     bootstrap(&definitions(), requests, ready),
                     send.clone(),
                 )
-                .await
-                .unwrap();
+                .await;
+            if mode == "--block-before-run" {
+                assert!(launch.is_err());
+                assert!(marker.is_file());
+                assert!(start.elapsed() < Duration::from_secs(40));
+                continue;
+            }
+            launch.unwrap();
             let pending = if mode == "--block-native" {
                 readiness.await.unwrap().unwrap();
                 let call = FunctionCall::new(
@@ -2100,21 +2999,22 @@ mod tests {
             if !valid {
                 definitions.pop();
             }
-            runtime
+            let result = runtime
                 .launch(
                     fixture_config(),
                     bootstrap(&definitions, requests, ready),
                     send.clone(),
                 )
                 .await
-                .unwrap();
+                .map(|_| ());
+            if !valid {
+                assert!(result.is_err());
+                continue;
+            }
+            result.unwrap();
             let result =
                 register_ready_routes(send, readiness, &definitions, runtime.clone()).await;
-            if valid {
-                routes.push(result.unwrap());
-            } else {
-                assert!(result.is_err());
-            }
+            routes.push(result.unwrap());
         }
         drop(routes);
         futures::executor::block_on(async {
@@ -2148,18 +3048,19 @@ mod tests {
             functions.bind(contract, |a: i32, b: i32| a + b).unwrap();
             let (send, requests) = mesh::channel();
             let (ready, readiness) = mesh::oneshot();
-            let bootstrap = Bootstrap {
-                version: PROTOCOL_VERSION,
-                contracts: vec![WireContract::from(&contract.definition)],
+            let mut bootstrap = bootstrap(
+                std::slice::from_ref(&FunctionContractDefinition::from_contract(&contract)),
                 requests,
                 ready,
-            };
+            );
             // Encode/decode exercises transferable endpoints, not only local messages.
-            let bootstrap =
-                mesh::OwnedMessage::serialized(mesh::OwnedMessage::new(bootstrap).serialize())
+            let wire =
+                mesh::OwnedMessage::serialized(mesh::OwnedMessage::new(bootstrap.wire).serialize())
                     .parse()
                     .unwrap();
             let client = async {
+                bootstrap.delivery.wait_validated().await.unwrap();
+                bootstrap.delivery.send_resources(1, vec![], None);
                 readiness.await.unwrap().unwrap();
                 let call = FunctionCall::new(
                     "Add".to_owned(),
@@ -2180,7 +3081,7 @@ mod tests {
                 assert_eq!(<i32 as SupportedReturnType>::from_value(value).unwrap(), 42);
                 send.call(Request::Stop, ()).await.unwrap();
             };
-            let (result, ()) = futures::join!(functions.serve(bootstrap), client);
+            let (result, ()) = futures::join!(functions.serve(wire), client);
             result.unwrap();
         });
     }
@@ -2191,13 +3092,14 @@ mod tests {
             let functions = ProcessHostFunctions::default();
             let (_send, requests) = mesh::channel();
             let (ready, readiness) = mesh::oneshot();
-            let bootstrap = Bootstrap {
-                version: PROTOCOL_VERSION + 1,
-                contracts: vec![],
-                requests,
-                ready,
-            };
-            assert!(functions.serve(bootstrap).await.is_err());
+            let mut bootstrap = bootstrap(&[], requests, ready);
+            bootstrap.wire.version = PROTOCOL_VERSION + 1;
+            let result = futures::join!(
+                functions.serve(bootstrap.wire),
+                bootstrap.delivery.wait_validated()
+            );
+            assert!(result.0.is_err());
+            assert!(result.1.is_err());
             assert!(readiness.await.unwrap().is_err());
         });
     }

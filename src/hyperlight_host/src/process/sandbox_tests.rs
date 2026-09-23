@@ -278,6 +278,9 @@ fn malformed_operation_reply_makes_sandbox_terminal() {
                     .args(["--local-add"]),
                 guard: Arc::new(runtime::TrustedFixtureGuard),
                 controls: vec![],
+                resources: vec![],
+                export_authority: None,
+                resource_generation: None,
             },
             runtime::Runtime::new().unwrap(),
             source(),
@@ -514,6 +517,9 @@ impl ProcessLauncher for DedicatedFixture {
             config,
             guard,
             controls: Vec::new(),
+            resources: Vec::new(),
+            export_authority: None,
+            resource_generation: None,
         })
     }
 }

@@ -193,6 +193,11 @@ required-features = ["process-isolation"]
 test = true
 
 [[example]]
+name = "process_file_resource"
+path = "tests/fixtures/process_file_resource.rs"
+required-features = ["process-isolation"]
+
+[[example]]
 name = "isolation_bench"
 path = "tests/fixtures/isolation_bench.rs"
 
