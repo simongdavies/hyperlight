@@ -10,7 +10,10 @@ pub(in crate::sandbox::snapshot) const MT_CONFIG_CURRENT: &str = MT_CONFIG_V1;
 /// Definition-only native process topology. Guest memory keeps its v1 encoding.
 pub(in crate::sandbox::snapshot) const MT_CONFIG_V2: &str =
     "application/vnd.hyperlight.snapshot.config.v2+json";
-pub(in crate::sandbox::snapshot) const MT_PROCESS_CONFIG_CURRENT: &str = MT_CONFIG_V2;
+/// Process topology schema v2, including Windows Job Object CPU-rate policy.
+pub(in crate::sandbox::snapshot) const MT_CONFIG_V3: &str =
+    "application/vnd.hyperlight.snapshot.config.v3+json";
+pub(in crate::sandbox::snapshot) const MT_PROCESS_CONFIG_CURRENT: &str = MT_CONFIG_V3;
 pub(in crate::sandbox::snapshot) const MT_SNAPSHOT_V1: &str =
     "application/vnd.hyperlight.snapshot.memory.v1";
 pub(in crate::sandbox::snapshot) const MT_SNAPSHOT_CURRENT: &str = MT_SNAPSHOT_V1;

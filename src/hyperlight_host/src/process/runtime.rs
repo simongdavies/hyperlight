@@ -600,7 +600,7 @@ impl Runtime {
     }
 
     /// Cancels in-flight calls before taking the ownership lock for bounded cleanup.
-    pub(super) fn stop(&self) -> Result<()> {
+    pub(crate) fn stop(&self) -> Result<()> {
         self.stopped.store(true, Ordering::Release);
         self.cancel
             .lock()

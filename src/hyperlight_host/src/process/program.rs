@@ -732,6 +732,8 @@ pub struct ProcessDefinition {
     functions: Vec<FunctionContractDefinition>,
     #[serde(default)]
     windows_sandbox_host_policy: super::WindowsSandboxHostPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    windows_cpu_rate_limit_percent: Option<u8>,
 }
 
 impl ProcessDefinition {
@@ -750,6 +752,7 @@ impl ProcessDefinition {
             profile: profile.controls.iter().map(Into::into).collect(),
             functions,
             windows_sandbox_host_policy: super::WindowsSandboxHostPolicy::default(),
+            windows_cpu_rate_limit_percent: profile.windows_cpu_rate_percent(),
         };
         definition.validate()?;
         Ok(definition)
@@ -781,17 +784,26 @@ impl ProcessDefinition {
 
     /// Declared OS restrictions, for the launcher's enforcement decision.
     pub fn profile(&self) -> super::ProcessProfile {
-        super::ProcessProfile::new(self.profile.iter().map(|request| super::RequestedControl {
-            control: match request.control {
-                ControlDefinition::MemoryLimit(bytes) => super::ProcessControl::MemoryLimit(bytes),
-                ControlDefinition::CpuBudget { quota, period } => {
-                    super::ProcessControl::CpuBudget { quota, period }
-                }
-                ControlDefinition::DenyNetwork => super::ProcessControl::DenyNetwork,
-                ControlDefinition::DenyChildProcesses => super::ProcessControl::DenyChildProcesses,
-            },
-            required: request.required,
-        }))
+        let profile = super::ProcessProfile::new(self.profile.iter().map(|request| {
+            super::RequestedControl {
+                control: match request.control {
+                    ControlDefinition::MemoryLimit(bytes) => {
+                        super::ProcessControl::MemoryLimit(bytes)
+                    }
+                    ControlDefinition::CpuBudget { quota, period } => {
+                        super::ProcessControl::CpuBudget { quota, period }
+                    }
+                    ControlDefinition::DenyNetwork => super::ProcessControl::DenyNetwork,
+                    ControlDefinition::DenyChildProcesses => {
+                        super::ProcessControl::DenyChildProcesses
+                    }
+                },
+                required: request.required,
+            }
+        }));
+        let mut profile = profile;
+        profile.windows_cpu_rate_limit_percent = self.windows_cpu_rate_limit_percent;
+        profile
     }
 
     /// Contracts owned by this worker. Empty for a dedicated sandbox host.
@@ -824,14 +836,24 @@ pub struct ProcessTopologyDefinition {
 }
 
 impl ProcessTopologyDefinition {
+    pub(crate) fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
     /// Checks exact ownership without opening any referenced program.
     pub fn new(
         sandbox: Option<ProcessDefinition>,
         mut workers: Vec<ProcessDefinition>,
     ) -> Result<Self> {
         workers.sort_by(|a, b| a.name.cmp(&b.name));
+        let schema_version = u32::from(
+            sandbox
+                .iter()
+                .chain(&workers)
+                .any(|process| process.windows_cpu_rate_limit_percent.is_some()),
+        ) + 1;
         let definition = Self {
-            schema_version: 1,
+            schema_version,
             sandbox,
             workers,
         };
@@ -864,8 +886,18 @@ impl ProcessTopologyDefinition {
 
     /// Validates untrusted parsed declarations without resolving artifacts.
     pub fn validate(&self) -> Result<()> {
-        if self.schema_version != 1 {
+        if !matches!(self.schema_version, 1 | 2) {
             return Err(new_error!("Unsupported process topology schema"));
+        }
+        let has_cpu_rate = self
+            .sandbox
+            .iter()
+            .chain(&self.workers)
+            .any(|process| process.windows_cpu_rate_limit_percent.is_some());
+        if self.schema_version == 1 && has_cpu_rate {
+            return Err(new_error!(
+                "Process topology schema 1 cannot contain a Windows CPU rate limit"
+            ));
         }
         if self.sandbox.is_none() && self.workers.is_empty() {
             return Err(new_error!("A process topology must declare a process"));
@@ -895,9 +927,9 @@ impl ProcessTopologyDefinition {
         }
         for worker in &self.workers {
             worker.validate()?;
-            if worker.windows_sandbox_host_policy == super::WindowsSandboxHostPolicy::Trusted {
+            if worker.windows_sandbox_host_policy.is_windows_vm_host() {
                 return Err(new_error!(
-                    "Trusted Windows sandbox-host policy cannot be used by function workers"
+                    "Windows VM-host policy cannot be used by function workers"
                 ));
             }
             if !processes.insert(&worker.name) || worker.functions.is_empty() {

@@ -190,6 +190,7 @@ required-features = ["process-isolation"]
 name = "process_placement"
 path = "tests/fixtures/process_placement.rs"
 required-features = ["process-isolation"]
+test = true
 
 [[example]]
 name = "isolation_bench"

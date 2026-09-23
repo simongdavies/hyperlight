@@ -99,6 +99,51 @@ pub struct ProcessReport {
     pub controls: Vec<ControlOutcome>,
 }
 
+impl ProcessReport {
+    /// Plain-language description of the effective OS boundary.
+    pub fn effective_isolation(&self) -> &'static str {
+        #[cfg(target_os = "windows")]
+        {
+            if self.role == ProgramRole::SandboxHost
+                && self.controls.iter().any(|outcome| {
+                    matches!(
+                        &outcome.result,
+                        ControlResult::Applied { mechanism, .. }
+                            if mechanism.contains(super::WINDOWS_VM_HOST_MECHANISM)
+                    )
+                })
+            {
+                "Ordinary non-elevated Windows VM host outside AppContainer. AppContainer filesystem and network isolation do not apply"
+            } else {
+                "Windows AppContainer with an empty capability allowlist"
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            "Linux namespaces, seccomp, Landlock, delegated cgroup limits and private immutable staging"
+        }
+        #[cfg(target_os = "macos")]
+        {
+            "Native process placement is unsupported on macOS"
+        }
+    }
+
+    /// Effective Windows Job Object CPU cap as aggregate host capacity.
+    pub fn windows_cpu_rate_limit_percent(&self) -> Option<u8> {
+        self.controls.iter().find_map(|outcome| {
+            let ControlResult::Applied { mechanism, .. } = &outcome.result else {
+                return None;
+            };
+            let value = mechanism
+                .split_once(super::WINDOWS_CPU_RATE_MECHANISM)?
+                .1
+                .split('%')
+                .next()?;
+            value.parse().ok()
+        })
+    }
+}
+
 pub(crate) trait ProcessGuard: Send + Sync {
     /// A pending native birth prevents fallback resource deletion.
     fn start_launch(&self);

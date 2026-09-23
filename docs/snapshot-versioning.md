@@ -26,7 +26,8 @@ A snapshot carries three independently evolvable version markers:
 * **Config schema**, `MT_CONFIG_V1`
   (`application/vnd.hyperlight.snapshot.config.v1+json`), aliased as
   `MT_CONFIG_CURRENT` for snapshots without native process definitions.
-  Process-aware snapshots use `MT_CONFIG_V2`, aliased as
+  Process-aware snapshots without Windows CPU-rate policy use `MT_CONFIG_V2`.
+  Topology schema 2 snapshots use `MT_CONFIG_V3`, aliased as
   `MT_PROCESS_CONFIG_CURRENT`. This is the JSON shape of the config blob:
   field names, types, required vs optional, the descriptors the loader
   needs in order to reconstruct the sandbox (memory sizes, buffer
@@ -52,17 +53,20 @@ Record compatibility paths here when a future hard snapshot break can remove
 them.
 
 Config v1 retains its JSON shape and omits `process_topology`, including when
-`process-isolation` is enabled. Config v2 requires a valid topology and an enabled
-process loader. Older or feature-disabled loaders reject its media type rather
-than silently discarding native ownership. The writer selects the schema from
-the presence of process definitions, not from the feature flag alone.
+`process-isolation` is enabled. Config v2 requires topology schema 1. Config v3
+requires topology schema 2 and can record a Windows CPU-rate policy. Both
+process schemas require an enabled process loader. Older or feature-disabled
+loaders reject their media types rather than silently discarding native
+ownership. The writer selects the schema from the topology, not the feature
+flag alone.
 
 This config extension preserves guest memory ABI 3 and memory encoding v1.
-The nested topology has its own `schema_version: 1`. Referenced native program
-configs also have `schema_version: 1`. These identify definition formats, not
-guest memory layouts or running-process state. Unsupported versions are rejected.
-Changing their serialized shape requires an explicit version/compatibility
-decision and updated schema pins.
+The nested topology uses `schema_version: 1` without Windows CPU-rate policy and
+`schema_version: 2` with it. Referenced native program configs retain
+`schema_version: 1`. These identify definition formats, not guest memory layouts
+or running-process state. Unsupported versions are rejected. Changing their
+serialized shape requires an explicit version/compatibility decision and
+updated schema pins.
 
 ## Enforcement
 

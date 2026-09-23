@@ -331,6 +331,110 @@ fn trusted_windows_policy_round_trip_records_only_a_request() {
 }
 
 #[test]
+fn trusted_remains_an_importable_enum_variant() {
+    use WindowsSandboxHostPolicy::Trusted;
+
+    let policy = Trusted;
+    assert!(matches!(policy, Trusted));
+}
+
+#[test]
+fn trusted_remains_available_through_a_variant_glob() {
+    use WindowsSandboxHostPolicy::*;
+
+    let policy = Trusted;
+    assert!(matches!(policy, Trusted));
+    assert!(!matches!(AppContainer, Trusted));
+}
+
+#[test]
+fn duplicate_windows_cpu_rate_controls_fail_closed() {
+    let profile = ProcessProfile::new([RequestedControl {
+        control: ProcessControl::MemoryLimit(1),
+        required: true,
+    }])
+    .windows_cpu_rate_limit_percent(50)
+    .unwrap();
+    assert!(
+        profile
+            .windows_cpu_rate_limit_percent(25)
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate Windows CPU rate")
+    );
+}
+
+#[test]
+fn windows_cpu_rate_supplements_a_required_process_control() {
+    let profile = ProcessProfile::new([])
+        .windows_cpu_rate_limit_percent(50)
+        .unwrap();
+    assert!(
+        profile
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("supplements those controls")
+    );
+}
+
+#[test]
+fn windows_vm_host_policy_round_trip_and_one_step_builder() {
+    let definition = sandbox_definition(WindowsSandboxHostPolicy::WindowsVmHost);
+    let json = serde_json::to_value(&definition).unwrap();
+    assert_eq!(json["sandbox"]["windows_sandbox_host_policy"], "trusted");
+    let parsed: program::ProcessTopologyDefinition = serde_json::from_value(json).unwrap();
+    assert!(
+        parsed
+            .sandbox()
+            .unwrap()
+            .windows_sandbox_host_policy()
+            .is_windows_vm_host()
+    );
+    let mut alias = serde_json::to_value(&definition).unwrap();
+    alias["sandbox"]["windows_sandbox_host_policy"] = "windows_vm_host".into();
+    let parsed_alias: program::ProcessTopologyDefinition = serde_json::from_value(alias).unwrap();
+    assert_eq!(
+        parsed_alias
+            .sandbox()
+            .unwrap()
+            .windows_sandbox_host_policy(),
+        WindowsSandboxHostPolicy::WindowsVmHost
+    );
+    let captured = SandboxBuilder::from_bytes([])
+        .windows_vm_host_process(options("sandbox"))
+        .process_topology();
+    if cfg!(target_os = "windows") {
+        assert_eq!(captured.unwrap(), Some(definition));
+    } else {
+        assert!(
+            captured
+                .unwrap_err()
+                .to_string()
+                .contains("supported only on Windows")
+        );
+    }
+}
+
+#[test]
+fn compatibility_vm_host_names_still_compile_and_authorize() {
+    let builder = SandboxBuilder::from_bytes([])
+        .allow_trusted_windows_sandbox_host()
+        .sandbox_process(
+            options("sandbox").windows_sandbox_host_policy(WindowsSandboxHostPolicy::Trusted),
+        );
+    let captured = builder.process_topology();
+    if cfg!(target_os = "windows") {
+        assert_eq!(
+            captured.unwrap(),
+            Some(sandbox_definition(WindowsSandboxHostPolicy::Trusted))
+        );
+    } else {
+        assert!(captured.is_err());
+    }
+}
+
+#[test]
 fn declared_trusted_windows_host_requires_runtime_permission_before_launch() {
     let builder = SandboxBuilder::from_bytes([]).sandbox_process(
         options("sandbox").windows_sandbox_host_policy(WindowsSandboxHostPolicy::Trusted),
@@ -345,7 +449,7 @@ fn declared_trusted_windows_host_requires_runtime_permission_before_launch() {
 fn required_app_container_rejects_trusted_snapshot_placement() {
     let saved = sandbox_definition(WindowsSandboxHostPolicy::Trusted);
     let mut topology = Topology {
-        allow_trusted_windows_sandbox_host: true,
+        allow_windows_vm_host: true,
         ..Default::default()
     };
     topology.sandbox(
@@ -369,7 +473,7 @@ fn permission_preserves_app_container_and_empty_placement() {
     let expected = sandbox_definition(WindowsSandboxHostPolicy::AppContainer);
     assert_eq!(captured, expected);
     let topology = Topology {
-        allow_trusted_windows_sandbox_host: true,
+        allow_windows_vm_host: true,
         ..Default::default()
     };
     assert_eq!(
@@ -411,7 +515,7 @@ fn trusted_windows_worker_is_rejected_even_with_permission() {
             .contains("cannot be used by function workers")
     );
     let permitted = Topology {
-        allow_trusted_windows_sandbox_host: true,
+        allow_windows_vm_host: true,
         ..Default::default()
     };
     assert!(
@@ -429,7 +533,7 @@ fn trusted_windows_worker_is_rejected_even_with_permission() {
 fn trusted_windows_snapshot_needs_permission_on_each_build() {
     let saved = sandbox_definition(WindowsSandboxHostPolicy::Trusted);
     let topology = Topology {
-        allow_trusted_windows_sandbox_host: true,
+        allow_windows_vm_host: true,
         ..Default::default()
     };
     assert_eq!(
@@ -466,7 +570,7 @@ fn trusted_windows_snapshot_needs_permission_on_each_build() {
 fn trusted_windows_host_is_rejected_on_other_platforms() {
     let saved = sandbox_definition(WindowsSandboxHostPolicy::Trusted);
     let topology = Topology {
-        allow_trusted_windows_sandbox_host: true,
+        allow_windows_vm_host: true,
         ..Default::default()
     };
     let error = topology

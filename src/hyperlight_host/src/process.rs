@@ -6,27 +6,26 @@
 //! Process launching requires a supported containment backend. Unsupported
 //! configurations fail without running guest code.
 //!
-//! # Windows sandbox-host trust
+//! # Windows VM hosts
 //!
-//! AppContainer is the default. A trusted sandbox-host retains VM isolation and
-//! job limits, but has no AppContainer filesystem or network boundary. It is not
-//! isolated from the calling process or other trusted same-user processes.
-//! Host-function processes remain confined.
+//! AppContainer is the default. Windows Hypervisor Platform access can require
+//! the VM-owning sandbox host to run as an ordinary non-elevated process outside
+//! AppContainer. The VM host retains process separation and job limits, but has
+//! no AppContainer filesystem or network boundary. Function workers remain in
+//! separate AppContainers.
 //!
-//! Requesting trusted placement and authorizing it are separate actions:
+//! Applications select and authorize that boundary in one operation:
 //!
 //! ```no_run
-//! use hyperlight_host::{SandboxBuilder, process::{ProcessOptions, WindowsSandboxHostPolicy}};
+//! use hyperlight_host::{SandboxBuilder, process::ProcessOptions};
 //! # fn configure(builder: SandboxBuilder, options: ProcessOptions) -> SandboxBuilder {
-//! builder
-//!     .sandbox_process(options.windows_sandbox_host_policy(WindowsSandboxHostPolicy::Trusted))
-//!     .allow_trusted_windows_sandbox_host()
+//! builder.windows_vm_host_process(options)
 //! # }
 //! ```
 //!
 //! Every fresh reconstruction needs caller authorization. Snapshot metadata and
-//! program digests cannot grant it. Required network denial fails in trusted
-//! mode. Optional network denial is reported as not applied.
+//! program digests cannot grant it. Required network denial fails for a Windows
+//! VM host. Optional network denial is reported as not applied.
 //!
 //! A separate Windows sandbox-host runs one VM with surrogates disabled.
 //! Calling-process defaults and environment remain unchanged.
@@ -68,6 +67,10 @@ use hyperlight_common::flatbuffer_wrappers::function_types::{ParameterType, Retu
 use crate::func::{HostFunction, ParameterTuple, SupportedReturnType};
 use crate::{HostFunctions, Result, new_error};
 
+#[cfg(target_os = "windows")]
+const WINDOWS_VM_HOST_MECHANISM: &str = "Ordinary non-elevated Windows VM host";
+const WINDOWS_CPU_RATE_MECHANISM: &str = "Windows Job Object hard CPU rate: ";
+
 mod launch;
 #[cfg(target_os = "linux")]
 mod linux;
@@ -96,17 +99,56 @@ pub(crate) use sandbox::{SandboxProcess, SandboxSource, SnapshotImage};
 pub use transport::ProcessStartup;
 
 /// Requested Windows sandbox-host containment. Runtime permission is separate.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum WindowsSandboxHostPolicy {
     /// Requires AppContainer containment.
     #[default]
     AppContainer,
-    /// Runs a trusted same-user sandbox host outside AppContainer on Windows.
+    /// Runs a VM-owning sandbox host outside AppContainer on Windows.
     ///
-    /// Job and resource limits remain. There is no AppContainer filesystem or
-    /// network boundary. Function workers and non-Windows hosts cannot use this.
+    /// This is compatible with Windows Hypervisor Platform. Job and resource
+    /// limits remain. There is no AppContainer filesystem or network boundary.
+    /// Function workers and non-Windows hosts cannot use this.
     Trusted,
+}
+
+impl serde::Serialize for WindowsSandboxHostPolicy {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(match self {
+            Self::AppContainer => "app_container",
+            Self::Trusted => "trusted",
+        })
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for WindowsSandboxHostPolicy {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match <String as serde::Deserialize>::deserialize(deserializer)?.as_str() {
+            "app_container" => Ok(Self::AppContainer),
+            "trusted" => Ok(Self::Trusted),
+            "windows_vm_host" => Ok(Self::Trusted),
+            value => Err(serde::de::Error::unknown_variant(
+                value,
+                &["app_container", "trusted", "windows_vm_host"],
+            )),
+        }
+    }
+}
+
+impl WindowsSandboxHostPolicy {
+    /// Plain-language name for the legacy [`Self::Trusted`] variant.
+    #[allow(non_upper_case_globals)]
+    pub const WindowsVmHost: Self = Self::Trusted;
+
+    pub(crate) fn is_windows_vm_host(self) -> bool {
+        self == Self::Trusted
+    }
 }
 
 /// A trusted declaration about repeating a function's effects.
@@ -205,6 +247,7 @@ pub struct RequestedControl {
 #[derive(Clone, Debug)]
 pub struct ProcessProfile {
     controls: Vec<RequestedControl>,
+    windows_cpu_rate_limit_percent: Option<u8>,
 }
 
 impl ProcessProfile {
@@ -212,12 +255,36 @@ impl ProcessProfile {
     pub fn new(controls: impl IntoIterator<Item = RequestedControl>) -> Self {
         Self {
             controls: controls.into_iter().collect(),
+            windows_cpu_rate_limit_percent: None,
         }
+    }
+
+    /// Adds a Windows Job Object CPU cap to a profile with required controls.
+    ///
+    /// The percentage is aggregate processor capacity available to the host.
+    /// Other platforms reject this Windows-specific profile setting.
+    pub fn windows_cpu_rate_limit_percent(mut self, percent: u8) -> Result<Self> {
+        if self.windows_cpu_rate_limit_percent.is_some() {
+            return Err(new_error!(
+                "A process profile contains duplicate Windows CPU rate controls"
+            ));
+        }
+        if !(1..=100).contains(&percent) {
+            return Err(new_error!("CPU rate limit must be 1 through 100 percent"));
+        }
+        self.windows_cpu_rate_limit_percent = Some(percent);
+        Ok(self)
+    }
+
+    pub(crate) fn windows_cpu_rate_percent(&self) -> Option<u8> {
+        self.windows_cpu_rate_limit_percent
     }
 
     fn validate(&self) -> Result<()> {
         if !self.controls.iter().any(|control| control.required) {
-            return Err(new_error!("A process profile needs required restrictions"));
+            return Err(new_error!(
+                "A process profile needs a required process control; the Windows CPU rate setting supplements those controls"
+            ));
         }
         let mut kinds = std::collections::HashSet::new();
         for request in &self.controls {
@@ -235,6 +302,9 @@ impl ProcessProfile {
                 }
                 _ => {}
             }
+        }
+        if matches!(self.windows_cpu_rate_limit_percent, Some(0 | 101..)) {
+            return Err(new_error!("CPU rate limit must be 1 through 100 percent"));
         }
         Ok(())
     }
@@ -287,9 +357,18 @@ impl ProcessOptions {
         Self::new(name, program, profile)
     }
 
-    /// Records a containment request. Trusted mode also needs builder permission.
+    /// Records a containment request. A Windows VM host also needs builder permission.
     pub fn windows_sandbox_host_policy(mut self, policy: WindowsSandboxHostPolicy) -> Self {
         self.windows_sandbox_host_policy = policy;
+        self
+    }
+
+    /// Selects the ordinary non-elevated Windows VM-host boundary.
+    ///
+    /// Use [`crate::SandboxBuilder::windows_vm_host_process`] to authorize and
+    /// configure a new VM host in one operation.
+    pub fn windows_vm_host(mut self) -> Self {
+        self.windows_sandbox_host_policy = WindowsSandboxHostPolicy::Trusted;
         self
     }
 
@@ -412,7 +491,7 @@ pub(crate) struct Topology {
     pub(crate) provider: Option<MeshProcessProvider>,
     pub(crate) programs: Option<(program::LocalProgramStore, program::ProgramTarget)>,
     pub(crate) restart_policy: RestartPolicy,
-    pub(crate) allow_trusted_windows_sandbox_host: bool,
+    pub(crate) allow_windows_vm_host: bool,
     #[cfg(target_os = "linux")]
     pub(crate) linux_resources: Option<LinuxProcessResources>,
 }
@@ -514,17 +593,20 @@ impl Topology {
 
     fn authorize(&self, definition: &program::ProcessTopologyDefinition) -> Result<()> {
         definition.validate()?;
-        if definition.sandbox().is_some_and(|sandbox| {
-            sandbox.windows_sandbox_host_policy() == WindowsSandboxHostPolicy::Trusted
-        }) {
-            if !self.allow_trusted_windows_sandbox_host {
+        if definition
+            .sandbox()
+            .is_some_and(|sandbox| sandbox.windows_sandbox_host_policy().is_windows_vm_host())
+        {
+            if !self.allow_windows_vm_host {
                 return Err(new_error!(
-                    "Trusted Windows sandbox host requires explicit runtime permission"
+                    "Windows VM host requires explicit runtime permission. Use \
+                     SandboxBuilder::windows_vm_host_process for a new sandbox or \
+                     SandboxBuilder::allow_windows_vm_host when loading a snapshot"
                 ));
             }
             if !cfg!(target_os = "windows") {
                 return Err(new_error!(
-                    "Trusted Windows sandbox host is supported only on Windows"
+                    "Windows VM host process placement is supported only on Windows"
                 ));
             }
         }

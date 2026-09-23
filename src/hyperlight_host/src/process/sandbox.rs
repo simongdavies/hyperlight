@@ -1087,7 +1087,7 @@ impl SandboxProcess {
         );
         self.apply(response)
     }
-    fn cleanup(&mut self) -> Result<()> {
+    pub(crate) fn cleanup(&mut self) -> Result<()> {
         if self.cleanup_complete {
             return Ok(());
         }
@@ -1111,6 +1111,7 @@ impl SandboxProcess {
             self.guard.as_ref(),
             deadline,
         ))?;
+        self._workers.stop()?;
         self.cleanup_complete = true;
         Ok(())
     }

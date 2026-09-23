@@ -840,3 +840,14 @@ fn dedicated_failed_domain_cleanup_forbids_replacement() {
     );
     launcher.fail_empty.store(false, Ordering::Release);
 }
+
+#[test]
+fn dedicated_shutdown_reports_cleanup_failure() {
+    let directory = tempfile::tempdir().unwrap();
+    let (topology, launcher) = dedicated_fixture(directory.path(), "", Idempotency::Idempotent);
+    let mut sandbox = launch_dedicated(topology, launcher.clone(), source());
+    launcher.fail_empty.store(true, Ordering::Release);
+    assert!(sandbox.shutdown().is_err());
+    launcher.fail_empty.store(false, Ordering::Release);
+    sandbox.shutdown().unwrap();
+}

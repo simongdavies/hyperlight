@@ -608,6 +608,8 @@ mod placement {
         Value::Array(sandbox.process_reports().iter().map(|report| {
             json!({
                 "role": report.role, "name": report.name, "root_process_id": report.root_process_id,
+                "isolation": report.effective_isolation(),
+                "windows_cpu_rate_limit_percent": report.windows_cpu_rate_limit_percent(),
                 "program_manifest_sha256": report.program.digest().to_string(),
                 "controls": report.controls.iter().map(|outcome| {
                     let result = match &outcome.result {

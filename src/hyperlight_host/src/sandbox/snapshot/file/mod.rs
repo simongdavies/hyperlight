@@ -26,8 +26,8 @@ use self::media_types::{
     ANNOTATION_ARCH, ANNOTATION_CPU, ANNOTATION_HYPERVISOR, ANNOTATION_REF_NAME,
 };
 pub(super) use self::media_types::{
-    MT_CONFIG_CURRENT, MT_CONFIG_V1, MT_CONFIG_V2, MT_PROCESS_CONFIG_CURRENT, MT_SNAPSHOT_CURRENT,
-    MT_SNAPSHOT_V1, SNAPSHOT_ABI_VERSION,
+    MT_CONFIG_CURRENT, MT_CONFIG_V1, MT_CONFIG_V2, MT_CONFIG_V3, MT_PROCESS_CONFIG_CURRENT,
+    MT_SNAPSHOT_CURRENT, MT_SNAPSHOT_V1, SNAPSHOT_ABI_VERSION,
 };
 use self::reference::{OciDigest, OciReference, OciTag};
 use super::{NextAction, Snapshot};
@@ -544,10 +544,20 @@ impl Snapshot {
         let snapshot_digest = Digest256::from_bytes(memory_bytes);
         put_blob_if_absent(&blobs_dir, &snapshot_digest, memory_bytes)?;
 
-        let config_media = if cfg.process_topology.is_some() {
-            MT_PROCESS_CONFIG_CURRENT
-        } else {
-            MT_CONFIG_CURRENT
+        let config_media = match cfg
+            .process_topology
+            .as_ref()
+            .and_then(|topology| topology["schema_version"].as_u64())
+        {
+            None => MT_CONFIG_CURRENT,
+            Some(1) => MT_CONFIG_V2,
+            Some(2) => MT_PROCESS_CONFIG_CURRENT,
+            Some(version) => {
+                return Err(crate::new_error!(
+                    "Unsupported process topology schema {}",
+                    version
+                ));
+            }
         };
 
         // Config blob.
@@ -797,10 +807,10 @@ impl Snapshot {
         match cfg_media.as_str() {
             MT_CONFIG_V1 => {}
             #[cfg(feature = "process-isolation")]
-            MT_CONFIG_V2 => {}
+            MT_CONFIG_V2 | MT_CONFIG_V3 => {}
             other => {
                 let supported: &[&str] = if cfg!(feature = "process-isolation") {
-                    &[MT_CONFIG_V1, MT_CONFIG_V2]
+                    &[MT_CONFIG_V1, MT_CONFIG_V2, MT_CONFIG_V3]
                 } else {
                     &[MT_CONFIG_V1]
                 };
@@ -855,7 +865,7 @@ impl Snapshot {
 
         // 4. config blob
         let cfg = load_config(&blobs_dir, cfg_desc, verify_blobs)?;
-        if (cfg_media == MT_CONFIG_V2) != cfg.process_topology.is_some() {
+        if (cfg_media != MT_CONFIG_V1) != cfg.process_topology.is_some() {
             return Err(crate::new_error!(
                 "Snapshot config media type and process topology disagree"
             ));
@@ -868,6 +878,13 @@ impl Snapshot {
                     serde_json::from_value(value).map_err(|e| {
                         crate::new_error!("Invalid snapshot process topology: {}", e)
                     })?;
+                let expected_schema = if cfg_media == MT_CONFIG_V2 { 1 } else { 2 };
+                if topology.schema_version() != expected_schema {
+                    return Err(crate::new_error!(
+                        "Snapshot config media type requires process topology schema {}",
+                        expected_schema
+                    ));
+                }
                 topology.validate()?;
                 Ok::<_, crate::HyperlightError>(topology)
             })

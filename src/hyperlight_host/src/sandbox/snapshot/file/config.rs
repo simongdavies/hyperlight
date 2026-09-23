@@ -153,7 +153,8 @@ impl CpuVendor {
 
 /// Top-level Hyperlight snapshot config JSON. Lives at
 /// `blobs/sha256/<config-digest>` with media type
-/// config v1 without process definitions, or config v2 with them.
+/// config v1 without process definitions, config v2 with topology schema 1,
+/// or config v3 with topology schema 2.
 ///
 /// In OCI terms this is the "image config" blob that the manifest's
 /// `config` descriptor points to. It describes the accompanying

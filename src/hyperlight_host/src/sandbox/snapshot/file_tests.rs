@@ -72,6 +72,20 @@ mod program_exports {
         .unwrap()
     }
 
+    fn cpu_rate_definition(artifact: ProgramArtifact) -> ProcessTopologyDefinition {
+        let profile = ProcessProfile::new([RequestedControl {
+            control: ProcessControl::DenyChildProcesses,
+            required: true,
+        }])
+        .windows_cpu_rate_limit_percent(50)
+        .unwrap();
+        ProcessTopologyDefinition::new(
+            Some(ProcessDefinition::new("sandbox", artifact, &profile, Vec::new()).unwrap()),
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
     fn package(store: &LocalProgramStore) -> ProgramArtifact {
         store
             .package(
@@ -185,7 +199,7 @@ mod program_exports {
     }
 
     #[test]
-    fn process_config_rejects_unknown_topology_version() {
+    fn process_config_rejects_topology_version_media_mismatch() {
         let source = tempfile::tempdir().unwrap();
         let store = LocalProgramStore::new(source.path());
         let snapshot = Arc::try_unwrap(create_snapshot())
@@ -197,14 +211,39 @@ mod program_exports {
         let tag = OciTag::new("future-topology").unwrap();
         snapshot.save(target.path(), &tag).unwrap();
         rewrite_config(target.path(), |config| {
-            config["process_topology"]["schema_version"] = 2.into();
+            config["process_topology"]["schema_version"] = 3.into();
         });
         let error = unwrap_err_snapshot(Snapshot::checked_load(target.path(), tag));
         assert!(
             error
                 .to_string()
-                .contains("Unsupported process topology schema"),
+                .contains("config media type requires process topology schema 1"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn cpu_rate_uses_process_config_v3_and_round_trips() {
+        let source = tempfile::tempdir().unwrap();
+        let store = LocalProgramStore::new(source.path());
+        let topology = cpu_rate_definition(package(&store));
+        let snapshot = Arc::try_unwrap(create_snapshot())
+            .ok()
+            .unwrap()
+            .with_process_topology(topology.clone())
+            .unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let tag = OciTag::new("cpu-rate-v3").unwrap();
+        let digest = snapshot.save(target.path(), &tag).unwrap();
+        assert_eq!(
+            find_config_media_type(target.path()),
+            crate::sandbox::snapshot::file::MT_CONFIG_V3
+        );
+        assert_eq!(
+            Snapshot::checked_load(target.path(), digest)
+                .unwrap()
+                .process_topology(),
+            Some(&topology)
         );
     }
 }
@@ -308,7 +347,7 @@ fn future_process_config_version_is_rejected() {
     let tag = OciTag::new("future-config").unwrap();
     create_snapshot().save(target.path(), &tag).unwrap();
     rewrite_manifest(target.path(), |manifest| {
-        let media = "application/vnd.hyperlight.snapshot.config.v3+json";
+        let media = "application/vnd.hyperlight.snapshot.config.v4+json";
         manifest["config"]["mediaType"] = media.into();
         manifest["artifactType"] = media.into();
     });
@@ -321,6 +360,11 @@ fn future_process_config_version_is_rejected() {
     assert!(message.contains(super::file::MT_CONFIG_V1), "{message}");
     assert_eq!(
         message.contains(super::file::MT_CONFIG_V2),
+        cfg!(feature = "process-isolation"),
+        "{message}"
+    );
+    assert_eq!(
+        message.contains(super::file::MT_CONFIG_V3),
         cfg!(feature = "process-isolation"),
         "{message}"
     );
@@ -354,6 +398,19 @@ fn find_config_blob(oci_dir: &std::path::Path) -> std::path::PathBuf {
         .strip_prefix("sha256:")
         .unwrap();
     oci_dir.join("blobs").join("sha256").join(cfg_digest)
+}
+
+fn find_config_media_type(oci_dir: &std::path::Path) -> String {
+    let index: Value =
+        serde_json::from_slice(&std::fs::read(oci_dir.join("index.json")).unwrap()).unwrap();
+    let manifest_digest = index["manifests"][0]["digest"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("sha256:")
+        .unwrap();
+    let manifest_path = oci_dir.join("blobs").join("sha256").join(manifest_digest);
+    let manifest: Value = serde_json::from_slice(&std::fs::read(manifest_path).unwrap()).unwrap();
+    manifest["config"]["mediaType"].as_str().unwrap().to_owned()
 }
 
 /// Locate the snapshot (layer 0) blob inside `oci_dir`.

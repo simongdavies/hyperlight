@@ -297,15 +297,20 @@ impl SandboxBuilder {
         }
     }
 
-    /// Permits an explicitly requested trusted Windows sandbox host for this build.
+    /// Permits an explicitly requested Windows VM host for this build.
     ///
     /// The host runs as the same user without AppContainer filesystem or network
     /// containment. Job and resource limits remain. Snapshots never grant permission.
-    pub fn allow_trusted_windows_sandbox_host(mut self) -> Self {
+    pub fn allow_windows_vm_host(mut self) -> Self {
         self.topology
             .get_or_insert_with(Default::default)
-            .allow_trusted_windows_sandbox_host = true;
+            .allow_windows_vm_host = true;
         self
+    }
+
+    /// Compatibility name for [`Self::allow_windows_vm_host`].
+    pub fn allow_trusted_windows_sandbox_host(self) -> Self {
+        self.allow_windows_vm_host()
     }
 
     /// Supplies the Mesh/PAL capability that owns native process placement.
@@ -354,6 +359,22 @@ impl SandboxBuilder {
         self.topology
             .get_or_insert_with(Default::default)
             .sandbox(process);
+        self
+    }
+
+    /// Places the sandbox in a WHP-compatible ordinary Windows process.
+    ///
+    /// The process is non-elevated and outside AppContainer. Job controls,
+    /// strict handle inheritance and private staging remain. Filesystem and
+    /// network AppContainer isolation do not apply.
+    pub fn windows_vm_host_process(mut self, process: crate::process::ProcessOptions) -> Self {
+        self.topology
+            .get_or_insert_with(Default::default)
+            .allow_windows_vm_host = true;
+        self.topology
+            .as_mut()
+            .unwrap()
+            .sandbox(process.windows_vm_host());
         self
     }
 

@@ -12,10 +12,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   leave descendants or resources without a retained retry owner.
   Portable operation errors retain their variants across sandbox placements.
   The feature adds a `HyperlightError::ProcessCleanup` variant for retained owners.
-* Explicit trusted Windows sandbox-host policy with per-build authorization.
-  Host-function processes remain confined. Snapshot metadata cannot authorize trust.
+* Explicit WHP-compatible Windows VM-host policy and one-step builder API.
+  VM hosts use ordinary non-elevated processes with Job Object limits. Function
+  workers remain in AppContainers. Snapshot metadata cannot authorize VM hosts.
 * Process-aware snapshot config v2 retains the config v1 compatibility path.
-  Guest memory keeps ABI 3 and encoding v1. Loading v2 requires `process-isolation`.
+  Config v3 records Windows Job Object CPU-rate policy. Guest memory keeps ABI 3
+  and encoding v1. Loading either process schema requires `process-isolation`.
 * Linux `DenyChildProcesses` permits runtime threads through native `clone`.
   Process creation is denied. `clone3` returns `ENOSYS` for libc fallback.
 * `MeshProcessProvider` owns native program packaging and platform process

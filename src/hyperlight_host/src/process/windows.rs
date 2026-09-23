@@ -4,7 +4,7 @@
 //! Windows confinement resources, allocated before process creation.
 //!
 //! AppContainer is the default authority boundary. An explicitly authorized
-//! trusted sandbox-host has no AppContainer filesystem or network boundary.
+//! Windows VM host has no AppContainer filesystem or network boundary.
 //! Job limits account committed virtual
 //! memory, not resident memory. A Windows CPU rate has an OS-selected interval,
 //! so it cannot implement the public quota/period contract.
@@ -48,14 +48,17 @@ use windows_sys::Win32::Security::Isolation::{
 };
 use windows_sys::Win32::Security::{
     DACL_SECURITY_INFORMATION, FreeSid, GetSecurityDescriptorDacl, GetTokenInformation,
-    PROTECTED_DACL_SECURITY_INFORMATION, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    PROTECTED_DACL_SECURITY_INFORMATION, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER, TokenElevation,
+    TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_READ};
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::System::JobObjects::{
-    CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_JOB_MEMORY,
+    CreateJobObjectW, JOB_OBJECT_CPU_RATE_CONTROL_ENABLE, JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
+    JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_JOB_MEMORY,
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicAccountingInformation,
+    JOBOBJECT_CPU_RATE_CONTROL_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JobObjectBasicAccountingInformation, JobObjectCpuRateControlInformation,
     JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
     TerminateJobObject,
 };
@@ -169,6 +172,27 @@ fn current_user_sid() -> io::Result<String> {
     })?;
     // SAFETY: Successful TokenUser query initializes TOKEN_USER and its SID.
     sid_string(unsafe { (*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid })
+}
+
+fn current_process_is_elevated() -> io::Result<bool> {
+    let mut token = null_mut();
+    // SAFETY: Valid pseudo process handle and writable output pointer.
+    checked(unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) })?;
+    // SAFETY: OpenProcessToken transferred ownership of this handle.
+    let token = unsafe { OwnedHandle::from_raw_handle(token) };
+    let mut elevation = TOKEN_ELEVATION::default();
+    let mut length = size_of_val(&elevation) as u32;
+    // SAFETY: The output buffer matches TOKEN_ELEVATION.
+    checked(unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenElevation,
+            (&mut elevation as *mut TOKEN_ELEVATION).cast(),
+            length,
+            &mut length,
+        )
+    })?;
+    Ok(elevation.TokenIsElevated != 0)
 }
 
 /// One logical process owns this identity across its nonoverlapping generations.
@@ -287,7 +311,7 @@ impl WindowsPrincipals {
             .map(|definition| {
                 let principal = match definition.windows_sandbox_host_policy() {
                     WindowsSandboxHostPolicy::AppContainer => Some(Arc::new(AppContainer::new()?)),
-                    WindowsSandboxHostPolicy::Trusted => None,
+                    WindowsSandboxHostPolicy::WindowsVmHost => None,
                 };
                 Ok::<_, io::Error>((definition.name().to_owned(), principal))
             })
@@ -778,7 +802,11 @@ fn retry_image_removal(
 struct ConfinementJob(OwnedHandle);
 
 impl ConfinementJob {
-    fn new(memory: Option<usize>, deny_children: bool) -> io::Result<Self> {
+    fn new(
+        memory: Option<usize>,
+        cpu_rate_percent: Option<u8>,
+        deny_children: bool,
+    ) -> io::Result<Self> {
         // SAFETY: Null security attributes make the anonymous job non-inheritable.
         let raw = unsafe { CreateJobObjectW(null(), null()) };
         if raw.is_null() {
@@ -816,6 +844,32 @@ impl ConfinementJob {
                 "Windows did not apply the confinement job limits",
             ));
         }
+        if let Some(percent) = cpu_rate_percent {
+            let requested = u32::from(percent) * 100;
+            let mut cpu = JOBOBJECT_CPU_RATE_CONTROL_INFORMATION {
+                ControlFlags: JOB_OBJECT_CPU_RATE_CONTROL_ENABLE
+                    | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
+                ..Default::default()
+            };
+            cpu.Anonymous.CpuRate = requested;
+            // SAFETY: The job handle and exact CPU-rate structure are valid.
+            checked(unsafe {
+                SetInformationJobObject(
+                    job.0.as_raw_handle(),
+                    JobObjectCpuRateControlInformation,
+                    (&cpu as *const JOBOBJECT_CPU_RATE_CONTROL_INFORMATION).cast(),
+                    size_of_val(&cpu) as u32,
+                )
+            })?;
+            let applied = job.cpu_rate()?;
+            if applied.ControlFlags != cpu.ControlFlags
+                || unsafe { applied.Anonymous.CpuRate } != requested
+            {
+                return Err(io::Error::other(
+                    "Windows did not apply the requested hard CPU rate",
+                ));
+            }
+        }
         Ok(job)
     }
 
@@ -849,6 +903,21 @@ impl ConfinementJob {
         Ok(accounting.ActiveProcesses)
     }
 
+    fn cpu_rate(&self) -> io::Result<JOBOBJECT_CPU_RATE_CONTROL_INFORMATION> {
+        let mut rate = JOBOBJECT_CPU_RATE_CONTROL_INFORMATION::default();
+        // SAFETY: The output buffer matches JobObjectCpuRateControlInformation.
+        checked(unsafe {
+            QueryInformationJobObject(
+                self.0.as_raw_handle(),
+                JobObjectCpuRateControlInformation,
+                (&mut rate as *mut JOBOBJECT_CPU_RATE_CONTROL_INFORMATION).cast(),
+                size_of_val(&rate) as u32,
+                null_mut(),
+            )
+        })?;
+        Ok(rate)
+    }
+
     fn terminate(&self) -> io::Result<()> {
         // SAFETY: This job exclusively contains this worker and its descendants.
         checked(unsafe { TerminateJobObject(self.0.as_raw_handle(), 1) })
@@ -880,9 +949,10 @@ impl ConfinementJob {
 fn supported_limits(
     profile: &ProcessProfile,
     policy: WindowsSandboxHostPolicy,
-) -> Result<(Option<usize>, bool)> {
+) -> Result<(Option<usize>, Option<u8>, bool)> {
     profile.validate()?;
     let mut memory = None;
+    let cpu_rate_percent = profile.windows_cpu_rate_percent();
     let mut deny_children = false;
     for request in &profile.controls {
         match request.control {
@@ -892,11 +962,9 @@ fn supported_limits(
                 memory = Some(memory.map_or(bytes, |old: usize| old.min(bytes)));
             }
             ProcessControl::DenyChildProcesses => deny_children = true,
-            ProcessControl::DenyNetwork
-                if policy == WindowsSandboxHostPolicy::Trusted && request.required =>
-            {
+            ProcessControl::DenyNetwork if policy.is_windows_vm_host() && request.required => {
                 return Err(new_error!(
-                    "A trusted Windows sandbox-host cannot enforce required network denial"
+                    "A Windows VM host outside AppContainer cannot enforce required network denial"
                 ));
             }
             ProcessControl::DenyNetwork => {}
@@ -908,7 +976,7 @@ fn supported_limits(
             ProcessControl::CpuBudget { .. } => {}
         }
     }
-    Ok((memory, deny_children))
+    Ok((memory, cpu_rate_percent, deny_children))
 }
 
 /// Evidence is only reported as applied after the configured CreateProcess succeeds.
@@ -945,7 +1013,7 @@ impl WindowsResources {
     ) -> Result<Self> {
         let container = match definition.windows_sandbox_host_policy() {
             WindowsSandboxHostPolicy::AppContainer => Some(Arc::new(AppContainer::new()?)),
-            WindowsSandboxHostPolicy::Trusted => None,
+            WindowsSandboxHostPolicy::WindowsVmHost => None,
         };
         Self::with_container(definition, program, role, container)
     }
@@ -957,9 +1025,17 @@ impl WindowsResources {
         container: Option<Arc<AppContainer>>,
     ) -> Result<Self> {
         let policy = definition.windows_sandbox_host_policy();
-        let trusted = policy == WindowsSandboxHostPolicy::Trusted;
-        if (trusted && role != ProgramRole::SandboxHost) || trusted != container.is_none() {
+        let windows_vm_host = policy.is_windows_vm_host();
+        if (windows_vm_host && role != ProgramRole::SandboxHost)
+            || windows_vm_host != container.is_none()
+        {
             return Err(new_error!("Windows process policy and principal mismatch"));
+        }
+        if windows_vm_host && current_process_is_elevated()? {
+            return Err(new_error!(
+                "Windows VM hosts require a non-elevated controller process. \
+                 Start an ordinary PowerShell session and retry"
+            ));
         }
         if program.artifact().descriptor() != definition.program().descriptor()
             || program.config().role != role
@@ -978,9 +1054,9 @@ impl WindowsResources {
             return Err(new_error!("Windows program contract mismatch"));
         }
         let profile = definition.profile();
-        let (memory, deny_children) = supported_limits(&profile, policy)?;
+        let (memory, cpu_rate_percent, deny_children) = supported_limits(&profile, policy)?;
         let image = StagedImage::new(program, container.as_deref())?;
-        let job = ConfinementJob::new(memory, deny_children)?;
+        let job = ConfinementJob::new(memory, cpu_rate_percent, deny_children)?;
         #[cfg(test)]
         if let Some(container) = &container {
             // Query the retained real job before preparing its successor.
@@ -1006,10 +1082,19 @@ impl WindowsResources {
                 "AppContainer {} SID {}; empty capability allowlist; Mesh requires exact-SID IPC authorization; no inherited environment; null stdio; scoped read/execute image ACL; Windows AppContainer OS-resource baseline",
                 container.name, container.sid
             ),
-            None => "Trusted Windows sandbox-host outside AppContainer; no filesystem or network isolation; not a boundary against same-user processes; no inherited environment; null stdio".to_owned(),
+            None => format!(
+                "{} outside AppContainer; AppContainer filesystem and network isolation unavailable; caller network and same-user filesystem access remain; kill-on-close job; strict handle inheritance; private immutable staging; no inherited environment; null stdio",
+                super::WINDOWS_VM_HOST_MECHANISM
+            ),
         };
         if role == ProgramRole::SandboxHost {
             baseline.push_str("; one VM per process; HYPERLIGHT_MAX_SURROGATES=0");
+        }
+        if let Some(percent) = cpu_rate_percent {
+            baseline.push_str(&format!(
+                "; {}{percent}% of aggregate host processor capacity",
+                super::WINDOWS_CPU_RATE_MECHANISM
+            ));
         }
         let controls = profile.controls.into_iter().map(|requested| {
             let result = match requested.control {
@@ -1019,8 +1104,8 @@ impl WindowsResources {
                     "JOB_OBJECT_LIMIT_JOB_MEMORY: {} committed virtual-memory bytes across the job; not RSS",
                     memory.unwrap()
                 ) + "; " + &baseline },
-                ProcessControl::DenyNetwork if trusted => ControlResult::NotApplied {
-                    reason: "Trusted Windows sandbox-host runs outside AppContainer with the caller's network access".to_owned(),
+                ProcessControl::DenyNetwork if windows_vm_host => ControlResult::NotApplied {
+                    reason: "Windows VM host runs outside AppContainer with the caller's network access".to_owned(),
                 },
                 ProcessControl::DenyNetwork => ControlResult::Applied {
                     effective: ProcessControl::DenyNetwork,
@@ -1093,7 +1178,7 @@ impl WindowsResources {
             (WindowsSandboxHostPolicy::AppContainer, Some(container)) => {
                 builder.app_container(container.pal_sid()?.as_ref());
             }
-            (WindowsSandboxHostPolicy::Trusted, None) => {}
+            (WindowsSandboxHostPolicy::WindowsVmHost, None) => {}
             _ => {
                 return Err(io::Error::other(
                     "Windows process principal already cleaned",
@@ -1221,7 +1306,7 @@ pub(super) fn prepare(
         let sid = peer.pal_sid()?;
         config = match evidence.policy {
             WindowsSandboxHostPolicy::AppContainer => config.app_container_peer(sid.as_ref()),
-            WindowsSandboxHostPolicy::Trusted => {
+            WindowsSandboxHostPolicy::WindowsVmHost => {
                 config.trusted_host_app_container_peer(sid.as_ref())
             }
         };
@@ -1493,7 +1578,9 @@ mod tests {
         let definition = ProcessDefinition::new(
             "native-probe",
             artifact.clone(),
-            &ProcessProfile::new(controls),
+            &ProcessProfile::new(controls)
+                .windows_cpu_rate_limit_percent(50)
+                .unwrap(),
             config.functions.clone(),
         )
         .unwrap()
@@ -1531,6 +1618,11 @@ mod tests {
                 ..
             }
         ));
+        assert!(worker.evidence.controls.iter().any(|outcome| matches!(
+            &outcome.result,
+            ControlResult::Applied { mechanism, .. }
+                if mechanism.contains("50% of aggregate host processor capacity")
+        )));
         let mut builder = ProcessBuilder::new("unlaunched-fixture");
         worker.configure(&mut builder).unwrap();
         assert!(builder.app_container_sid().is_none());
@@ -1544,6 +1636,17 @@ mod tests {
         }]);
         assert!(supported_limits(&profile, WindowsSandboxHostPolicy::Trusted).is_err());
         assert!(supported_limits(&profile, WindowsSandboxHostPolicy::AppContainer).is_ok());
+    }
+
+    #[test]
+    fn hard_cpu_rate_is_applied_and_read_back() {
+        let job = ConfinementJob::new(None, Some(37), false).unwrap();
+        let rate = job.cpu_rate().unwrap();
+        assert_eq!(
+            rate.ControlFlags,
+            JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP
+        );
+        assert_eq!(unsafe { rate.Anonymous.CpuRate }, 3700);
     }
 
     #[test]
@@ -1774,7 +1877,7 @@ mod tests {
 
     #[test]
     fn empty_job_has_whole_tree_exit_evidence() {
-        let job = ConfinementJob::new(Some(64 * 1024 * 1024), true).unwrap();
+        let job = ConfinementJob::new(Some(64 * 1024 * 1024), Some(50), true).unwrap();
         assert_eq!(job.active_processes().unwrap(), 0);
         job.terminate_and_wait(Duration::from_secs(1)).unwrap();
     }
@@ -1823,7 +1926,7 @@ mod tests {
             .collect();
         assert_eq!(identities.len(), count);
         // This outer job owns the fixture and all its children, not production worker limits.
-        let job = ConfinementJob::new(None, false).unwrap();
+        let job = ConfinementJob::new(None, None, false).unwrap();
         let mut command = ProcessBuilder::new(format!("\"{}\" {mode}", fixture.display()));
         command
             .application_name(&fixture)

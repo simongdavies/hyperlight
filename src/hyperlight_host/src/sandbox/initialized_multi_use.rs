@@ -1345,6 +1345,19 @@ mod placement {
             }
         }
 
+        /// Stops every native process owned by this sandbox and verifies cleanup.
+        pub fn shutdown(&mut self) -> Result<()> {
+            match &mut self.placement {
+                Placement::Local(local) => {
+                    if let Some(runtime) = &local.process_runtime {
+                        runtime.stop()?;
+                    }
+                }
+                Placement::Process(process) => process.cleanup()?,
+            }
+            Ok(())
+        }
+
         #[cfg(all(test, target_os = "windows"))]
         pub(crate) fn terminate_worker_for_test(&self, index: usize) -> Result<()> {
             match &self.placement {

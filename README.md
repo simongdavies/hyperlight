@@ -72,8 +72,8 @@ See [docs/getting-started.md](./docs/getting-started.md) for detailed prerequisi
 - **Running** Hyperlight
 - **Building guests**
 
-For native process placement examples, see the
-[Ubuntu/WSL2 process-isolation quickstart](./dev/process-isolation/QUICKSTART.md).
+For Windows and Linux native process placement examples, see the
+[process-isolation quickstart](./dev/process-isolation/QUICKSTART.md).
 
 Or skip setup entirely with a codespace:
 

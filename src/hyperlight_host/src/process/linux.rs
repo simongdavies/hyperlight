@@ -713,6 +713,12 @@ pub(super) fn prepare(
 ) -> Result<PreparedProcess> {
     let profile = definition.profile();
     profile.validate()?;
+    if profile.windows_cpu_rate_percent().is_some() {
+        return Err(new_error!(
+            "Required Windows CPU rate control for '{}' is unavailable on Linux",
+            definition.name()
+        ));
+    }
     let domain = Domain::create(&resources.delegated_root)?;
     let mut controls = Vec::new();
     for request in &profile.controls {

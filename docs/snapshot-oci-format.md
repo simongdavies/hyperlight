@@ -79,11 +79,12 @@ controls. `save` writes references. `save_with_programs` also copies their
 validated program closure into the layout. Loading metadata does not launch
 programs.
 
-The writer selects `MT_PROCESS_CONFIG_CURRENT` (config v2) when process
-definitions are present. Without them it selects `MT_CONFIG_CURRENT` (config
-v1) and omits the extension, even in a feature-enabled build. Config v2 requires
-the process loader and topology schema 1. Native program configs use their own
-schema 1. Guest memory retains ABI 3 and encoding v1. See
+The writer selects config v2 for topology schema 1 and
+`MT_PROCESS_CONFIG_CURRENT` (config v3) for topology schema 2. Without process
+definitions it selects `MT_CONFIG_CURRENT` (config v1) and omits the extension,
+even in a feature-enabled build. Config v2 and v3 require the process loader.
+Topology schema 2 records Windows CPU-rate policy. Native program configs use
+their own schema 1. Guest memory retains ABI 3 and encoding v1. See
 [snapshot versioning](snapshot-versioning.md).
 
 Native callback and process state is outside the snapshot. In-place restore
