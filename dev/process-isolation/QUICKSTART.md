@@ -4,6 +4,63 @@ This example demonstrates Hyperlight sandbox and host-function placement through
 a Mesh/PAL process provider. Application code declares topology, typed contracts
 and `ProcessProfile` constraints. It does not construct platform launch resources.
 
+## Ubuntu 24.04 and WSL quickstart
+
+From a clone of this branch, run:
+
+```bash
+just check-constrained-process-config
+just install-constrained-process
+hyperlight-run check
+hyperlight-run demo
+hyperlight-run placement-demo
+hyperlight-run nested-demo
+hyperlight-run resource-demo
+hyperlight-run run -- /path/to/program arg1 arg2
+```
+
+`hyperlight-run demo` presents process placement, typed resource delegation and
+nested sandbox composition in one sequence. Use `--noninteractive` in
+automation. Interactive terminals use high-contrast yellow accents. Meaning is
+also carried by explicit labels, not colour alone. At each pause the launcher
+clears the clipboard, copies one compound inspection command, and holds the
+topology live while you paste into a second WSL terminal. Use `--no-color`,
+`NO_COLOR=1`, `--no-clipboard` or
+`HYPERLIGHT_DEMO_NO_CLIPBOARD=1` to disable those aids. Redirected and
+noninteractive output contains neither ANSI escapes nor clipboard effects. The
+named focused commands remain available. The matching `just` recipes are
+`demo-constrained-process`, `demo-nested-process`,
+`demo-constrained-process-resources` and `run-constrained-process`.
+
+The placement presentation uses four distinct modes. The two child-policy
+variants remain in qualification coverage but are omitted from the demo because
+they do not add a distinct visible topology. Mode 1, `LOCAL`, is Hyperlight's
+ordinary in-process behavior today.
+The launcher runs it directly. The application/controller, VM and host
+functions share one OS process, Hyperlight requests no process-containment
+policy, and the process inherits the caller's existing OS policy and cgroup.
+Modes 2-4 then run through the transient constrained launcher because their
+native roles require delegated cgroup authority and confinement resources.
+
+The resource demo creates and removes readable sample files by default. Supply
+existing files with `--read-write PATH` and `--read-only PATH`, and the appended
+text with `--input TEXT`. CLI options take precedence over
+`HYPERLIGHT_RESOURCE_DEMO_READ_WRITE`,
+`HYPERLIGHT_RESOURCE_DEMO_READ_ONLY` and
+`HYPERLIGHT_RESOURCE_DEMO_INPUT`. The read/write path must be a readable,
+writable regular file. The read-only path must be a readable regular file.
+They must not resolve to the same inode, including through hard links.
+
+The check is non-mutating. It reports source and build prerequisites, effective
+device access, live user-manager delegation, Minijail namespace policy, asset
+refreshes and every persistent host-policy change the install would make. The
+install builds and verifies the pinned helper and release examples before using
+the transactional installer. It requests sudo only when files, policy, groups or
+recorded state need mutation. Before elevation, it captures the installer,
+helper and runtime assets in memory. The privileged phase installs only that
+captured bundle from root-owned staging. The target user can traverse only the
+staged helper path for the namespace probe.
+
 ## Application developer API
 
 Hyperlight remains an in-process Rust API. Process placement is an optional Mesh
@@ -283,10 +340,24 @@ directories.
 
 ## Linux architecture and threat boundary
 
-The one-time privileged install writes immutable integration assets, activates
-user-slice controller delegation, and grants group-based access to the present
-hypervisor device. It does not install a daemon. It does not grant
-capabilities. It does not make the Hyperlight host setuid or root.
+Hyperlight can manage only descendants of a delegated cgroup capability it
+already possesses. It cannot self-delegate host authority. The current
+Ubuntu/WSL launcher asks the invoking user's systemd manager to create that
+temporary boundary. After the cgroup and helper resources are supplied, the
+Hyperlight provider does not depend on systemd.
+
+The adaptive install writes immutable integration assets and adds only missing
+host policy. Existing effective read/write access to `/dev/kvm` or `/dev/mshv`
+is reused. A udev rule and device group are one way to establish stable access,
+not a runtime requirement. Existing working cgroup delegation is reused.
+Systemd drop-ins are installed only when the live user manager cannot supply the
+required `cpu`, `memory` and `pids` boundary.
+
+Ubuntu can restrict unprivileged user namespaces through AppArmor. The installer
+adds the narrow path-authorized profile only when an actual Minijail namespace
+probe is blocked by that policy. The helper is root-owned to preserve the
+integrity of the authorized executable path. It is not setuid, has no file
+capabilities and executes as the invoking ordinary user.
 
 Every run is a transient service created by the invoking user's systemd
 manager. `DelegateSubgroup=application` places the application below an empty
@@ -312,9 +383,22 @@ AppArmor exception.
 
 ## Operator installation
 
-The Linux integration uses a one-time privileged installation. Hyperlight and
-its native roles always run as the invoking unprivileged user. There is no
-broker or privileged runtime.
+The supported developer path is:
+
+```bash
+just check-constrained-process-config
+just install-constrained-process
+hyperlight-run check
+```
+
+Hyperlight and its native roles always run as the invoking unprivileged user.
+There is no broker or privileged runtime. Repeating either command is safe.
+An asset-only update does not rewrite udev, systemd or AppArmor policy and does
+not print login or WSL restart advice. The installer recommends a fresh login or
+user-manager instance only when its transaction adds effective group membership
+or changes delegation policy. It never performs a WSL lifecycle action.
+
+The detailed commands below are troubleshooting and reproducibility reference.
 
 Build and test the pinned helper as an ordinary user:
 
@@ -340,8 +424,8 @@ AppArmor profile, and Landlock ABI 5. Landlock ABI 5 normally requires Linux
 6.10 or newer. The tested WSL kernel is 6.18 with Landlock ABI 7. Ubuntu 24.04
 systems on the 6.8 GA kernel need a newer supported kernel before installation.
 
-Install the verified helper, launcher and device policy. `init` validates and
-prints the complete plan before requesting sudo for the mutation phase:
+Install the verified helper, launcher and any missing policy. `init` validates
+and prints the complete plan before requesting sudo for a required mutation:
 
 ```bash
 dev/process-isolation/hyperlight-run init \
@@ -354,20 +438,24 @@ dev/process-isolation/hyperlight-run init \
 ```
 
 The plan is non-privileged. It validates the pinned source, patch and helper
-digest and prints every mutation and required interruption. The second command
-repeats that validation, then obtains sudo only for installation.
-
-Log out and back in if the installer added group membership. WSL users can run
-`wsl --shutdown` from PowerShell. Verify the installation:
+digest and prints every mutation. The second command obtains sudo only when the
+plan requires mutation. It captures the validated installer and assets before
+the sudo prompt, then extracts them into a root-owned temporary directory. The
+privileged installer never reopens executable input from the checkout. The
+staging directory is root-owned and permits traversal only so the ordinary-user
+namespace probe can execute the pinned helper. Follow its login or user-manager
+advice only when it prints one. Verify the installation:
 
 ```bash
 hyperlight-run check
 ```
 
-The installer grants `/dev/kvm` or `/dev/mshv` access through device-specific
-groups and udev mode `0660`. It grants execution of the AppArmor-authorized
-helper through the dedicated `hyperlight` group. It does not grant capabilities
-or root execution.
+When device access is missing, the installer can grant `/dev/kvm` or `/dev/mshv`
+access through device-specific groups and udev mode `0660`. When Ubuntu blocks
+the helper's user namespace, it authorizes only that immutable path with a
+narrow AppArmor profile. The dedicated `hyperlight` group always gates helper
+execution. The helper has no capabilities or setuid bit and runs as the
+ordinary user.
 
 The privileged command installs these exact assets:
 
@@ -378,20 +466,24 @@ The privileged command installs these exact assets:
 * private lifecycle and example drivers under `/usr/libexec/hyperlight`
 * the built `process_placement` example and `simpleguest` under
   `/usr/libexec/hyperlight`
-* `/var/lib/hyperlight/install-state.json`, mode `0600`
-* `/etc/udev/rules.d/70-hyperlight-hypervisor.rules`
-* `/etc/apparmor.d/usr.libexec.hyperlight.minijail0` when AppArmor is active
+* `/var/lib/hyperlight/install-state.json`, root-owned mode `0600`, plus a
+  root-owned `0644` status marker containing only version, file identity, size
+  and digest
+* `/etc/udev/rules.d/70-hyperlight-hypervisor.rules` when stable device access
+  is missing
+* `/etc/apparmor.d/usr.libexec.hyperlight.minijail0` when Ubuntu AppArmor blocks
+  the Minijail namespace probe
 * systemd drop-ins under `user.slice.d`, `user-.slice.d` and
-  `user@.service.d`
-* membership of the selected user in `hyperlight` and the group for each
-  present hypervisor device
+  `user@.service.d` when live delegation is insufficient
+* `hyperlight` group membership for helper execution, plus a device group only
+  when existing device access is insufficient
 
 The installer uses hard-coded source, patch and helper digests. It verifies the
 exact Minijail commit, exact repository patch, absence of staged source changes
 and the recorded helper digest before copying anything. The helper digest is
 the byte-level trust root. Installed files and directories are root-owned. The
 helper is `root:hyperlight` mode `0750`; policy and digest files are mode
-`0644`. Other local users cannot execute the AppArmor-authorized helper.
+`0644`. Other local users cannot execute the verified helper.
 The state manifest records the exact pre-install files, device ownership,
 group creation and membership changes. Any failed mutation triggers bounded
 rollback. Reinstallation preserves the original baseline.

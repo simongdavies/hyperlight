@@ -78,6 +78,52 @@ build-rust-guests target=default-target features="": (ensure-cargo-hyperlight)
 build-and-move-rust-guests: (build-rust-guests "debug") (move-rust-guests "debug") (build-rust-guests "release") (move-rust-guests "release")
 build-and-move-c-guests: (build-c-guests "debug") (move-c-guests "debug") (build-c-guests "release") (move-c-guests "release")
 
+###############################
+### CONSTRAINED PROCESSES #####
+###############################
+
+constrained-process-minijail-source := "target/minijail-validation/minijail"
+constrained-process-minijail-commit := "8d20993c7189a948995bd20901abecc041e1a28e"
+
+# Report prerequisites and the exact persistent host changes installation needs.
+check-constrained-process-config:
+    {{ if os() == "linux" { "" } else { "echo 'constrained-process setup requires Linux' >&2; exit 1" } }}
+    python3 dev/process-isolation/install_linux.py --check-prerequisites --plan --user "$USER" --source {{ constrained-process-minijail-source }}
+
+[private]
+prepare-constrained-process-minijail:
+    mkdir -p target/minijail-validation
+    if [ ! -d {{ constrained-process-minijail-source }}/.git ]; then git clone https://chromium.googlesource.com/chromiumos/platform/minijail {{ constrained-process-minijail-source }}; git -C {{ constrained-process-minijail-source }} checkout {{ constrained-process-minijail-commit }}; fi
+    python3 dev/process-isolation/build_minijail.py {{ constrained-process-minijail-source }} --verify-recorded
+    python3 -u dev/process-isolation/test_minijail.py {{ constrained-process-minijail-source }}/minijail0
+
+# Build release assets and apply only the missing runtime or host-policy state.
+install-constrained-process: prepare-constrained-process-minijail
+    {{ cargo-cmd }} build --release --locked -p hyperlight-host --features process-isolation --example process_placement --example nested_sandbox --example process_file_resource
+    just build-rust-guests release
+    just move-rust-guests release
+    dev/process-isolation/hyperlight-run init --source {{ constrained-process-minijail-source }} --user "$USER"
+
+# Run placement, typed-resource and nested demos. Pass --noninteractive for automation.
+demo-constrained-process *args:
+    hyperlight-run demo {{ args }}
+
+# Run only the six-mode process placement demo.
+demo-process-placement *args:
+    hyperlight-run placement-demo {{ args }}
+
+# Run the nested sandbox demo. Pass --noninteractive for automation.
+demo-nested-process *args:
+    hyperlight-run nested-demo {{ args }}
+
+# Run the typed file-capability example.
+demo-constrained-process-resources input="typed-capability":
+    hyperlight-run resource-demo --input {{ input }}
+
+# Run an arbitrary program inside the bounded delegated unit.
+run-constrained-process *command:
+    hyperlight-run run -- {{ command }}
+
 clean: clean-rust
 
 clean-rust: 

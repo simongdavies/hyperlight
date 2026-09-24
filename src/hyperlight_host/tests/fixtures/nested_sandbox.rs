@@ -4,6 +4,8 @@
 //! Same-process nested Hyperlight sandbox proof.
 
 use std::io::{BufRead, IsTerminal, Read, Seek, SeekFrom, Write};
+use std::path::Path;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -18,6 +20,9 @@ use hyperlight_host::sandbox::snapshot::{OciTag, Snapshot};
 use hyperlight_host::{HyperlightError, Result, SandboxBuilder, new_error};
 
 const WORKER: &str = "nested-sandbox";
+const YELLOW_BOLD: &str = "\x1b[1;93m";
+const BOLD: &str = "\x1b[1m";
+const RESET: &str = "\x1b[0m";
 const MAX_PENDING_EXPORTS: usize = 16;
 const MARKER_RIGHTS: OsResourceRights = OsResourceRights::READ.union(OsResourceRights::WRITE);
 const COMPOSE: HostFunctionContract<(String, u32), String> =
@@ -44,6 +49,64 @@ struct PidEvidence {
 struct CallEvidence {
     pids: PidEvidence,
     resource_generation: u64,
+}
+
+fn styled(text: &str, style: &str, enabled: bool) -> String {
+    if enabled {
+        format!("{style}{text}{RESET}")
+    } else {
+        text.to_owned()
+    }
+}
+
+fn color_enabled(interactive: bool, no_color: bool, no_color_environment: bool) -> bool {
+    interactive && !no_color && !no_color_environment
+}
+
+#[cfg(target_os = "linux")]
+fn clipboard_provider() -> Option<std::path::PathBuf> {
+    [
+        "/mnt/c/Windows/System32/clip.exe",
+        "/mnt/c/Windows/Sysnative/clip.exe",
+    ]
+    .into_iter()
+    .map(std::path::PathBuf::from)
+    .find(|path| path.is_file())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn clipboard_provider() -> Option<std::path::PathBuf> {
+    None
+}
+
+fn write_clipboard(content: &str, provider: &Path) -> bool {
+    let Ok(mut child) = Command::new(provider)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    let wrote = child
+        .stdin
+        .take()
+        .is_some_and(|mut input| input.write_all(content.as_bytes()).is_ok());
+    wrote && child.wait().is_ok_and(|status| status.success())
+}
+
+fn copy_inspection_command_with(command: &str, mut writer: impl FnMut(&str) -> bool) -> bool {
+    if command.len() > 8192 || command.contains('\0') || command.contains('\x1b') {
+        return false;
+    }
+    writer("") && writer(command)
+}
+
+fn copy_inspection_command(command: &str, provider: Option<&Path>) -> bool {
+    let Some(provider) = provider else {
+        return false;
+    };
+    copy_inspection_command_with(command, |content| write_clipboard(content, provider))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -195,6 +258,136 @@ fn process_status(process_id: u32) -> Option<(u32, u32)> {
         .parse()
         .ok()?;
     Some((parent, namespace))
+}
+
+#[cfg(target_os = "linux")]
+fn process_cgroup(process_id: u32) -> Result<String> {
+    std::fs::read_to_string(format!("/proc/{process_id}/cgroup"))?
+        .lines()
+        .find_map(|line| line.strip_prefix("0::").map(str::to_owned))
+        .ok_or_else(|| new_error!("Process {process_id} has no unified cgroup"))
+}
+
+#[cfg(target_os = "linux")]
+fn cgroup_value(root: &std::path::Path, name: &str) -> String {
+    std::fs::read_to_string(root.join(name))
+        .map(|value| value.trim().to_owned())
+        .unwrap_or_else(|_| "unavailable".to_owned())
+}
+
+#[cfg(target_os = "linux")]
+fn namespace_identity(process_id: u32, name: &str) -> String {
+    std::fs::read_link(format!("/proc/{process_id}/ns/{name}"))
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "unavailable".to_owned())
+}
+
+#[cfg(target_os = "linux")]
+fn cgroup_members(root: &std::path::Path) -> Vec<u32> {
+    let mut members = cgroup_value(root, "cgroup.procs")
+        .lines()
+        .filter_map(|value| value.parse().ok())
+        .collect::<Vec<_>>();
+    members.sort_unstable();
+    members
+}
+
+#[cfg(target_os = "linux")]
+fn readable_memory(value: &str) -> String {
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|bytes| bytes % (1024 * 1024) == 0)
+        .map(|bytes| format!("{} MiB", bytes / (1024 * 1024)))
+        .unwrap_or_else(|| {
+            if value == "max" {
+                "caller limit".to_owned()
+            } else {
+                value.to_owned()
+            }
+        })
+}
+
+#[cfg(target_os = "linux")]
+fn readable_cpu(value: &str) -> String {
+    let values = value.split_whitespace().collect::<Vec<_>>();
+    match values.as_slice() {
+        ["max", _] => "caller limit".to_owned(),
+        [quota, period] => match (quota.parse::<u64>(), period.parse::<u64>()) {
+            (Ok(quota), Ok(period)) if period != 0 => {
+                format!("{}%", quota.saturating_mul(100) / period)
+            }
+            _ => value.to_owned(),
+        },
+        _ => value.to_owned(),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn print_nested_inspection(
+    root_process: u32,
+    namespace_worker: u32,
+    color: bool,
+) -> Result<(String, String)> {
+    let controller = std::process::id();
+    let (parent, _) = process_status(root_process)
+        .ok_or_else(|| new_error!("Nested worker root status is unavailable"))?;
+    let cgroup = process_cgroup(root_process)?;
+    let root = std::path::Path::new("/sys/fs/cgroup").join(cgroup.trim_start_matches('/'));
+    let members = cgroup_members(&root);
+    let worker = members
+        .iter()
+        .copied()
+        .find(|pid| process_status(*pid).is_some_and(|(_, nspid)| nspid == namespace_worker))
+        .ok_or_else(|| new_error!("Nested worker workload PID is unavailable"))?;
+    println!();
+    let domain = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("unavailable");
+    println!("{}", styled("Runtime boundary", BOLD, color));
+    println!("  Application   PID {controller}");
+    println!("  Supervisor    PID {root_process} (parent PID {parent})");
+    println!("  Worker        PID {worker} (private namespace PID {namespace_worker})");
+    println!("  Domain        {domain}");
+    println!(
+        "  Limits        memory {}, CPU {}, tasks {}",
+        readable_memory(&cgroup_value(&root, "memory.max")),
+        readable_cpu(&cgroup_value(&root, "cpu.max")),
+        cgroup_value(&root, "pids.max"),
+    );
+    println!(
+        "  Members       {} native processes: supervisor and confined worker",
+        members.len()
+    );
+    let private = ["pid", "mnt", "ipc", "net", "user"]
+        .into_iter()
+        .filter(|namespace| {
+            namespace_identity(worker, namespace) != namespace_identity(controller, namespace)
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    println!("  Private       {private} namespaces differ from the application");
+    println!("  Meaning       both nested VM roles stay inside this one confined worker");
+    let entries = format!("controller:{controller} domain-root:{root_process} workload:{worker}");
+    let command = format!(
+        "entries='{entries}'; \
+         nsid() {{ value=$(readlink \"/proc/$1/ns/$2\"); value=${{value#*[}}; printf '%s' \"${{value%]}}\"; }}; \
+         printf '\\nPROCESSES\\n%-16s %-8s %-8s %-6s %s\\n' ROLE PID PPID STATE COMMAND; \
+         for item in $entries; do role=${{item%%:*}}; p=${{item##*:}}; printf '%-16s %-8s ' \"$role\" \"$p\"; ps -p \"$p\" -o ppid=,stat=,args=; done; \
+         printf '\\nCGROUPS AND EFFECTIVE LIMITS\\n%-16s %-8s %-7s %-12s %-18s %s\\n' ROLE PID MEMBER MEMORY CPU TASKS/POLICY; \
+         for item in $entries; do role=${{item%%:*}}; p=${{item##*:}}; cg=$(cut -d: -f3 \"/proc/$p/cgroup\"); proot=/sys/fs/cgroup$cg; \
+         member=no; grep -qx \"$p\" \"$proot/cgroup.procs\" 2>/dev/null && member=yes; memory=$(cat \"$proot/memory.max\" 2>/dev/null || printf n/a); cpu=$(cat \"$proot/cpu.max\" 2>/dev/null || printf n/a); tasks=$(cat \"$proot/pids.max\" 2>/dev/null || printf n/a); controllers=$(cat \"$proot/cgroup.controllers\" 2>/dev/null | tr ' ' ',' || true); \
+         printf '%-16s %-8s %-7s %-12s %-18s tasks=%s controllers=%s\\n' \"$role\" \"$p\" \"$member\" \"$memory\" \"$cpu\" \"$tasks\" \"${{controllers:-none}}\"; printf '  cgroup: %s\\n' \"$cg\"; done; \
+         cpid=$(nsid {controller} pid); cmnt=$(nsid {controller} mnt); cipc=$(nsid {controller} ipc); cnet=$(nsid {controller} net); cuser=$(nsid {controller} user); \
+         printf '\\nNAMESPACES\\n%-16s %-8s %-12s %-12s %-12s %-12s %-12s\\n' ROLE PID PID MOUNT IPC NETWORK USER; \
+         for item in $entries; do role=${{item%%:*}}; p=${{item##*:}}; pid=$(nsid \"$p\" pid); mnt=$(nsid \"$p\" mnt); ipc=$(nsid \"$p\" ipc); net=$(nsid \"$p\" net); user=$(nsid \"$p\" user); \
+         printf '%-16s %-8s %-12s %-12s %-12s %-12s %-12s\\n' \"$role\" \"$p\" \"$pid\" \"$mnt\" \"$ipc\" \"$net\" \"$user\"; \
+         if [ \"$p\" = {controller} ]; then printf '  relation: CALLER ENVIRONMENT\\n'; else \
+         [ \"$pid\" = \"$cpid\" ] && rpid=SAME || rpid=PRIVATE; [ \"$mnt\" = \"$cmnt\" ] && rmnt=SAME || rmnt=PRIVATE; [ \"$ipc\" = \"$cipc\" ] && ripc=SAME || ripc=PRIVATE; [ \"$net\" = \"$cnet\" ] && rnet=SAME || rnet=PRIVATE; [ \"$user\" = \"$cuser\" ] && ruser=SAME || ruser=PRIVATE; \
+         printf '  vs controller: pid=%s mount=%s ipc=%s network=%s user=%s\\n' \"$rpid\" \"$rmnt\" \"$ripc\" \"$rnet\" \"$ruser\"; fi; done"
+    );
+    Ok((cgroup, command))
 }
 
 #[cfg(target_os = "linux")]
@@ -800,6 +993,9 @@ fn verify_call(
 fn wait_for_inspection<R: BufRead, W: Write>(
     noninteractive: bool,
     stdin_is_terminal: bool,
+    command: &str,
+    clipboard: bool,
+    color: bool,
     input: &mut R,
     output: &mut W,
 ) -> Result<()> {
@@ -811,9 +1007,26 @@ fn wait_for_inspection<R: BufRead, W: Write>(
             "Interactive demo input is not a terminal. Run with --noninteractive for CI or redirected input"
         ));
     }
+    if clipboard && copy_inspection_command(command, clipboard_provider().as_deref()) {
+        writeln!(
+            output,
+            "\nClipboard cleared and inspection command copied. Paste it into a second WSL terminal."
+        )?;
+    } else if clipboard {
+        writeln!(
+            output,
+            "\nClipboard unavailable. Run this in a second WSL terminal:\n{command}"
+        )?;
+    }
     write!(
         output,
-        "\nPress Enter to stop the nested topology and finish..."
+        "{}",
+        styled(
+            "\nObserve the worker PID, its private namespaces and its delegated cgroup. \
+             The inner VM is not another OS process.\nPress Enter to stop the nested topology...",
+            YELLOW_BOLD,
+            color
+        )
     )?;
     output.flush()?;
     let mut line = String::new();
@@ -829,9 +1042,13 @@ fn wait_for_inspection<R: BufRead, W: Write>(
 fn run_demo(args: &[std::ffi::OsString]) -> Result<()> {
     let mut guest = None;
     let mut noninteractive = false;
+    let mut no_color = false;
+    let mut no_clipboard = false;
     for argument in args {
         match argument.to_str() {
             Some("--noninteractive") => noninteractive = true,
+            Some("--no-color") => no_color = true,
+            Some("--no-clipboard") => no_clipboard = true,
             Some(value) if value.starts_with('-') => {
                 return Err(new_error!("Unknown nested demo option '{value}'"));
             }
@@ -840,13 +1057,25 @@ fn run_demo(args: &[std::ffi::OsString]) -> Result<()> {
             None => return Err(new_error!("Nested demo arguments must be valid Unicode")),
         }
     }
-    let guest =
-        guest.ok_or_else(|| new_error!("Usage: nested_sandbox demo GUEST [--noninteractive]"))?;
+    let guest = guest.ok_or_else(|| {
+        new_error!(
+            "Usage: nested_sandbox demo GUEST [--noninteractive] [--no-color] [--no-clipboard]"
+        )
+    })?;
     if !noninteractive && !std::io::stdin().is_terminal() {
         return Err(new_error!(
             "Interactive demo input is not a terminal. Run with --noninteractive for CI or redirected input"
         ));
     }
+    let interactive =
+        !noninteractive && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    let color = color_enabled(
+        interactive,
+        no_color,
+        std::env::var_os("NO_COLOR").is_some(),
+    );
+    let clipboard =
+        interactive && !no_clipboard && std::env::var_os("HYPERLIGHT_DEMO_NO_CLIPBOARD").is_none();
     let guest = std::fs::canonicalize(guest)
         .map_err(|error| new_error!("Nested guest canonicalization failed: {error}"))?;
     let (provider, _) = configured_provider(&guest)
@@ -860,47 +1089,100 @@ fn run_demo(args: &[std::ffi::OsString]) -> Result<()> {
         .into_iter()
         .find(|report| report.name == WORKER)
         .ok_or_else(|| new_error!("Nested worker report is missing"))?;
+    #[cfg(target_os = "linux")]
+    let worker_process = {
+        let cgroup = process_cgroup(worker.root_process_id as u32)?;
+        let root = std::path::Path::new("/sys/fs/cgroup").join(cgroup.trim_start_matches('/'));
+        cgroup_members(&root)
+            .into_iter()
+            .find(|pid| {
+                process_status(*pid).is_some_and(|(_, namespace)| namespace == call.pids.worker)
+            })
+            .ok_or_else(|| new_error!("Nested worker workload PID is unavailable"))?
+    };
+    #[cfg(not(target_os = "linux"))]
+    let worker_process = worker.root_process_id as u32;
 
     println!();
-    println!("Hyperlight nested sandbox demo");
-    println!();
-    println!("Topology");
-    println!("  Application process {}", std::process::id());
-    println!("    -> outer Hyperlight guest");
     println!(
-        "       -> isolated host-function worker {}",
-        worker.root_process_id
+        "{}",
+        styled("Hyperlight nested sandbox demo", YELLOW_BOLD, color)
     );
-    println!("          -> inner Hyperlight sandbox in the worker");
-    println!();
-    println!("Inner guest execution");
-    println!("  1 inner guest-function call");
-    println!("  2 co-located host-function callbacks");
-    println!();
-    println!("Result");
-    println!("  {}", expected("compose", 2));
-    println!();
-    println!("Capability boundaries");
-    println!("  PASS inner guest image supplied as a read-only file capability");
-    println!("  PASS result exported as a read-only file capability");
-    println!("  PASS undeclared child-process creation denied");
     println!(
-        "  PASS guest, marker and result bound to generation {}",
+        "{}",
+        styled("================================", YELLOW_BOLD, color)
+    );
+    println!();
+    println!("{}", styled("Process topology", BOLD, color));
+    println!("  Application PID {}", std::process::id());
+    println!("  `- Outer guest VM lives inside the application process");
+    println!("     `- Worker domain root PID {}", worker.root_process_id);
+    if worker_process != worker.root_process_id as u32 {
+        println!("        `- Confined host-function worker PID {worker_process}");
+    }
+    println!("           `- Inner guest VM lives inside worker PID {worker_process}");
+    println!("              `- Inner host callback is co-located in that worker");
+    println!("  The inner sandbox creates a VM boundary, not another OS process.");
+    println!();
+    println!("{}", styled("Result", BOLD, color));
+    println!("  PASS nested call result verified");
+    println!("  One inner guest call invoked two host callbacks in the same worker.");
+    println!();
+    println!("{}", styled("Capability boundaries", BOLD, color));
+    println!("  PASS guest image: application opened it; worker receives read-only access");
+    println!("  PASS result: worker exports it read-only to the application");
+    println!("  PASS child process: undeclared creation is denied");
+    println!(
+        "  PASS generation {} binds the guest, recovery record and result",
         call.resource_generation
+    );
+    println!("  Stale capabilities cannot be reused after replacement or restore.");
+
+    #[cfg(target_os = "linux")]
+    let (worker_cgroup, inspection) =
+        print_nested_inspection(worker.root_process_id as u32, call.pids.worker, color)?;
+    #[cfg(target_os = "windows")]
+    let inspection = format!(
+        "Get-Process -Id {},{} | Format-Table Id,ProcessName,Path",
+        std::process::id(),
+        worker.root_process_id
     );
 
     wait_for_inspection(
         noninteractive,
         std::io::stdin().is_terminal(),
+        &inspection,
+        clipboard,
+        color,
         &mut std::io::stdin().lock(),
         &mut std::io::stdout().lock(),
     )?;
+    if !noninteractive && color {
+        print!("\x1b[2J\x1b[H");
+        std::io::stdout().flush()?;
+    }
     let worker_root = worker.root_process_id;
     sandbox.shutdown()?;
     drop(sandbox);
     drop(provider);
     ensure_process_exited(worker_root)?;
-    println!("  PASS nested worker and inner sandbox stopped cleanly");
+    #[cfg(target_os = "linux")]
+    {
+        let root =
+            std::path::Path::new("/sys/fs/cgroup").join(worker_cgroup.trim_start_matches('/'));
+        for _ in 0..100 {
+            if !root.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        if root.exists() {
+            return Err(new_error!("Nested worker cgroup remained after teardown"));
+        }
+    }
+    println!();
+    println!("Cleanup");
+    println!("  PASS worker process exited and its delegated cgroup was removed");
     println!();
     println!("PASS nested sandbox composition");
     Ok(())
@@ -1227,7 +1509,16 @@ mod tests {
     fn noninteractive_demo_pause_returns_without_input() {
         let mut input = std::io::Cursor::new(Vec::<u8>::new());
         let mut output = Vec::new();
-        wait_for_inspection(true, false, &mut input, &mut output).unwrap();
+        wait_for_inspection(
+            true,
+            false,
+            "inspection",
+            false,
+            false,
+            &mut input,
+            &mut output,
+        )
+        .unwrap();
         assert!(output.is_empty());
     }
 
@@ -1236,10 +1527,46 @@ mod tests {
         let mut input = std::io::Cursor::new(Vec::<u8>::new());
         let mut output = Vec::new();
         assert!(
-            wait_for_inspection(false, false, &mut input, &mut output)
-                .unwrap_err()
-                .to_string()
-                .contains("--noninteractive")
+            wait_for_inspection(
+                false,
+                false,
+                "inspection",
+                false,
+                false,
+                &mut input,
+                &mut output,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("--noninteractive")
         );
+    }
+
+    #[test]
+    fn clipboard_is_bounded_and_optional() {
+        assert!(!copy_inspection_command("safe", None));
+        assert!(!copy_inspection_command(
+            &"x".repeat(8193),
+            Some(Path::new("/bin/cat"))
+        ));
+        assert!(copy_inspection_command(
+            "printf '%s' '$(touch /tmp/not-executed)'",
+            Some(Path::new("/bin/cat"))
+        ));
+        let mut writes = Vec::new();
+        assert!(copy_inspection_command_with("inspection", |content| {
+            writes.push(content.to_owned());
+            true
+        }));
+        assert_eq!(writes, ["", "inspection"]);
+    }
+
+    #[test]
+    fn color_requires_interactive_opt_in_environment() {
+        assert!(color_enabled(true, false, false));
+        assert!(!color_enabled(true, false, true));
+        assert!(!color_enabled(true, true, false));
+        assert!(!color_enabled(false, false, false));
+        assert!(!styled("PASS", YELLOW_BOLD, false).contains('\x1b'));
     }
 }

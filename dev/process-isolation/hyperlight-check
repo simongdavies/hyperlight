@@ -55,12 +55,13 @@ fi
 check test -x /usr/libexec/hyperlight/minijail0
 check sha256sum -c /usr/libexec/hyperlight/minijail0.sha256
 helper_gid=$(getent group hyperlight | cut -d: -f3)
+helper_owner=0:${helper_gid:-missing}:750
 if [[ -z $helper_gid ]] || ! id -G | tr ' ' '\n' | grep -qx "$helper_gid"; then
-    echo "FAIL $(id -un) is not in the hyperlight helper group" >&2
+    echo "FAIL $(id -un) lacks the group for the verified Minijail helper" >&2
     failed=1
 fi
 for specification in \
-    "/usr/libexec/hyperlight/minijail0 0:${helper_gid:-missing}:750" \
+    "/usr/libexec/hyperlight/minijail0 $helper_owner" \
     "/usr/libexec/hyperlight/minijail0.sha256 0:0:644" \
     "/usr/libexec/hyperlight/hyperlight-check 0:0:755" \
     "/usr/libexec/hyperlight/hyperlight-unit-entry 0:0:755" \
@@ -69,9 +70,11 @@ for specification in \
     "/usr/libexec/hyperlight/minijail-require-landlock.patch 0:0:644" \
     "/usr/libexec/hyperlight/process_placement 0:0:755" \
     "/usr/libexec/hyperlight/nested_sandbox 0:0:755" \
+    "/usr/libexec/hyperlight/process_file_resource 0:0:755" \
     "/usr/libexec/hyperlight/simpleguest 0:0:755" \
     "/usr/bin/hyperlight-run 0:0:755" \
-    "/var/lib/hyperlight/install-state.json 0:0:600"; do
+    "/var/lib/hyperlight/install-state.json 0:0:600" \
+    "/var/lib/hyperlight/install-state.status.json 0:0:644"; do
     read -r path expected <<<"$specification"
     if [[ $(stat -c '%u:%g:%a' "$path" 2>/dev/null) == "$expected" ]]; then
         echo "PASS installed ownership $path"
@@ -86,7 +89,7 @@ for controller in cpu memory pids; do
         echo "PASS delegated cgroup controller $controller"
     else
         echo "FAIL cgroup controller $controller is not delegated to the user manager" >&2
-        echo "     Log out and back in after installation. WSL users must run wsl --shutdown." >&2
+        echo "     Run just check-constrained-process-config for the current host plan." >&2
         failed=1
         controller_failed=1
     fi
@@ -136,7 +139,7 @@ if [[ -z $device ]]; then
     failed=1
 elif [[ ! -r $device || ! -w $device ]]; then
     echo "FAIL $device is not readable and writable by $(id -un)" >&2
-    echo "     Log out and back in after installation, then retry." >&2
+    echo "     Run just check-constrained-process-config for the current host plan." >&2
     failed=1
 else
     echo "PASS device access $device"

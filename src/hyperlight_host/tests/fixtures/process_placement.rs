@@ -12,6 +12,7 @@ mod demo {
     #[cfg(target_os = "linux")]
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::path::Path;
+    use std::process::{Command, Stdio};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -30,6 +31,89 @@ mod demo {
     const WINDOWS_VM_HOST_CONSENT: &str = "--allow-windows-vm-host";
     const NONINTERACTIVE: &str = "--noninteractive";
     const DETAILS: &str = "--details";
+    const NO_COLOR: &str = "--no-color";
+    const NO_CLIPBOARD: &str = "--no-clipboard";
+    const LOCAL_ONLY: &str = "--local-only";
+    const CONSTRAINED_ONLY: &str = "--constrained-only";
+    const YELLOW_BOLD: &str = "\x1b[1;93m";
+    const RESET: &str = "\x1b[0m";
+
+    fn styled(text: &str, style: &str, enabled: bool) -> String {
+        if enabled {
+            format!("{style}{text}{RESET}")
+        } else {
+            text.to_owned()
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn namespace_token(pid: u32, name: &str) -> String {
+        let identity = namespace_identity(pid, name);
+        identity
+            .split_once('[')
+            .and_then(|(_, value)| value.strip_suffix(']'))
+            .unwrap_or(&identity)
+            .to_owned()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn namespace_relationship(controller: &str, role: &str) -> &'static str {
+        if controller == role {
+            "SAME"
+        } else {
+            "PRIVATE"
+        }
+    }
+
+    fn color_enabled(interactive: bool, no_color: bool, no_color_environment: bool) -> bool {
+        interactive && !no_color && !no_color_environment
+    }
+
+    #[cfg(target_os = "linux")]
+    fn clipboard_provider() -> Option<std::path::PathBuf> {
+        [
+            "/mnt/c/Windows/System32/clip.exe",
+            "/mnt/c/Windows/Sysnative/clip.exe",
+        ]
+        .into_iter()
+        .map(std::path::PathBuf::from)
+        .find(|path| path.is_file())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn clipboard_provider() -> Option<std::path::PathBuf> {
+        None
+    }
+
+    fn write_clipboard(content: &str, provider: &Path) -> bool {
+        let Ok(mut child) = Command::new(provider)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
+            return false;
+        };
+        let wrote = child
+            .stdin
+            .take()
+            .is_some_and(|mut input| input.write_all(content.as_bytes()).is_ok());
+        wrote && child.wait().is_ok_and(|status| status.success())
+    }
+
+    fn copy_inspection_command_with(command: &str, mut writer: impl FnMut(&str) -> bool) -> bool {
+        if command.len() > 8192 || command.contains('\0') || command.contains('\x1b') {
+            return false;
+        }
+        writer("") && writer(command)
+    }
+
+    fn copy_inspection_command(command: &str, provider: Option<&Path>) -> bool {
+        let Some(provider) = provider else {
+            return false;
+        };
+        copy_inspection_command_with(command, |content| write_clipboard(content, provider))
+    }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Scenario {
@@ -50,6 +134,12 @@ mod demo {
             Self::WorkerChildrenAllowed,
             Self::WorkerChildrenBlocked,
         ];
+        const DEMO: [Self; 4] = [
+            Self::Local,
+            Self::FunctionWorker,
+            Self::VmHost,
+            Self::VmHostAndFunctionWorker,
+        ];
 
         fn parse(name: &str) -> Result<Self> {
             match name {
@@ -67,6 +157,21 @@ mod demo {
                      worker-children-blocked"
                 )),
             }
+        }
+
+        fn demo_scenarios(local_only: bool, constrained_only: bool) -> Result<&'static [Scenario]> {
+            if local_only && constrained_only {
+                return Err(new_error!(
+                    "{LOCAL_ONLY} and {CONSTRAINED_ONLY} are mutually exclusive"
+                ));
+            }
+            Ok(if local_only {
+                &Scenario::DEMO[..1]
+            } else if constrained_only {
+                &Scenario::DEMO[1..]
+            } else {
+                &Scenario::DEMO
+            })
         }
 
         fn name(self) -> &'static str {
@@ -103,7 +208,9 @@ mod demo {
 
         fn description(self) -> &'static str {
             match self {
-                Self::Local => "VM and host functions run in the caller process",
+                Self::Local => {
+                    "Hyperlight today: application, VM and host functions share the caller process"
+                }
                 Self::FunctionWorker => {
                     "VM runs in the caller; host functions run in one confined function worker"
                 }
@@ -629,85 +736,371 @@ mod demo {
         lines
     }
 
-    fn inspection_commands(reports: &[ProcessReport]) -> Vec<String> {
-        let pids = reports
-            .iter()
-            .map(|report| report.root_process_id.to_string())
-            .collect::<Vec<_>>();
+    fn inspection_command(reports: &[ProcessReport]) -> String {
+        let controller = std::process::id();
+        let mut roles = vec![format!("controller:{controller}")];
+        #[cfg(target_os = "linux")]
+        for (index, report) in reports.iter().enumerate() {
+            let root = report.root_process_id as u32;
+            roles.push(format!("domain-root-{}:{root}", index + 1));
+            let workload = workload_pid(root);
+            if workload != root {
+                roles.push(format!("workload-{}:{workload}", index + 1));
+            }
+        }
+        #[cfg(target_os = "windows")]
+        for (index, report) in reports.iter().enumerate() {
+            roles.push(format!(
+                "domain-root-{}:{}",
+                index + 1,
+                report.root_process_id
+            ));
+        }
         #[cfg(target_os = "linux")]
         {
-            if pids.is_empty() {
-                return vec![format!("ps -o pid,ppid,stat,cmd -p {}", std::process::id())];
-            }
-            let joined = pids.join(",");
-            vec![
-                format!("ps -o pid,ppid,stat,cmd -p {joined}"),
-                format!("for p in {}; do cat /proc/$p/cgroup; done", pids.join(" ")),
-                format!("for p in {}; do ls -l /proc/$p/ns; done", pids.join(" ")),
-            ]
+            let entries = roles.join(" ");
+            format!(
+                "entries='{entries}'; \
+                 nsid() {{ value=$(readlink \"/proc/$1/ns/$2\"); value=${{value#*[}}; printf '%s' \"${{value%]}}\"; }}; \
+                 printf '\\nPROCESSES\\n%-16s %-8s %-8s %-6s %s\\n' ROLE PID PPID STATE COMMAND; \
+                 for item in $entries; do role=${{item%%:*}}; p=${{item##*:}}; printf '%-16s %-8s ' \"$role\" \"$p\"; ps -p \"$p\" -o ppid=,stat=,args=; done; \
+                 printf '\\nCGROUPS AND EFFECTIVE LIMITS\\n%-16s %-8s %-7s %-12s %-18s %s\\n' ROLE PID MEMBER MEMORY CPU TASKS/POLICY; \
+                 for item in $entries; do role=${{item%%:*}}; p=${{item##*:}}; cg=$(cut -d: -f3 \"/proc/$p/cgroup\"); root=/sys/fs/cgroup$cg; \
+                 member=no; grep -qx \"$p\" \"$root/cgroup.procs\" 2>/dev/null && member=yes; memory=$(cat \"$root/memory.max\" 2>/dev/null || printf n/a); cpu=$(cat \"$root/cpu.max\" 2>/dev/null || printf n/a); tasks=$(cat \"$root/pids.max\" 2>/dev/null || printf n/a); controllers=$(cat \"$root/cgroup.controllers\" 2>/dev/null | tr ' ' ',' || true); \
+                 printf '%-16s %-8s %-7s %-12s %-18s tasks=%s controllers=%s\\n' \"$role\" \"$p\" \"$member\" \"$memory\" \"$cpu\" \"$tasks\" \"${{controllers:-none}}\"; printf '  cgroup: %s\\n' \"$cg\"; done; \
+                 cpid=$(nsid {controller} pid); cmnt=$(nsid {controller} mnt); cipc=$(nsid {controller} ipc); cnet=$(nsid {controller} net); cuser=$(nsid {controller} user); \
+                 printf '\\nNAMESPACES\\n%-16s %-8s %-12s %-12s %-12s %-12s %-12s\\n' ROLE PID PID MOUNT IPC NETWORK USER; \
+                 for item in $entries; do role=${{item%%:*}}; p=${{item##*:}}; pid=$(nsid \"$p\" pid); mnt=$(nsid \"$p\" mnt); ipc=$(nsid \"$p\" ipc); net=$(nsid \"$p\" net); user=$(nsid \"$p\" user); \
+                 printf '%-16s %-8s %-12s %-12s %-12s %-12s %-12s\\n' \"$role\" \"$p\" \"$pid\" \"$mnt\" \"$ipc\" \"$net\" \"$user\"; \
+                 if [ \"$p\" = {controller} ]; then printf '  relation: CALLER ENVIRONMENT\\n'; else \
+                 [ \"$pid\" = \"$cpid\" ] && rpid=SAME || rpid=PRIVATE; [ \"$mnt\" = \"$cmnt\" ] && rmnt=SAME || rmnt=PRIVATE; [ \"$ipc\" = \"$cipc\" ] && ripc=SAME || ripc=PRIVATE; [ \"$net\" = \"$cnet\" ] && rnet=SAME || rnet=PRIVATE; [ \"$user\" = \"$cuser\" ] && ruser=SAME || ruser=PRIVATE; \
+                 printf '  vs controller: pid=%s mount=%s ipc=%s network=%s user=%s\\n' \"$rpid\" \"$rmnt\" \"$ripc\" \"$rnet\" \"$ruser\"; fi; done"
+            )
         }
         #[cfg(target_os = "windows")]
         {
-            if pids.is_empty() {
-                return vec![format!(
-                    "Get-Process -Id {} | Format-List Id,ProcessName,Path",
-                    std::process::id()
-                )];
-            }
-            vec![format!(
+            let pids = roles
+                .iter()
+                .filter_map(|entry| entry.rsplit_once(':').map(|(_, pid)| pid))
+                .collect::<Vec<_>>();
+            format!(
                 "Get-Process -Id {} | Format-Table Id,ProcessName,Path",
                 pids.join(",")
-            )]
+            )
         }
     }
 
-    fn print_demo_topology(scenario: Scenario, reports: &[ProcessReport], details: bool) {
-        let controller = std::process::id();
-        println!("  Controller PID: {controller}");
+    #[cfg(target_os = "linux")]
+    fn process_parent(pid: u32) -> Option<u32> {
+        std::fs::read_to_string(format!("/proc/{pid}/status"))
+            .ok()?
+            .lines()
+            .find_map(|line| line.strip_prefix("PPid:"))?
+            .trim()
+            .parse()
+            .ok()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn namespace_identity(pid: u32, name: &str) -> String {
+        std::fs::read_link(format!("/proc/{pid}/ns/{name}"))
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| "unavailable".to_owned())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn cgroup_value(root: &Path, name: &str) -> String {
+        std::fs::read_to_string(root.join(name))
+            .map(|value| value.trim().to_owned())
+            .unwrap_or_else(|_| "unavailable".to_owned())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn process_command(pid: u32) -> String {
+        std::fs::read(format!("/proc/{pid}/cmdline"))
+            .map(|value| {
+                value
+                    .split(|byte| *byte == 0)
+                    .filter(|part| !part.is_empty())
+                    .map(|part| String::from_utf8_lossy(part))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_else(|_| "unavailable".to_owned())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn namespace_pid(pid: u32) -> Option<u32> {
+        std::fs::read_to_string(format!("/proc/{pid}/status"))
+            .ok()?
+            .lines()
+            .find_map(|line| line.strip_prefix("NSpid:"))?
+            .split_whitespace()
+            .next_back()?
+            .parse()
+            .ok()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn domain_members(root_pid: u32) -> Vec<u32> {
+        let Ok(cgroup) = process_cgroup(root_pid as i32) else {
+            return vec![root_pid];
+        };
+        let root = Path::new("/sys/fs/cgroup").join(cgroup.trim_start_matches('/'));
+        let mut members = cgroup_value(&root, "cgroup.procs")
+            .lines()
+            .filter_map(|value| value.parse().ok())
+            .collect::<Vec<_>>();
+        members.sort_unstable();
+        members
+    }
+
+    #[cfg(target_os = "linux")]
+    fn workload_pid(root_pid: u32) -> u32 {
+        domain_members(root_pid)
+            .into_iter()
+            .find(|pid| *pid != root_pid && !process_command(*pid).contains("/minijail0"))
+            .unwrap_or(root_pid)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn readable_memory(value: &str) -> String {
+        value
+            .parse::<u64>()
+            .ok()
+            .filter(|bytes| bytes % (1024 * 1024) == 0)
+            .map(|bytes| format!("{} MiB", bytes / (1024 * 1024)))
+            .unwrap_or_else(|| {
+                if value == "max" {
+                    "caller limit".to_owned()
+                } else {
+                    value.to_owned()
+                }
+            })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn readable_cpu(value: &str) -> String {
+        let values = value.split_whitespace().collect::<Vec<_>>();
+        match values.as_slice() {
+            ["max", _] => "caller limit".to_owned(),
+            [quota, period] => match (quota.parse::<u64>(), period.parse::<u64>()) {
+                (Ok(quota), Ok(period)) if period != 0 => {
+                    format!("{}%", quota.saturating_mul(100) / period)
+                }
+                _ => value.to_owned(),
+            },
+            _ => value.to_owned(),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn readable_tasks(value: &str) -> &str {
+        if value == "max" {
+            "caller limit"
+        } else {
+            value
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn print_linux_comparison(reports: &[ProcessReport], controller: u32, details: bool) {
+        let controller_cgroup =
+            process_cgroup(controller as i32).unwrap_or_else(|_| "unavailable".to_owned());
+        let controller_root =
+            Path::new("/sys/fs/cgroup").join(controller_cgroup.trim_start_matches('/'));
+        println!("    Caller");
+        println!("      PID        {controller}");
+        println!("      Cgroup     {controller_cgroup}");
+        println!(
+            "      Limits     memory {}, CPU {}, tasks {}",
+            readable_memory(&cgroup_value(&controller_root, "memory.max")),
+            readable_cpu(&cgroup_value(&controller_root, "cpu.max")),
+            readable_tasks(&cgroup_value(&controller_root, "pids.max")),
+        );
         if reports.is_empty() {
-            println!("  VM: controller PID {controller}");
-            println!("  Host functions: controller PID {controller}");
-            println!("  Access: the VM remains the guest security boundary.");
+            println!("      Namespaces inherited unchanged from the caller environment");
+            println!("      Meaning    Hyperlight added no native process boundary");
+        }
+        let controller_values = ["pid", "mnt", "ipc", "net", "user"]
+            .map(|namespace| namespace_identity(controller, namespace));
+        for report in reports {
+            let root_pid = report.root_process_id as u32;
+            let workload = workload_pid(root_pid);
+            let cgroup =
+                process_cgroup(workload as i32).unwrap_or_else(|_| "unavailable".to_owned());
+            let cgroup_root = Path::new("/sys/fs/cgroup").join(cgroup.trim_start_matches('/'));
+            let relationships = ["pid", "mnt", "ipc", "net", "user"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, namespace)| {
+                    (
+                        namespace,
+                        namespace_relationship(
+                            &controller_values[index],
+                            &namespace_identity(workload, namespace),
+                        ),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let private = relationships
+                .iter()
+                .filter_map(|(name, relationship)| (*relationship == "PRIVATE").then_some(*name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let shared = relationships
+                .iter()
+                .filter_map(|(name, relationship)| (*relationship == "SAME").then_some(*name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!();
+            println!("    {}", role_name(report));
             println!(
-                "  Native limits: no per-role limits. The controller keeps its ambient access. An outer launcher may bound the whole application."
+                "      Processes  supervisor PID {root_pid}, workload PID {workload} (namespace PID {})",
+                namespace_pid(workload).unwrap_or(0)
             );
+            println!("      Cgroup     {cgroup}");
+            println!(
+                "      Limits     memory {}, CPU {}, tasks {}",
+                readable_memory(&cgroup_value(&cgroup_root, "memory.max")),
+                readable_cpu(&cgroup_value(&cgroup_root, "cpu.max")),
+                readable_tasks(&cgroup_value(&cgroup_root, "pids.max")),
+            );
+            println!(
+                "      Members    {} native processes: supervisor and confined workload",
+                domain_members(root_pid).len()
+            );
+            if !private.is_empty() {
+                println!("      Private    {private} namespaces differ from the caller");
+            }
+            if !shared.is_empty() {
+                println!("      Shared     {shared} namespaces match the caller");
+            }
+            println!("      Meaning    the workload runs in its delegated confined domain");
+            if details {
+                println!(
+                    "      Namespace IDs  pid={} mount={} ipc={} network={} user={}",
+                    namespace_token(workload, "pid"),
+                    namespace_token(workload, "mnt"),
+                    namespace_token(workload, "ipc"),
+                    namespace_token(workload, "net"),
+                    namespace_token(workload, "user"),
+                );
+            }
+        }
+    }
+
+    fn print_demo_topology(
+        scenario: Scenario,
+        reports: &[ProcessReport],
+        details: bool,
+        color: bool,
+    ) -> String {
+        let controller = std::process::id();
+        println!();
+        println!("{}", styled("  Process topology", YELLOW_BOLD, color));
+        #[cfg(target_os = "linux")]
+        println!(
+            "    Controller PID {controller} (OS parent PID {})",
+            process_parent(controller).unwrap_or(0)
+        );
+        #[cfg(not(target_os = "linux"))]
+        println!("    Controller PID {controller}");
+        if reports.is_empty() {
+            println!("    `- Guest VM lives inside controller PID {controller}");
+            println!("       `- Host functions execute in controller PID {controller}");
         } else {
             for report in reports {
+                #[cfg(target_os = "linux")]
+                let workload = workload_pid(report.root_process_id as u32);
+                #[cfg(not(target_os = "linux"))]
+                let workload = report.root_process_id as u32;
+                let vm = report.role == hyperlight_host::process::program::ProgramRole::SandboxHost;
                 println!(
-                    "  {} PID {}: launched and owned by controller PID {}",
+                    "    `- {} domain root PID {} (OS parent PID {})",
                     role_name(report),
                     report.root_process_id,
-                    controller
-                );
-                for line in process_access_explanation(scenario, report) {
-                    println!("    {line}");
-                }
-                if details {
-                    println!("    Technical boundary: {}", report.effective_isolation());
-                    for control in &report.controls {
-                        match &control.result {
-                            ControlResult::Applied {
-                                effective,
-                                mechanism,
-                            } => println!("    Detail: {effective:?} via {mechanism}"),
-                            ControlResult::NotApplied { reason } => println!(
-                                "    Detail: {:?} was not applied: {reason}",
-                                control.requested.control
-                            ),
+                    {
+                        #[cfg(target_os = "linux")]
+                        {
+                            process_parent(report.root_process_id as u32).unwrap_or(0)
                         }
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            controller
+                        }
+                    },
+                );
+                if workload != report.root_process_id as u32 {
+                    println!(
+                        "       `- Confined {} workload PID {workload}",
+                        role_name(report)
+                    );
+                }
+                if vm {
+                    println!("          `- Guest VM lives inside workload PID {workload}");
+                    if scenario == Scenario::VmHost {
+                        println!(
+                            "             `- Host functions are co-located in the same OS process"
+                        );
+                    }
+                } else {
+                    println!(
+                        "          `- Declared host functions execute in workload PID {workload}"
+                    );
+                }
+            }
+            if !scenario.dedicated_vm_host() {
+                println!("    `- Guest VM lives inside controller PID {controller}");
+            }
+        }
+        println!();
+        println!(
+            "{}",
+            styled("  Isolation and resource boundaries", YELLOW_BOLD, color)
+        );
+        #[cfg(target_os = "linux")]
+        print_linux_comparison(reports, controller, details);
+        if reports.is_empty() {
+            println!("    Hyperlight   requests no process-containment policy for LOCAL");
+            #[cfg(target_os = "linux")]
+            println!(
+                "    Caller       inherits OS policy and cgroup {}",
+                process_cgroup(controller as i32).unwrap_or_else(|_| "unavailable".to_owned())
+            );
+            #[cfg(not(target_os = "linux"))]
+            println!("    Caller       inherits its ordinary parent environment and OS policy");
+            println!("    Guest VM     guest execution remains inside the VM boundary");
+        } else if details {
+            for report in reports {
+                println!("    Detailed policy");
+                for line in process_access_explanation(scenario, report) {
+                    println!("      {line}");
+                }
+                println!("    Raw boundary  {}", report.effective_isolation());
+                for control in &report.controls {
+                    match &control.result {
+                        ControlResult::Applied {
+                            effective,
+                            mechanism,
+                        } => println!("      {effective:?} via {mechanism}"),
+                        ControlResult::NotApplied { reason } => println!(
+                            "      {:?} not applied: {reason}",
+                            control.requested.control
+                        ),
                     }
                 }
             }
         }
-        println!("  Inspect from a second terminal:");
-        for command in inspection_commands(reports) {
-            println!("    {command}");
-        }
+        inspection_command(reports)
     }
 
     fn wait_for_inspection<R: BufRead, W: Write>(
         noninteractive: bool,
         stdin_is_terminal: bool,
+        command: &str,
+        clipboard: bool,
+        color: bool,
         input: &mut R,
         output: &mut W,
     ) -> Result<()> {
@@ -719,7 +1112,26 @@ mod demo {
                 "Interactive demo input is not a terminal. Run with {NONINTERACTIVE} for CI or redirected input"
             ));
         }
-        write!(output, "  Press Enter to stop this mode and continue... ")?;
+        if clipboard && copy_inspection_command(command, clipboard_provider().as_deref()) {
+            writeln!(
+                output,
+                "  Clipboard cleared and inspection command copied. Paste it into a second WSL terminal."
+            )?;
+        } else if clipboard {
+            writeln!(
+                output,
+                "  Clipboard unavailable. Run this in a second WSL terminal:\n  {command}"
+            )?;
+        }
+        write!(
+            output,
+            "{}",
+            styled(
+                "  Press Enter to stop this mode and continue... ",
+                YELLOW_BOLD,
+                color
+            )
+        )?;
         output.flush()?;
         let mut line = String::new();
         if input.read_line(&mut line)? == 0 {
@@ -926,10 +1338,18 @@ mod demo {
         let mut noninteractive = false;
         let mut details = false;
         let mut consent = false;
+        let mut no_color = false;
+        let mut no_clipboard = false;
+        let mut local_only = false;
+        let mut constrained_only = false;
         for argument in args {
             match argument.to_str() {
                 Some(NONINTERACTIVE) => noninteractive = true,
                 Some(DETAILS) | Some("--verbose") => details = true,
+                Some(NO_COLOR) => no_color = true,
+                Some(NO_CLIPBOARD) => no_clipboard = true,
+                Some(LOCAL_ONLY) => local_only = true,
+                Some(CONSTRAINED_ONLY) => constrained_only = true,
                 Some(WINDOWS_VM_HOST_CONSENT) => consent = true,
                 Some(value) if value.starts_with('-') => {
                     return Err(new_error!("Unknown demo option '{value}'"));
@@ -941,9 +1361,10 @@ mod demo {
         }
         let guest = guest.ok_or_else(|| {
             new_error!(
-                "Usage: process_placement demo GUEST [{NONINTERACTIVE}] [{DETAILS}] [{WINDOWS_VM_HOST_CONSENT}]"
+                "Usage: process_placement demo GUEST [{NONINTERACTIVE}] [{DETAILS}] [{NO_COLOR}] [{NO_CLIPBOARD}] [{WINDOWS_VM_HOST_CONSENT}]"
             )
         })?;
+        let scenarios = Scenario::demo_scenarios(local_only, constrained_only)?;
         if consent && !cfg!(target_os = "windows") {
             return Err(new_error!(
                 "{WINDOWS_VM_HOST_CONSENT} is valid only on Windows"
@@ -959,6 +1380,16 @@ mod demo {
                 "Interactive demo input is not a terminal. Run with {NONINTERACTIVE} for CI or redirected input"
             ));
         }
+        let interactive =
+            !noninteractive && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+        let color = color_enabled(
+            interactive,
+            no_color,
+            std::env::var_os("NO_COLOR").is_some(),
+        );
+        let clipboard = interactive
+            && !no_clipboard
+            && std::env::var_os("HYPERLIGHT_DEMO_NO_CLIPBOARD").is_none();
         let guest = std::fs::canonicalize(guest).map_err(|error| {
             new_error!(
                 "Guest binary {} is unavailable: {error}. Build the release guest and pass its existing path",
@@ -966,33 +1397,77 @@ mod demo {
             )
         })?;
         println!();
-        println!("Hyperlight process placement demo");
         println!(
-            "Six modes. A small live call set per mode. Native processes stay alive for inspection."
+            "{}",
+            styled("Hyperlight process placement demo", YELLOW_BOLD, color)
         );
-        for (index, scenario) in Scenario::ALL.into_iter().enumerate() {
+        if local_only {
+            println!("LOCAL runs directly under the caller's inherited environment and cgroup.");
+        } else if constrained_only {
+            println!(
+                "Modes 2-6 use the constrained launcher for delegated cgroup authority and native-role confinement."
+            );
+        } else {
+            println!(
+                "Six modes. A small live call set per mode. Native processes stay alive for inspection."
+            );
+        }
+        for scenario in scenarios {
+            let scenario = *scenario;
+            let index = Scenario::ALL
+                .iter()
+                .position(|candidate| *candidate == scenario)
+                .expect("scenario belongs to demo");
             println!();
-            println!("[{}/6] {}", index + 1, scenario.name().to_ascii_uppercase());
+            println!(
+                "{}",
+                styled(
+                    &format!("[{}/4] {}", index + 1, scenario.name().to_ascii_uppercase()),
+                    YELLOW_BOLD,
+                    color
+                )
+            );
             println!("{}", scenario.description());
             let (mut sandbox, _) = build_sandbox(scenario, &guest)?;
             check_calls(&mut sandbox, scenario.child_policy())?;
             let reports = sandbox.process_reports();
             check_independent_domains(scenario, &reports)?;
-            println!("  PASS Add(17, 25) = 42");
-            print_demo_topology(scenario, &reports, details);
+            println!("{}", styled("  PASS Add(17, 25) = 42", YELLOW_BOLD, color));
+            let inspection = print_demo_topology(scenario, &reports, details, color);
             wait_for_inspection(
                 noninteractive,
                 std::io::stdin().is_terminal(),
+                &inspection,
+                clipboard,
+                color,
                 &mut std::io::stdin().lock(),
                 &mut std::io::stdout().lock(),
             )?;
             sandbox.shutdown()?;
             drop(sandbox);
             verify_processes_stopped(&reports)?;
-            println!("  PASS shutdown and native-process cleanup");
+            println!(
+                "{}",
+                styled(
+                    "  PASS shutdown and native-process cleanup",
+                    YELLOW_BOLD,
+                    color
+                )
+            );
+            if interactive && color && index + 1 < Scenario::DEMO.len() {
+                print!("\x1b[2J\x1b[H");
+                std::io::stdout().flush()?;
+            }
         }
         println!();
-        println!("PASS all six process placement modes");
+        let summary = if local_only {
+            "PASS LOCAL inherited-environment baseline"
+        } else if constrained_only {
+            "PASS constrained placement modes 2-4"
+        } else {
+            "PASS all four presentation modes"
+        };
+        println!("{}", styled(summary, YELLOW_BOLD, color));
         Ok(())
     }
 
@@ -1080,7 +1555,7 @@ mod demo {
 
     fn help_text() -> &'static str {
         "Usage:\n\
-  process_placement demo GUEST [--noninteractive] [--details] [--allow-windows-vm-host]\n\
+  process_placement demo GUEST [--noninteractive] [--details] [--no-color] [--no-clipboard] [--allow-windows-vm-host]\n\
   process_placement qualify MODE GUEST NEW_OUTPUT_DIRECTORY [--allow-windows-vm-host]\n\
   process_placement MODE GUEST NEW_OUTPUT_DIRECTORY [--allow-windows-vm-host]\n\
 \n\
@@ -1092,8 +1567,11 @@ Modes:\n\
   worker-children-allowed       Confined function worker may create child processes\n\
   worker-children-blocked       Confined function worker cannot create child processes\n\
 \n\
-The demo runs all six modes and pauses while each topology is live. Use\n\
---noninteractive for CI or redirected input. Qualification retains snapshot,\n\
+The demo runs four presentation modes and pauses while each topology is live. Interactive\n\
+Linux pauses copy one inspection command for a second WSL terminal. Use\n\
+--no-color or --no-clipboard to disable those aids. Use --noninteractive for CI\n\
+or redirected input. The launcher runs LOCAL directly and uses the constrained\n\
+transient unit only for modes 2-6. Qualification retains snapshot,\n\
 reconstruction, recovery and cleanup checks. Its output directory must not exist.\n\
 Windows demos and VM-host qualification require --allow-windows-vm-host because\n\
 the VM host runs outside AppContainer."
@@ -1241,7 +1719,7 @@ the VM host runs outside AppContainer."
         }
 
         #[test]
-        fn demo_dispatch_contains_all_six_modes() {
+        fn demo_dispatch_keeps_six_qualification_modes() {
             assert_eq!(Scenario::ALL.len(), 6);
             for scenario in Scenario::ALL {
                 assert_eq!(Scenario::parse(scenario.name()).unwrap(), scenario);
@@ -1249,10 +1727,36 @@ the VM host runs outside AppContainer."
         }
 
         #[test]
+        fn demo_selection_runs_local_once_and_constrained_modes_without_local() {
+            assert_eq!(
+                Scenario::demo_scenarios(true, false).unwrap(),
+                &[Scenario::Local]
+            );
+            assert_eq!(
+                Scenario::demo_scenarios(false, true).unwrap(),
+                &Scenario::DEMO[1..]
+            );
+            assert_eq!(
+                Scenario::demo_scenarios(false, false).unwrap(),
+                &Scenario::DEMO
+            );
+            assert!(Scenario::demo_scenarios(true, true).is_err());
+        }
+
+        #[test]
         fn noninteractive_pause_returns_without_input() {
             let mut input = std::io::Cursor::new(Vec::<u8>::new());
             let mut output = Vec::new();
-            wait_for_inspection(true, false, &mut input, &mut output).unwrap();
+            wait_for_inspection(
+                true,
+                false,
+                "inspection",
+                false,
+                false,
+                &mut input,
+                &mut output,
+            )
+            .unwrap();
             assert!(output.is_empty());
         }
 
@@ -1261,15 +1765,63 @@ the VM host runs outside AppContainer."
             let mut input = std::io::Cursor::new(Vec::<u8>::new());
             let mut output = Vec::new();
             assert!(
-                wait_for_inspection(false, false, &mut input, &mut output)
-                    .unwrap_err()
-                    .to_string()
-                    .contains("--noninteractive")
+                wait_for_inspection(
+                    false,
+                    false,
+                    "inspection",
+                    false,
+                    false,
+                    &mut input,
+                    &mut output,
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("--noninteractive")
             );
 
             let mut input = std::io::Cursor::new(b"\n".to_vec());
-            wait_for_inspection(false, true, &mut input, &mut output).unwrap();
-            assert!(String::from_utf8(output).unwrap().contains("Press Enter"));
+            wait_for_inspection(
+                false,
+                true,
+                "inspection",
+                false,
+                true,
+                &mut input,
+                &mut output,
+            )
+            .unwrap();
+            let output = String::from_utf8(output).unwrap();
+            assert!(output.contains("Press Enter"));
+            assert!(output.contains("\x1b["));
+        }
+
+        #[test]
+        fn plain_style_has_no_ansi() {
+            assert_eq!(styled("PASS", YELLOW_BOLD, false), "PASS");
+            assert!(!styled("PASS", YELLOW_BOLD, false).contains('\x1b'));
+            assert!(color_enabled(true, false, false));
+            assert!(!color_enabled(true, false, true));
+            assert!(!color_enabled(true, true, false));
+            assert!(!color_enabled(false, false, false));
+        }
+
+        #[test]
+        fn clipboard_is_bounded_and_uses_stdin_not_shell() {
+            assert!(!copy_inspection_command("safe", None));
+            assert!(!copy_inspection_command(
+                &"x".repeat(8193),
+                Some(Path::new("/bin/cat"))
+            ));
+            assert!(copy_inspection_command(
+                "printf '%s' '$(touch /tmp/not-executed)'",
+                Some(Path::new("/bin/cat"))
+            ));
+            let mut writes = Vec::new();
+            assert!(copy_inspection_command_with("inspection", |content| {
+                writes.push(content.to_owned());
+                true
+            }));
+            assert_eq!(writes, ["", "inspection"]);
         }
 
         #[test]
@@ -1279,6 +1831,19 @@ the VM host runs outside AppContainer."
             let child = control_explanation(&ProcessControl::DenyChildProcesses);
             assert!(child.contains("process"));
             assert!(!child.contains("ProcessControl"));
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn namespace_classification_uses_observed_values() {
+            assert_eq!(namespace_relationship("pid:[1]", "pid:[1]"), "SAME");
+            assert_eq!(namespace_relationship("pid:[1]", "pid:[2]"), "PRIVATE");
+            let pid = std::process::id();
+            assert_ne!(namespace_token(pid, "pid"), "unavailable");
+            assert_ne!(
+                process_cgroup(pid as i32).unwrap_or_default(),
+                "unavailable"
+            );
         }
 
         #[test]

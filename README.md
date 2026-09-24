@@ -72,8 +72,11 @@ See [docs/getting-started.md](./docs/getting-started.md) for detailed prerequisi
 - **Running** Hyperlight
 - **Building guests**
 
-For Windows and Linux native process placement examples, see the
-[process-isolation quickstart](./dev/process-isolation/QUICKSTART.md).
+For Linux native process placement, start with
+`just check-constrained-process-config`, then
+`just install-constrained-process`. See the
+[process-isolation quickstart](./dev/process-isolation/QUICKSTART.md) for the
+Linux demos, custom commands and Windows examples.
 
 Or skip setup entirely with a codespace:
 

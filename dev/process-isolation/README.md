@@ -33,8 +33,12 @@ Snapshots retain immutable program references, never launch authority. A loaded
 snapshot requires a fresh provider from the current host.
 
 The supported Linux product integration is documented in
-[`QUICKSTART.md`](QUICKSTART.md). A one-time root install supplies immutable
-assets and device group policy. `hyperlight-run` creates a bounded delegated
+[`QUICKSTART.md`](QUICKSTART.md). Start with
+`just check-constrained-process-config`, then
+`just install-constrained-process`. The adaptive privileged phase refreshes
+immutable assets and supplies only missing device, delegation or AppArmor
+policy. The launcher captures installation inputs before elevation and installs
+them from root-owned staging. `hyperlight-run` creates a bounded delegated
 transient user service for each ordinary-user application run. There is no
 privileged broker.
 

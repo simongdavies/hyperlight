@@ -2,8 +2,9 @@
 // Copyright 2026 The Hyperlight Authors.
 
 use std::fs::OpenOptions;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, IsTerminal, Read, Seek, SeekFrom, Write};
 use std::path::Path;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use hyperlight_host::process::{
@@ -17,6 +18,98 @@ const WORKER: &str = "file-resource";
 const RIGHTS: OsResourceRights = OsResourceRights::READ.union(OsResourceRights::WRITE);
 const ECHO: HostFunctionContract<(String,), String> =
     HostFunctionContract::new("HostEchoString", Idempotency::NonIdempotent);
+
+fn copy_command(command: &str) -> bool {
+    if command.len() > 8192 || command.contains('\0') || command.contains('\x1b') {
+        return false;
+    }
+    let provider = [
+        "/mnt/c/Windows/System32/clip.exe",
+        "/mnt/c/Windows/Sysnative/clip.exe",
+    ]
+    .into_iter()
+    .map(std::path::PathBuf::from)
+    .find(|path| path.is_file());
+    let Some(provider) = provider else {
+        return false;
+    };
+    for content in ["", command] {
+        let Ok(mut child) = Command::new(&provider)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
+            return false;
+        };
+        if child
+            .stdin
+            .take()
+            .is_none_or(|mut input| input.write_all(content.as_bytes()).is_err())
+            || !child.wait().is_ok_and(|status| status.success())
+        {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(target_os = "linux")]
+fn workload_process(root_process: u32) -> Result<u32> {
+    let cgroup_membership = std::fs::read_to_string(format!("/proc/{root_process}/cgroup"))?;
+    let cgroup = cgroup_membership
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .ok_or_else(|| new_error!("Typed resource worker cgroup is unavailable"))?;
+    let members = std::fs::read_to_string(format!("/sys/fs/cgroup{cgroup}/cgroup.procs"))?;
+    members
+        .lines()
+        .filter_map(|value| value.parse().ok())
+        .find(|process| {
+            *process != root_process
+                && std::fs::read(format!("/proc/{process}/cmdline")).is_ok_and(|command| {
+                    !command
+                        .windows(b"/minijail0".len())
+                        .any(|window| window == b"/minijail0")
+                })
+        })
+        .ok_or_else(|| new_error!("Typed resource workload PID is unavailable"))
+}
+
+fn inspection_command(root_process: i32) -> Result<String> {
+    let controller = std::process::id();
+    #[cfg(target_os = "linux")]
+    {
+        let root_process = u32::try_from(root_process)
+            .map_err(|_| new_error!("Typed resource worker PID is invalid"))?;
+        let workload = workload_process(root_process)?;
+        let entries =
+            format!("controller:{controller} domain-root:{root_process} workload:{workload}");
+        Ok(format!(
+            "entries='{entries}'; \
+         nsid() {{ value=$(readlink \"/proc/$1/ns/$2\"); value=${{value#*[}}; printf '%s' \"${{value%]}}\"; }}; \
+         printf '\\nPROCESSES\\n%-16s %-8s %-8s %-6s %s\\n' ROLE PID PPID STATE COMMAND; \
+         for item in $entries; do role=${{item%%:*}}; p=${{item##*:}}; printf '%-16s %-8s ' \"$role\" \"$p\"; ps -p \"$p\" -o ppid=,stat=,args=; done; \
+         printf '\\nCGROUPS AND EFFECTIVE LIMITS\\n%-16s %-8s %-7s %-12s %-18s %s\\n' ROLE PID MEMBER MEMORY CPU TASKS/POLICY; \
+         for item in $entries; do role=${{item%%:*}}; p=${{item##*:}}; pcg=$(cut -d: -f3 \"/proc/$p/cgroup\"); proot=/sys/fs/cgroup$pcg; \
+         member=no; grep -qx \"$p\" \"$proot/cgroup.procs\" 2>/dev/null && member=yes; memory=$(cat \"$proot/memory.max\" 2>/dev/null || printf n/a); cpu=$(cat \"$proot/cpu.max\" 2>/dev/null || printf n/a); tasks=$(cat \"$proot/pids.max\" 2>/dev/null || printf n/a); controllers=$(cat \"$proot/cgroup.controllers\" 2>/dev/null | tr ' ' ',' || true); \
+         printf '%-16s %-8s %-7s %-12s %-18s tasks=%s controllers=%s\\n' \"$role\" \"$p\" \"$member\" \"$memory\" \"$cpu\" \"$tasks\" \"${{controllers:-none}}\"; printf '  cgroup: %s\\n' \"$pcg\"; done; \
+         cpid=$(nsid {controller} pid); cmnt=$(nsid {controller} mnt); cipc=$(nsid {controller} ipc); cnet=$(nsid {controller} net); cuser=$(nsid {controller} user); \
+         printf '\\nNAMESPACES\\n%-16s %-8s %-12s %-12s %-12s %-12s %-12s\\n' ROLE PID PID MOUNT IPC NETWORK USER; \
+         for item in $entries; do role=${{item%%:*}}; p=${{item##*:}}; pid=$(nsid \"$p\" pid); mnt=$(nsid \"$p\" mnt); ipc=$(nsid \"$p\" ipc); net=$(nsid \"$p\" net); user=$(nsid \"$p\" user); \
+         printf '%-16s %-8s %-12s %-12s %-12s %-12s %-12s\\n' \"$role\" \"$p\" \"$pid\" \"$mnt\" \"$ipc\" \"$net\" \"$user\"; \
+         if [ \"$p\" = {controller} ]; then printf '  relation: CALLER ENVIRONMENT\\n'; else \
+         [ \"$pid\" = \"$cpid\" ] && rpid=SAME || rpid=PRIVATE; [ \"$mnt\" = \"$cmnt\" ] && rmnt=SAME || rmnt=PRIVATE; [ \"$ipc\" = \"$cipc\" ] && ripc=SAME || ripc=PRIVATE; [ \"$net\" = \"$cnet\" ] && rnet=SAME || rnet=PRIVATE; [ \"$user\" = \"$cuser\" ] && ruser=SAME || ruser=PRIVATE; \
+         printf '  vs controller: pid=%s mount=%s ipc=%s network=%s user=%s\\n' \"$rpid\" \"$rmnt\" \"$ripc\" \"$rnet\" \"$ruser\"; fi; done"
+        ))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(format!(
+            "Get-Process -Id {controller},{root_process} | Format-Table Id,ProcessName,Path"
+        ))
+    }
+}
 
 #[cfg(target_os = "linux")]
 fn anonymous_file() -> Result<std::fs::File> {
@@ -174,11 +267,31 @@ fn profile() -> ProcessProfile {
 
 fn run_controller() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
-    let [guest, read_write_path, read_only_path, input] = args.as_slice() else {
+    if args.len() < 4 {
         return Err(new_error!(
-            "Usage: process_file_resource GUEST READ_WRITE_FILE READ_ONLY_FILE INPUT"
+            "Usage: process_file_resource GUEST READ_WRITE_FILE READ_ONLY_FILE INPUT [--noninteractive] [--no-clipboard]"
         ));
+    }
+    let [guest, read_write_path, read_only_path, input] = &args[..4] else {
+        unreachable!()
     };
+    let mut noninteractive = false;
+    let mut no_clipboard = std::env::var_os("HYPERLIGHT_DEMO_NO_CLIPBOARD").is_some();
+    let mut no_color = std::env::var_os("NO_COLOR").is_some();
+    for option in &args[4..] {
+        match option.to_str() {
+            Some("--noninteractive") => noninteractive = true,
+            Some("--no-clipboard") => no_clipboard = true,
+            Some("--no-color") => no_color = true,
+            Some(value) => return Err(new_error!("Unknown resource demo option '{value}'")),
+            None => return Err(new_error!("Resource demo options must be valid Unicode")),
+        }
+    }
+    if !noninteractive && !std::io::stdin().is_terminal() {
+        return Err(new_error!(
+            "Interactive resource demo input is not a terminal. Run with --noninteractive"
+        ));
+    }
     let input = input
         .to_str()
         .ok_or_else(|| new_error!("Input must be valid UTF-8"))?
@@ -234,13 +347,57 @@ fn run_controller() -> Result<()> {
     if read_only_actual != read_only_original {
         return Err(new_error!("Read-only capability changed its resource"));
     }
-    println!("Typed resource capability transfer:");
-    println!("  read/write capability: read and write succeeded");
-    println!("  read-only capability: read succeeded");
-    println!(
-        "  read-only capability write: denied ({})",
-        std::io::ErrorKind::PermissionDenied
-    );
+    let worker = sandbox
+        .process_reports()
+        .into_iter()
+        .find(|report| report.name == WORKER)
+        .ok_or_else(|| new_error!("Typed resource worker report is missing"))?;
+    if !noninteractive && !no_color && std::io::stdout().is_terminal() {
+        print!("\x1b[2J\x1b[H");
+        std::io::stdout().flush()?;
+    }
+    println!("Process topology");
+    println!("  Controller PID {}", std::process::id());
+    println!("  `- Function worker PID {}", worker.root_process_id);
+    println!("     `- HostEchoString uses two opened file capabilities");
+    println!();
+    println!("Capability results");
+    println!("  {:<14} read succeeded; append succeeded", "read/write");
+    println!("  {:<14} read succeeded; write denied", "read-only");
+    println!();
+    println!("Verification");
+    println!("  PASS caller observed the requested append in the read/write file");
+    println!("  PASS caller observed no change in the read-only file");
+    println!("  The worker could use only the rights attached to each opened file.");
+    if !noninteractive {
+        let command = inspection_command(worker.root_process_id)?;
+        if !no_clipboard && copy_command(&command) {
+            println!();
+            println!(
+                "Clipboard cleared and inspection command copied. Paste it into a second WSL terminal."
+            );
+        } else if !no_clipboard {
+            println!();
+            println!("Clipboard unavailable. Run in a second WSL terminal: {command}");
+        }
+        print!("Press Enter to release the file capabilities and stop the worker... ");
+        std::io::stdout().flush()?;
+        let mut line = String::new();
+        if std::io::stdin().lock().read_line(&mut line)? == 0 {
+            return Err(new_error!(
+                "Interactive resource demo input closed before Enter"
+            ));
+        }
+        if !no_color && std::io::stdout().is_terminal() {
+            print!("\x1b[2J\x1b[H");
+            std::io::stdout().flush()?;
+        }
+    }
+    sandbox.shutdown()?;
+    drop(sandbox);
+    drop(provider);
+    println!();
+    println!("PASS typed resource delegation");
     Ok(())
 }
 

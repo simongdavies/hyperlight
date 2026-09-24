@@ -11,6 +11,10 @@ runtime_max=5min
 stop_timeout=30
 use_pty=0
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+demo_environment_options=()
+[[ -n ${NO_COLOR-} ]] && demo_environment_options+=(--no-color)
+[[ -n ${HYPERLIGHT_DEMO_NO_CLIPBOARD-} ]] &&
+    demo_environment_options+=(--no-clipboard)
 
 usage() {
     cat <<'EOF'
@@ -18,8 +22,10 @@ Usage: hyperlight-run [OPTIONS] -- COMMAND [ARG...]
        hyperlight-run run [OPTIONS] -- COMMAND [ARG...]
        hyperlight-run init [--plan] [--user USER] [--source PATH]
        hyperlight-run check
-       hyperlight-run demo [--noninteractive] [--details]
-       hyperlight-run nested-demo [--noninteractive]
+       hyperlight-run demo [--noninteractive] [--details] [--no-color] [--no-clipboard]
+       hyperlight-run placement-demo [--noninteractive] [--details] [--no-color] [--no-clipboard]
+       hyperlight-run nested-demo [--noninteractive] [--no-color] [--no-clipboard]
+       hyperlight-run resource-demo [OPTIONS]
        hyperlight-run qualify --all
        hyperlight-run examples --all
        hyperlight-run uninstall [--plan] [--user USER]
@@ -29,8 +35,10 @@ Run an unprivileged Hyperlight application in a bounded delegated systemd unit.
 Commands:
   init                   Validate and perform the one-time operator installation
   check                  Validate the installed integration and host prerequisites
-  demo                   Run the fast interactive six-mode presentation
+  demo                   Run placement, typed-resource and nested presentations
+  placement-demo         Run the focused six-mode placement presentation
   nested-demo            Run the concise nested-sandbox presentation
+  resource-demo          Run the typed file-capability example
   qualify --all          Run exhaustive six-mode qualification
   examples --all         Compatibility alias for qualify --all
   run                    Explicit form of the normal application launch
@@ -42,6 +50,8 @@ Options:
   --cpu-quota VALUE      Aggregate CPUQuota. Default: 400%
   --runtime-max VALUE    Outer RuntimeMaxSec. Default: 5min
   --stop-timeout SECONDS TimeoutStopSec. Integer, at least 10. Default: 30
+  --no-color            Disable interactive ANSI colour
+  --no-clipboard        Do not copy interactive inspection commands
   -h, --help             Show this help
 EOF
 }
@@ -77,10 +87,34 @@ if [[ ${1-} == init ]]; then
         esac
     done
     installer=$(bootstrap_tool install_linux.py)
-    command=(python3 "$installer" --source "$source" --user "$user")
-    "${command[@]}" --plan
+    installer_dir=$(dirname -- "$installer")
+    if [[ $installer_dir == /usr/libexec/hyperlight ]]; then
+        repository_root=/
+    else
+        repository_root=$(cd -- "$installer_dir/../.." && pwd -P)
+    fi
+    installer_b64=$(base64 -w0 -- "$installer")
+    run_installer() {
+        printf '%s' "$installer_b64" | base64 -d |
+            HYPERLIGHT_INSTALL_HERE=$installer_dir \
+            HYPERLIGHT_INSTALL_ROOT=$repository_root \
+            HYPERLIGHT_INSTALLER_B64=$installer_b64 \
+            python3 - --source "$source" --user "$user" "$@"
+    }
+    run_installer --plan
     ((plan)) && exit 0
-    exec sudo -- "${command[@]}"
+    set +e
+    run_installer --needs-mutation >/dev/null
+    needs_mutation=$?
+    set -e
+    if ((needs_mutation == 0)); then
+        echo "Hyperlight integration is already configured. No sudo is required."
+        exit 0
+    fi
+    ((needs_mutation == 10)) ||
+        { echo "hyperlight-run: unable to determine required mutations" >&2; exit "$needs_mutation"; }
+    run_installer --sudo-install
+    exit
 fi
 
 if [[ ${1-} == check ]]; then
@@ -122,8 +156,69 @@ fi
 
 if [[ ${1-} == demo ]]; then
     shift
-    demo_options=()
+    suite_options=("${demo_environment_options[@]}")
+    nested_options=("${demo_environment_options[@]}")
+    resource_options=("${demo_environment_options[@]}")
+    while (($#)); do
+        case "$1" in
+            --noninteractive)
+                suite_options+=("$1")
+                nested_options+=("$1")
+                resource_options+=("$1")
+                shift
+                ;;
+            --details|--verbose) suite_options+=("$1"); shift ;;
+            --no-color)
+                suite_options+=("$1")
+                nested_options+=("$1")
+                resource_options+=("$1")
+                shift
+                ;;
+            --no-clipboard)
+                suite_options+=("$1")
+                nested_options+=("$1")
+                resource_options+=("$1")
+                shift
+                ;;
+            -h|--help)
+                echo "Usage: hyperlight-run demo [--noninteractive] [--details] [--no-color] [--no-clipboard]"
+                echo "Runs placement-demo, resource-demo and nested-demo."
+                exit 0
+                ;;
+            *) echo "hyperlight-run: unknown demo option: $1" >&2; exit 2 ;;
+        esac
+    done
+    echo
+    echo "Hyperlight constrained-process demo suite"
+    echo "========================================="
+    echo "1. Process placement"
+    "$0" placement-demo "${suite_options[@]}"
+    if [[ -t 1 &&
+          ! " ${suite_options[*]} " =~ " --noninteractive " &&
+          ! " ${suite_options[*]} " =~ " --no-color " ]]; then
+        printf '\033[2J\033[H'
+    fi
+    echo
+    echo "2. Typed resource delegation"
+    "$0" resource-demo "${resource_options[@]}"
+    if [[ -t 1 &&
+          ! " ${resource_options[*]} " =~ " --noninteractive " &&
+          ! " ${resource_options[*]} " =~ " --no-color " ]]; then
+        printf '\033[2J\033[H'
+    fi
+    echo
+    echo "3. Nested sandbox composition"
+    "$0" nested-demo "${nested_options[@]}"
+    echo
+    echo "PASS all constrained-process demo stories"
+    exit 0
+fi
+
+if [[ ${1-} == placement-demo ]]; then
+    shift
+    demo_options=("${demo_environment_options[@]}")
     noninteractive=0
+    demo_runtime=5min
     while (($#)); do
         case "$1" in
             --noninteractive)
@@ -132,8 +227,9 @@ if [[ ${1-} == demo ]]; then
                 shift
                 ;;
             --details|--verbose) demo_options+=("$1"); shift ;;
+            --no-color|--no-clipboard) demo_options+=("$1"); shift ;;
             -h|--help)
-                echo "Usage: hyperlight-run demo [--noninteractive] [--details]"
+                echo "Usage: hyperlight-run placement-demo [--noninteractive] [--details] [--no-color] [--no-clipboard]"
                 exit 0
                 ;;
             *) echo "hyperlight-run: unknown demo option: $1" >&2; exit 2 ;;
@@ -146,16 +242,21 @@ if [[ ${1-} == demo ]]; then
         [[ -t 0 && -t 1 ]] ||
             { echo "hyperlight-run: interactive demo requires a terminal; use --noninteractive" >&2; exit 1; }
         use_pty=1
+        demo_runtime=infinity
     fi
-    set -- --runtime-max 5min -- \
+    /usr/libexec/hyperlight/process_placement demo \
+        /usr/libexec/hyperlight/simpleguest \
+        "${demo_options[@]}" --local-only
+    set -- --runtime-max "$demo_runtime" -- \
         /usr/libexec/hyperlight/process_placement demo \
-        /usr/libexec/hyperlight/simpleguest "${demo_options[@]}"
+        /usr/libexec/hyperlight/simpleguest "${demo_options[@]}" --constrained-only
 fi
 
 if [[ ${1-} == nested-demo ]]; then
     shift
-    demo_options=()
+    demo_options=("${demo_environment_options[@]}")
     noninteractive=0
+    demo_runtime=5min
     while (($#)); do
         case "$1" in
             --noninteractive)
@@ -163,8 +264,9 @@ if [[ ${1-} == nested-demo ]]; then
                 demo_options+=("$1")
                 shift
                 ;;
+            --no-color|--no-clipboard) demo_options+=("$1"); shift ;;
             -h|--help)
-                echo "Usage: hyperlight-run nested-demo [--noninteractive]"
+                echo "Usage: hyperlight-run nested-demo [--noninteractive] [--no-color] [--no-clipboard]"
                 exit 0
                 ;;
             *) echo "hyperlight-run: unknown nested-demo option: $1" >&2; exit 2 ;;
@@ -177,10 +279,94 @@ if [[ ${1-} == nested-demo ]]; then
         [[ -t 0 && -t 1 ]] ||
             { echo "hyperlight-run: interactive nested demo requires a terminal; use --noninteractive" >&2; exit 1; }
         use_pty=1
+        demo_runtime=infinity
     fi
-    set -- --runtime-max 5min -- \
+
+    set -- --runtime-max "$demo_runtime" -- \
         /usr/libexec/hyperlight/nested_sandbox demo \
         /usr/libexec/hyperlight/simpleguest "${demo_options[@]}"
+fi
+
+if [[ ${1-} == resource-demo ]]; then
+    shift
+    demo_options=("${demo_environment_options[@]}")
+    noninteractive=0
+    demo_runtime=5min
+    read_write=${HYPERLIGHT_RESOURCE_DEMO_READ_WRITE-}
+    read_only=${HYPERLIGHT_RESOURCE_DEMO_READ_ONLY-}
+    input=${HYPERLIGHT_RESOURCE_DEMO_INPUT-typed-capability}
+    while (($#)); do
+        case "$1" in
+            --read-write) read_write=${2:?}; shift 2 ;;
+            --read-only) read_only=${2:?}; shift 2 ;;
+            --input) input=${2:?}; shift 2 ;;
+            --noninteractive)
+                noninteractive=1
+                demo_options+=("$1")
+                shift
+                ;;
+            --no-color) demo_options+=("$1"); shift ;;
+            --no-clipboard) demo_options+=("$1"); shift ;;
+            -h|--help)
+                cat <<'EOF'
+Usage: hyperlight-run resource-demo [OPTIONS]
+
+Options:
+  --read-write PATH  Existing regular file granted read/write access
+  --read-only PATH   Existing regular file granted read-only access
+  --input TEXT       Text appended through the read/write capability
+  --noninteractive   Do not pause for live inspection
+  --no-color         Disable interactive ANSI colour
+  --no-clipboard     Do not copy the inspection command
+
+CLI options override HYPERLIGHT_RESOURCE_DEMO_READ_WRITE,
+HYPERLIGHT_RESOURCE_DEMO_READ_ONLY and HYPERLIGHT_RESOURCE_DEMO_INPUT.
+Missing paths use temporary sample files that are removed after the demo.
+EOF
+                exit 0
+                ;;
+            *) echo "hyperlight-run: unknown resource-demo option: $1" >&2; exit 2 ;;
+        esac
+    done
+    [[ -x /usr/libexec/hyperlight/process_file_resource &&
+       -f /usr/libexec/hyperlight/simpleguest ]] ||
+        { echo "hyperlight-run: integration is not installed; run hyperlight-run init" >&2; exit 1; }
+    if ((!noninteractive)); then
+        [[ -t 0 && -t 1 ]] ||
+            { echo "hyperlight-run: interactive resource demo requires a terminal; use --noninteractive" >&2; exit 1; }
+        use_pty=1
+        demo_runtime=infinity
+    fi
+    demo_dir=
+    if [[ -z $read_write || -z $read_only ]]; then
+        demo_dir=$(mktemp -d "${TMPDIR:-/tmp}/hyperlight-resource-demo.XXXXXX")
+        trap '[[ -z ${demo_dir-} ]] || rm -rf -- "$demo_dir"' EXIT
+        if [[ -z $read_write ]]; then
+            read_write=$demo_dir/read-write
+            printf 'writable-sample' >"$read_write"
+        fi
+        if [[ -z $read_only ]]; then
+            read_only=$demo_dir/read-only
+            printf 'read-only-sample' >"$read_only"
+        fi
+    fi
+    [[ -f $read_write && -r $read_write && -w $read_write ]] ||
+        { echo "hyperlight-run: read/write resource must be a readable, writable regular file: $read_write" >&2; exit 2; }
+    [[ -f $read_only && -r $read_only ]] ||
+        { echo "hyperlight-run: read-only resource must be a readable regular file: $read_only" >&2; exit 2; }
+    [[ ! $read_write -ef $read_only ]] ||
+        { echo "hyperlight-run: read/write and read-only resources must be different files" >&2; exit 2; }
+    echo
+    echo "Typed resource demo"
+    echo "==================="
+    echo "Controller grants:"
+    printf '  %-12s %s\n' "read/write" "$read_write"
+    printf '  %-12s %s\n' "read-only" "$read_only"
+    echo "The worker receives opened file capabilities, not authority to reopen paths."
+    set -- --runtime-max "$demo_runtime" -- \
+        /usr/libexec/hyperlight/process_file_resource \
+        /usr/libexec/hyperlight/simpleguest \
+        "$read_write" "$read_only" "$input" "${demo_options[@]}"
 fi
 
 if [[ ${1-} == uninstall ]]; then
@@ -198,9 +384,8 @@ if [[ ${1-} == uninstall ]]; then
         esac
     done
     installer=/usr/libexec/hyperlight/install_linux.py
-    if [[ ! -f $installer ]]; then
-        installer=$(bootstrap_tool install_linux.py)
-    fi
+    [[ -f $installer && $(stat -c '%u:%g:%a' "$installer") == 0:0:755 ]] ||
+        { echo "hyperlight-run: trusted installed uninstaller is unavailable" >&2; exit 1; }
     command=(python3 "$installer" --uninstall --user "$user")
     "${command[@]}" --plan
     ((plan)) && exit 0
@@ -253,6 +438,7 @@ stdio_option=(--pipe)
 ((use_pty)) && stdio_option=(--pty)
 set +e
 systemd-run --user --wait --collect "${stdio_option[@]}" --same-dir \
+    --quiet \
     --unit="$unit" --service-type=exec \
     --property="MemoryMax=$memory_max" \
     --property="TasksMax=$tasks_max" \

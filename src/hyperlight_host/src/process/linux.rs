@@ -100,7 +100,7 @@ impl LinuxProcessResources {
         if device != Path::new("/dev/kvm") && device != Path::new("/dev/mshv") {
             return Err(new_error!("Unsupported hypervisor device: {device:?}"));
         }
-        if !fs::symlink_metadata(&device)?.file_type().is_char_device() {
+        if !fs::symlink_metadata(device)?.file_type().is_char_device() {
             return Err(new_error!("Hypervisor device must be a character device"));
         }
         let backend = if device == Path::new("/dev/kvm") {
