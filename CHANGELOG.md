@@ -37,6 +37,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 * The process-placement example provides a fast six-mode demo with concise
   topology and capability output. Installed Linux assets use release builds.
   Exhaustive recovery and snapshot qualification remains a separate command.
+* The installed Linux nested-sandbox demo shows the outer guest, isolated
+  host-function worker and inner sandbox without qualification diagnostics.
 
 ### Changed
 * Support overriding the guest log level when building or restoring initialized snapshots. Persisted snapshots use ABI version 3 and must be regenerated.

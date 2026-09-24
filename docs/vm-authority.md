@@ -84,6 +84,9 @@ callback creates pathname-free storage, exports a read-only file capability,
 and returns the input unchanged. The parent verifies that the returned and
 exported bytes are identical.
 
+On an installed Linux integration, `hyperlight-run nested-demo` presents this
+topology with concise capability checks and an inspection pause.
+
 The example also checks worker and inner-host PIDs, child-process denial,
 repeated calls, in-place guest restore, worker replacement, reconstruction
 with a new provider, fresh resource generations, and export cleanup.

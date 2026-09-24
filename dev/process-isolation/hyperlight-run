@@ -19,6 +19,7 @@ Usage: hyperlight-run [OPTIONS] -- COMMAND [ARG...]
        hyperlight-run init [--plan] [--user USER] [--source PATH]
        hyperlight-run check
        hyperlight-run demo [--noninteractive] [--details]
+       hyperlight-run nested-demo [--noninteractive]
        hyperlight-run qualify --all
        hyperlight-run examples --all
        hyperlight-run uninstall [--plan] [--user USER]
@@ -29,6 +30,7 @@ Commands:
   init                   Validate and perform the one-time operator installation
   check                  Validate the installed integration and host prerequisites
   demo                   Run the fast interactive six-mode presentation
+  nested-demo            Run the concise nested-sandbox presentation
   qualify --all          Run exhaustive six-mode qualification
   examples --all         Compatibility alias for qualify --all
   run                    Explicit form of the normal application launch
@@ -147,6 +149,37 @@ if [[ ${1-} == demo ]]; then
     fi
     set -- --runtime-max 5min -- \
         /usr/libexec/hyperlight/process_placement demo \
+        /usr/libexec/hyperlight/simpleguest "${demo_options[@]}"
+fi
+
+if [[ ${1-} == nested-demo ]]; then
+    shift
+    demo_options=()
+    noninteractive=0
+    while (($#)); do
+        case "$1" in
+            --noninteractive)
+                noninteractive=1
+                demo_options+=("$1")
+                shift
+                ;;
+            -h|--help)
+                echo "Usage: hyperlight-run nested-demo [--noninteractive]"
+                exit 0
+                ;;
+            *) echo "hyperlight-run: unknown nested-demo option: $1" >&2; exit 2 ;;
+        esac
+    done
+    [[ -x /usr/libexec/hyperlight/nested_sandbox &&
+       -f /usr/libexec/hyperlight/simpleguest ]] ||
+        { echo "hyperlight-run: integration is not installed; run hyperlight-run init" >&2; exit 1; }
+    if ((!noninteractive)); then
+        [[ -t 0 && -t 1 ]] ||
+            { echo "hyperlight-run: interactive nested demo requires a terminal; use --noninteractive" >&2; exit 1; }
+        use_pty=1
+    fi
+    set -- --runtime-max 5min -- \
+        /usr/libexec/hyperlight/nested_sandbox demo \
         /usr/libexec/hyperlight/simpleguest "${demo_options[@]}"
 fi
 

@@ -3,7 +3,7 @@
 
 //! Same-process nested Hyperlight sandbox proof.
 
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, IsTerminal, Read, Seek, SeekFrom, Write};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -722,6 +722,7 @@ fn verify_call(
     provider: &MeshProcessProvider,
     message: &str,
     repeat: u32,
+    print_diagnostics: bool,
 ) -> Result<CallEvidence> {
     let expected = expected(message, repeat);
     let actual = sandbox.call::<String>("NestedSandboxCompose", (message.to_owned(), repeat))?;
@@ -781,25 +782,132 @@ fn verify_call(
             "Nested exported object differs from the returned value"
         ));
     }
-    println!(
-        "NESTED_CALL message={message} repeat={repeat} result={actual} parent={} worker={} inner-sandbox-host={} inner-host={} generation={resource_generation} export-equal=true child-denied=true",
-        std::process::id(),
-        evidence.worker,
-        evidence.inner_sandbox_host,
-        evidence.inner_host,
-    );
+    if print_diagnostics {
+        println!(
+            "NESTED_CALL message={message} repeat={repeat} result={actual} parent={} worker={} inner-sandbox-host={} inner-host={} generation={resource_generation} export-equal=true child-denied=true",
+            std::process::id(),
+            evidence.worker,
+            evidence.inner_sandbox_host,
+            evidence.inner_host,
+        );
+    }
     Ok(CallEvidence {
         pids: evidence,
         resource_generation,
     })
 }
 
-fn run_controller() -> Result<()> {
-    let args: Vec<_> = std::env::args_os().skip(1).collect();
-    if args == ["--nested-child-probe"] {
-        return Err(new_error!("Child probe unexpectedly executed"));
+fn wait_for_inspection<R: BufRead, W: Write>(
+    noninteractive: bool,
+    stdin_is_terminal: bool,
+    input: &mut R,
+    output: &mut W,
+) -> Result<()> {
+    if noninteractive {
+        return Ok(());
     }
-    let [guest, output] = args.as_slice() else {
+    if !stdin_is_terminal {
+        return Err(new_error!(
+            "Interactive demo input is not a terminal. Run with --noninteractive for CI or redirected input"
+        ));
+    }
+    write!(
+        output,
+        "\nPress Enter to stop the nested topology and finish..."
+    )?;
+    output.flush()?;
+    let mut line = String::new();
+    if input.read_line(&mut line)? == 0 {
+        return Err(new_error!(
+            "Interactive demo input closed before Enter. Run with --noninteractive when no operator is present"
+        ));
+    }
+    writeln!(output)?;
+    Ok(())
+}
+
+fn run_demo(args: &[std::ffi::OsString]) -> Result<()> {
+    let mut guest = None;
+    let mut noninteractive = false;
+    for argument in args {
+        match argument.to_str() {
+            Some("--noninteractive") => noninteractive = true,
+            Some(value) if value.starts_with('-') => {
+                return Err(new_error!("Unknown nested demo option '{value}'"));
+            }
+            Some(_) if guest.is_none() => guest = Some(std::path::Path::new(argument)),
+            Some(value) => return Err(new_error!("Unexpected nested demo argument '{value}'")),
+            None => return Err(new_error!("Nested demo arguments must be valid Unicode")),
+        }
+    }
+    let guest =
+        guest.ok_or_else(|| new_error!("Usage: nested_sandbox demo GUEST [--noninteractive]"))?;
+    if !noninteractive && !std::io::stdin().is_terminal() {
+        return Err(new_error!(
+            "Interactive demo input is not a terminal. Run with --noninteractive for CI or redirected input"
+        ));
+    }
+    let guest = std::fs::canonicalize(guest)
+        .map_err(|error| new_error!("Nested guest canonicalization failed: {error}"))?;
+    let (provider, _) = configured_provider(&guest)
+        .map_err(|error| new_error!("Nested provider configuration failed: {error}"))?;
+    let mut sandbox = configured_builder(&guest, provider.clone())
+        .build()
+        .map_err(|error| new_error!("Nested outer sandbox construction failed: {error}"))?;
+    let call = verify_call(&mut sandbox, &provider, "compose", 2, false)?;
+    let worker = sandbox
+        .process_reports()
+        .into_iter()
+        .find(|report| report.name == WORKER)
+        .ok_or_else(|| new_error!("Nested worker report is missing"))?;
+
+    println!();
+    println!("Hyperlight nested sandbox demo");
+    println!();
+    println!("Topology");
+    println!("  Application process {}", std::process::id());
+    println!("    -> outer Hyperlight guest");
+    println!(
+        "       -> isolated host-function worker {}",
+        worker.root_process_id
+    );
+    println!("          -> inner Hyperlight sandbox in the worker");
+    println!();
+    println!("Inner guest execution");
+    println!("  1 inner guest-function call");
+    println!("  2 co-located host-function callbacks");
+    println!();
+    println!("Result");
+    println!("  {}", expected("compose", 2));
+    println!();
+    println!("Capability boundaries");
+    println!("  PASS inner guest image supplied as a read-only file capability");
+    println!("  PASS result exported as a read-only file capability");
+    println!("  PASS undeclared child-process creation denied");
+    println!(
+        "  PASS guest, marker and result bound to generation {}",
+        call.resource_generation
+    );
+
+    wait_for_inspection(
+        noninteractive,
+        std::io::stdin().is_terminal(),
+        &mut std::io::stdin().lock(),
+        &mut std::io::stdout().lock(),
+    )?;
+    let worker_root = worker.root_process_id;
+    sandbox.shutdown()?;
+    drop(sandbox);
+    drop(provider);
+    ensure_process_exited(worker_root)?;
+    println!("  PASS nested worker and inner sandbox stopped cleanly");
+    println!();
+    println!("PASS nested sandbox composition");
+    Ok(())
+}
+
+fn run_qualification(args: &[std::ffi::OsString]) -> Result<()> {
+    let [guest, output] = args else {
         return Err(new_error!(
             "Usage: nested_sandbox GUEST NEW_OUTPUT_DIRECTORY"
         ));
@@ -815,8 +923,8 @@ fn run_controller() -> Result<()> {
     let mut sandbox = configured_builder(&guest, provider.clone())
         .build()
         .map_err(|error| new_error!("Nested outer sandbox construction failed: {error}"))?;
-    let first = verify_call(&mut sandbox, &provider, "compose", 1)?;
-    let repeated = verify_call(&mut sandbox, &provider, "compose", 2)?;
+    let first = verify_call(&mut sandbox, &provider, "compose", 1, true)?;
+    let repeated = verify_call(&mut sandbox, &provider, "compose", 2, true)?;
     if repeated.pids != first.pids || repeated.resource_generation != first.resource_generation {
         return Err(new_error!(
             "Repeated calls changed the worker or resource generation"
@@ -831,9 +939,9 @@ fn run_controller() -> Result<()> {
     let layout = output.join("snapshot");
     let tag = OciTag::new("nested-sandbox")?;
     let digest = snapshot.save_with_process_provider(&layout, &tag, &provider)?;
-    let before_restore = verify_call(&mut sandbox, &provider, "restore", 3)?;
+    let before_restore = verify_call(&mut sandbox, &provider, "restore", 3, true)?;
     sandbox.restore(snapshot.clone())?;
-    let after_restore = verify_call(&mut sandbox, &provider, "restore", 3)?;
+    let after_restore = verify_call(&mut sandbox, &provider, "restore", 3, true)?;
     if after_restore != before_restore {
         return Err(new_error!(
             "In-place guest restore replaced the native worker or resource generation"
@@ -966,7 +1074,7 @@ fn run_controller() -> Result<()> {
     let mut fresh = SandboxBuilder::from_snapshot(loaded)
         .mesh_process_provider(fresh_provider.clone())
         .build()?;
-    let reconstructed = verify_call(&mut fresh, &fresh_provider, "reconstructed", 2)?;
+    let reconstructed = verify_call(&mut fresh, &fresh_provider, "reconstructed", 2, true)?;
     let fresh_root = fresh
         .process_reports()
         .iter()
@@ -1020,6 +1128,17 @@ fn run_controller() -> Result<()> {
         reconstructed.pids.worker
     );
     Ok(())
+}
+
+fn run_controller() -> Result<()> {
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args == ["--nested-child-probe"] {
+        return Err(new_error!("Child probe unexpectedly executed"));
+    }
+    if args.first().is_some_and(|argument| argument == "demo") {
+        return run_demo(&args[1..]);
+    }
+    run_qualification(&args)
 }
 
 fn main() -> Result<()> {
@@ -1102,5 +1221,25 @@ mod tests {
         };
         write_recovery_state(&mut record, &completed).unwrap();
         assert_eq!(read_recovery_state(&mut record).unwrap(), completed);
+    }
+
+    #[test]
+    fn noninteractive_demo_pause_returns_without_input() {
+        let mut input = std::io::Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+        wait_for_inspection(true, false, &mut input, &mut output).unwrap();
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn interactive_demo_pause_requires_a_terminal() {
+        let mut input = std::io::Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+        assert!(
+            wait_for_inspection(false, false, &mut input, &mut output)
+                .unwrap_err()
+                .to_string()
+                .contains("--noninteractive")
+        );
     }
 }

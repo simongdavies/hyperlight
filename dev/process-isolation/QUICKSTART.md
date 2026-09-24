@@ -329,7 +329,7 @@ python3 -u dev/process-isolation/test_minijail.py \
   target/minijail-validation/minijail/minijail0
 
 cargo +1.95 build --release --locked -p hyperlight-host --features process-isolation \
-  --example process_placement
+  --example process_placement --example nested_sandbox
 just build-rust-guests release
 just move-rust-guests release
 ```
@@ -495,7 +495,7 @@ path override or replace it with upstream main.
 
 ## Fast demo and exhaustive qualification
 
-The installation captures root-owned copies of the built example and guest.
+The installation captures root-owned copies of the built examples and guest.
 The fast demo runs a small live call set in `local` and all five process-backed
 modes. It prints concise topology and capability details. Interactive mode
 pauses while each topology is live. The noninteractive form is suitable for
@@ -504,6 +504,14 @@ automation:
 ```bash
 hyperlight-run demo
 hyperlight-run demo --noninteractive
+```
+
+The nested demo shows the outer guest, separate host-function worker and inner
+Hyperlight sandbox without running recovery or crash qualification:
+
+```bash
+hyperlight-run nested-demo
+hyperlight-run nested-demo --noninteractive
 ```
 
 The exhaustive command verifies reports, recovery, snapshot reconstruction and

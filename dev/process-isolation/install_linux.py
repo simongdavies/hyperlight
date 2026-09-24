@@ -57,6 +57,8 @@ INSTALLED_ASSETS = {
 REPOSITORY_EXAMPLE_ASSETS = {
     ROOT / "target/release/examples/process_placement":
         (LIBEXEC / "process_placement", 0o755),
+    ROOT / "target/release/examples/nested_sandbox":
+        (LIBEXEC / "nested_sandbox", 0o755),
     ROOT / "src/tests/rust_guests/bin/release/simpleguest":
         (LIBEXEC / "simpleguest", 0o755),
 }
@@ -135,6 +137,15 @@ def snapshot_paths(paths):
 
 def snapshot_directories(paths):
     return {str(path): path.is_dir() for path in paths}
+
+
+def migrate_state(state):
+    baseline = state.setdefault("baseline", {})
+    for path in MANAGED_PATHS:
+        name = str(path)
+        if name not in baseline:
+            baseline[name] = snapshot_path(path)
+    state["version"] = 2
 
 
 def restore_directories(records):
@@ -541,7 +552,7 @@ def install(args, helper, groups, apparmor_enabled):
         else snapshot_paths(MANAGED_PATHS)
     )
     state = existing or {
-        "version": 1,
+        "version": 2,
         "baseline": baseline,
         "directory_baseline": (
             {str(path): False for path in SYSTEMD_DIRS}
@@ -568,6 +579,7 @@ def install(args, helper, groups, apparmor_enabled):
             )
             for directory in SYSTEMD_DIRS
         }
+    migrate_state(state)
     transaction_memberships = {}
     transaction_groups = []
     try:

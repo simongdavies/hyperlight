@@ -7,6 +7,7 @@
 import importlib.util
 from pathlib import Path
 import unittest
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).with_name("install_linux.py")
@@ -23,6 +24,10 @@ class InstallationAssetTests(unittest.TestCase):
                 for path in sources)
         )
         self.assertTrue(
+            any(path.endswith("target/release/examples/nested_sandbox")
+                for path in sources)
+        )
+        self.assertTrue(
             any(path.endswith("src/tests/rust_guests/bin/release/simpleguest")
                 for path in sources)
         )
@@ -34,9 +39,33 @@ class InstallationAssetTests(unittest.TestCase):
             destinations,
             {
                 (Path("/usr/libexec/hyperlight/process_placement"), 0o755),
+                (Path("/usr/libexec/hyperlight/nested_sandbox"), 0o755),
                 (Path("/usr/libexec/hyperlight/simpleguest"), 0o755),
             },
         )
+
+    def test_upgrade_records_new_managed_path_in_uninstall_baseline(self):
+        old_path = Path("/installed/old")
+        new_path = Path("/installed/new")
+        old_record = {"kind": "file", "content": "old"}
+        state = {
+            "version": 1,
+            "baseline": {str(old_path): old_record},
+        }
+        new_record = {"kind": "absent"}
+
+        with (
+            mock.patch.object(INSTALL, "MANAGED_PATHS", [old_path, new_path]),
+            mock.patch.object(
+                INSTALL, "snapshot_path", return_value=new_record
+            ) as snapshot,
+        ):
+            INSTALL.migrate_state(state)
+
+        self.assertEqual(state["version"], 2)
+        self.assertIs(state["baseline"][str(old_path)], old_record)
+        self.assertEqual(state["baseline"][str(new_path)], new_record)
+        snapshot.assert_called_once_with(new_path)
 
 
 if __name__ == "__main__":

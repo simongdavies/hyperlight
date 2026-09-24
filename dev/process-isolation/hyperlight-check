@@ -68,6 +68,7 @@ for specification in \
     "/usr/libexec/hyperlight/qualify_linux.py 0:0:755" \
     "/usr/libexec/hyperlight/minijail-require-landlock.patch 0:0:644" \
     "/usr/libexec/hyperlight/process_placement 0:0:755" \
+    "/usr/libexec/hyperlight/nested_sandbox 0:0:755" \
     "/usr/libexec/hyperlight/simpleguest 0:0:755" \
     "/usr/bin/hyperlight-run 0:0:755" \
     "/var/lib/hyperlight/install-state.json 0:0:600"; do
