@@ -40,6 +40,7 @@ This project is composed internally of several components, depicted in the below
 * [How to make a Hyperlight release](./how-to-make-releases.md)
 * [Getting Hyperlight Metrics, Logs, and Traces](./hyperlight-metrics-logs-and-traces.md)
 * [Benchmarking Hyperlight](./benchmarking-hyperlight.md)
+* [Process isolation demo runbook](./process-isolation-demo-runbook.md)
 * [Hyperlight Surrogate Development Notes](./hyperlight-surrogate-development-notes.md)
 * [Debugging Hyperlight](./debugging-hyperlight.md)
 * [Signal Handling in Hyperlight](./signal-handlers-development-notes.md)

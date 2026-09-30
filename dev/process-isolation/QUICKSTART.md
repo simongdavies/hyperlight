@@ -325,8 +325,6 @@ git -C target/minijail-validation/minijail checkout \
   8d20993c7189a948995bd20901abecc041e1a28e
 python3 dev/process-isolation/build_minijail.py \
   target/minijail-validation/minijail --verify-recorded
-python3 -u dev/process-isolation/test_minijail.py \
-  target/minijail-validation/minijail/minijail0
 
 cargo +1.95 build --release --locked -p hyperlight-host --features process-isolation \
   --example process_placement --example nested_sandbox
