@@ -248,7 +248,9 @@ fn program_resolution_precedes_launch_and_guest_loading() {
     let directory = tempfile::tempdir().unwrap();
     let store = program::LocalProgramStore::new(directory.path());
     let target = program::ProgramTarget::current(Default::default());
-    let process = HostFunctionProcess::new(options("arithmetic")).function(ADD);
+    let mut options = options("arithmetic");
+    options.profile = ProcessProfile::unrestricted();
+    let process = HostFunctionProcess::new(options).function(ADD);
     let expected = store
         .validate(process.options.program.as_ref().unwrap(), &target)
         .unwrap_err()

@@ -916,7 +916,7 @@ dependencies = [
 [[package]]
 name = "debug_ptr"
 version = "0.0.0"
-source = "git+https://github.com/simongdavies/openvmm.git?rev=f7e2c8eb63bd0bb0a40e915e9c92978db8faa881#f7e2c8eb63bd0bb0a40e915e9c92978db8faa881"
+source = "git+https://github.com/simongdavies/openvmm.git?rev=f7838c69be1f2180bf8365872e6570c6541c8941#f7838c69be1f2180bf8365872e6570c6541c8941"
 
 [[package]]
 name = "defmt"
@@ -1687,7 +1687,7 @@ dependencies = [
 [[package]]
 name = "headervec"
 version = "0.0.0"
-source = "git+https://github.com/simongdavies/openvmm.git?rev=f7e2c8eb63bd0bb0a40e915e9c92978db8faa881#f7e2c8eb63bd0bb0a40e915e9c92978db8faa881"
+source = "git+https://github.com/simongdavies/openvmm.git?rev=f7838c69be1f2180bf8365872e6570c6541c8941#f7838c69be1f2180bf8365872e6570c6541c8941"
 
 [[package]]
 name = "heck"
@@ -2248,7 +2248,7 @@ dependencies = [
 [[package]]
 name = "inspect"
 version = "0.0.0"
-source = "git+https://github.com/simongdavies/openvmm.git?rev=f7e2c8eb63bd0bb0a40e915e9c92978db8faa881#f7e2c8eb63bd0bb0a40e915e9c92978db8faa881"
+source = "git+https://github.com/simongdavies/openvmm.git?rev=f7838c69be1f2180bf8365872e6570c6541c8941#f7838c69be1f2180bf8365872e6570c6541c8941"
 dependencies = [
  "bitfield-struct",
  "inspect_derive",
@@ -2259,7 +2259,7 @@ dependencies = [
 [[package]]
 name = "inspect_derive"
 version = "0.0.0"
-source = "git+https://github.com/simongdavies/openvmm.git?rev=f7e2c8eb63bd0bb0a40e915e9c92978db8faa881#f7e2c8eb63bd0bb0a40e915e9c92978db8faa881"
+source = "git+https://github.com/simongdavies/openvmm.git?rev=f7838c69be1f2180bf8365872e6570c6541c8941#f7838c69be1f2180bf8365872e6570c6541c8941"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -2270,7 +2270,7 @@ dependencies = [
 [[package]]
 name = "inspect_rlimit"
 version = "0.0.0"
-source = "git+https://github.com/simongdavies/openvmm.git?rev=f7e2c8eb63bd0bb0a40e915e9c92978db8faa881#f7e2c8eb63bd0bb0a40e915e9c92978db8faa881"
+source = "git+https://github.com/simongdavies/openvmm.git?rev=f7838c69be1f2180bf8365872e6570c6541c8941#f7838c69be1f2180bf8365872e6570c6541c8941"
 dependencies = [
  "cfg-if",
  "inspect",
@@ -2281,7 +2281,7 @@ dependencies = [
 [[package]]
 name = "inspect_task"
 version = "0.0.0"
-source = "git+https://github.com/simongdavies/openvmm.git?rev=f7e2c8eb63bd0bb0a40e915e9c92978db8faa881#f7e2c8eb63bd0bb0a40e915e9c92978db8faa881"
+source = "git+https://github.com/simongdavies/openvmm.git?rev=f7838c69be1f2180bf8365872e6570c6541c8941#f7838c69be1f2180bf8365872e6570c6541c8941"
 dependencies = [
  "inspect",
  "pal_async",
@@ -2575,7 +2575,7 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 [[package]]
 name = "loan_cell"
 version = "0.0.0"
-source = "git+https://github.com/simongdavies/openvmm.git?rev=f7e2c8eb63bd0bb0a40e915e9c92978db8faa881#f7e2c8eb63bd0bb0a40e915e9c92978db8faa881"
+source = "git+https://github.com/simongdavies/openvmm.git?rev=f7838c69be1f2180bf8365872e6570c6541c8941#f7838c69be1f2180bf8365872e6570c6541c8941"
 
 [[package]]
 name = "lock_api"
@@ -2655,7 +2655,7 @@ dependencies = [
 [[package]]
 name = "mesh"
 version = "0.0.0"
-source = "git+https://github.com/simongdavies/openvmm.git?rev=f7e2c8eb63bd0bb0a40e915e9c92978db8faa881#f7e2c8eb63bd0bb0a40e915e9c92978db8faa881"
+source = "git+https://github.com/simongdavies/openvmm.git?rev=f7838c69be1f2180bf8365872e6570c6541c8941#f7838c69be1f2180bf8365872e6570c6541c8941"
 dependencies = [
  "mesh_channel",
  "mesh_derive",
@@ -2666,7 +2666,7 @@ dependencies = [
 [[package]]
 name = "mesh_channel"
 version = "0.0.0"
-source = "git+https://github.com/simongdavies/openvmm.git?rev=f7e2c8eb63bd0bb0a40e915e9c92978db8faa881#f7e2c8eb63bd0bb0a40e915e9c92978db8faa881"
+source = "git+https://github.com/simongdavies/openvmm.git?rev=f7838c69be1f2180bf8365872e6570c6541c8941#f7838c69be1f2180bf8365872e6570c6541c8941"
 dependencies = [
  "futures",
  "mesh_channel_core",
@@ -2680,7 +2680,7 @@ dependencies = [
 [[package]]
 name = "mesh_channel_core"
 version = "0.0.0"
-source = "git+https://github.com/simongdavies/openvmm.git?rev=f7e2c8eb63bd0bb0a40e915e9c92978db8faa881#f7e2c8eb63bd0bb0a40e915e9c92978db8faa881"
+source = "git+https://github.com/simongdavies/openvmm.git?rev=f7838c69be1f2180bf8365872e6570c6541c8941#f7838c69be1f2180bf8365872e6570c6541c8941"
 dependencies = [
  "futures",
  "mesh_node",
@@ -2693,7 +2693,7 @@ dependencies = [
 [[package]]
 name = "mesh_derive"
 version = "0.0.0"
-source = "git+https://github.com/simongdavies/openvmm.git?rev=f7e2c8eb63bd0bb0a40e915e9c92978db8faa881#f7e2c8eb63bd0bb0a40e915e9c92978db8faa881"
+source = "git+https://github.com/simongdavies/openvmm.git?rev=f7838c69be1f2180bf8365872e6570c6541c8941#f7838c69be1f2180bf8365872e6570c6541c8941"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -2704,7 +2704,7 @@ dependencies = [
 [[package]]
 name = "mesh_node"
 version = "0.0.0"
-source = "git+https://github.com/simongdavies/openvmm.git?rev=f7e2c8eb63bd0bb0a40e915e9c92978db8faa881#f7e2c8eb63bd0bb0a40e915e9c92978db8faa881"
+source = "git+https://github.com/simongdavies/openvmm.git?rev=f7838c69be1f2180bf8365872e6570c6541c8941#f7838c69be1f2180bf8365872e6570c6541c8941"
 dependencies = [
  "bitfield-struct",
  "futures",
@@ -2722,7 +2722,7 @@ dependencies = [
 [[package]]
 name = "mesh_process"
 version = "0.0.0"
-source = "git+https://github.com/simongdavies/openvmm.git?rev=f7e2c8eb63bd0bb0a40e915e9c92978db8faa881#f7e2c8eb63bd0bb0a40e915e9c92978db8faa881"
+source = "git+https://github.com/simongdavies/openvmm.git?rev=f7838c69be1f2180bf8365872e6570c6541c8941#f7838c69be1f2180bf8365872e6570c6541c8941"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2747,7 +2747,7 @@ dependencies = [
 [[package]]
 name = "mesh_protobuf"
 version = "0.0.0"
-source = "git+https://github.com/simongdavies/openvmm.git?rev=f7e2c8eb63bd0bb0a40e915e9c92978db8faa881#f7e2c8eb63bd0bb0a40e915e9c92978db8faa881"
+source = "git+https://github.com/simongdavies/openvmm.git?rev=f7838c69be1f2180bf8365872e6570c6541c8941#f7838c69be1f2180bf8365872e6570c6541c8941"
 dependencies = [
  "fs-err",
  "heck",
@@ -2759,7 +2759,7 @@ dependencies = [
 [[package]]
 name = "mesh_remote"
 version = "0.0.0"
-source = "git+https://github.com/simongdavies/openvmm.git?rev=f7e2c8eb63bd0bb0a40e915e9c92978db8faa881#f7e2c8eb63bd0bb0a40e915e9c92978db8faa881"
+source = "git+https://github.com/simongdavies/openvmm.git?rev=f7838c69be1f2180bf8365872e6570c6541c8941#f7838c69be1f2180bf8365872e6570c6541c8941"
 dependencies = [
  "constant_time_eq 0.5.0",
  "futures",
@@ -3046,7 +3046,7 @@ checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 [[package]]
 name = "open_enum"
 version = "0.0.0"
-source = "git+https://github.com/simongdavies/openvmm.git?rev=f7e2c8eb63bd0bb0a40e915e9c92978db8faa881#f7e2c8eb63bd0bb0a40e915e9c92978db8faa881"
+source = "git+https://github.com/simongdavies/openvmm.git?rev=f7838c69be1f2180bf8365872e6570c6541c8941#f7838c69be1f2180bf8365872e6570c6541c8941"
 
 [[package]]
 name = "opentelemetry"
@@ -3160,7 +3160,7 @@ dependencies = [
 [[package]]
 name = "pal"
 version = "0.0.0"
-source = "git+https://github.com/simongdavies/openvmm.git?rev=f7e2c8eb63bd0bb0a40e915e9c92978db8faa881#f7e2c8eb63bd0bb0a40e915e9c92978db8faa881"
+source = "git+https://github.com/simongdavies/openvmm.git?rev=f7838c69be1f2180bf8365872e6570c6541c8941#f7838c69be1f2180bf8365872e6570c6541c8941"
 dependencies = [
  "caps",
  "fs-err",
@@ -3183,7 +3183,7 @@ dependencies = [
 [[package]]
 name = "pal_async"
 version = "0.0.0"
-source = "git+https://github.com/simongdavies/openvmm.git?rev=f7e2c8eb63bd0bb0a40e915e9c92978db8faa881#f7e2c8eb63bd0bb0a40e915e9c92978db8faa881"
+source = "git+https://github.com/simongdavies/openvmm.git?rev=f7838c69be1f2180bf8365872e6570c6541c8941#f7838c69be1f2180bf8365872e6570c6541c8941"
 dependencies = [
  "async-channel",
  "async-task",
@@ -3212,7 +3212,7 @@ dependencies = [
 [[package]]
 name = "pal_async_test"
 version = "0.0.0"
-source = "git+https://github.com/simongdavies/openvmm.git?rev=f7e2c8eb63bd0bb0a40e915e9c92978db8faa881#f7e2c8eb63bd0bb0a40e915e9c92978db8faa881"
+source = "git+https://github.com/simongdavies/openvmm.git?rev=f7838c69be1f2180bf8365872e6570c6541c8941#f7838c69be1f2180bf8365872e6570c6541c8941"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3222,7 +3222,7 @@ dependencies = [
 [[package]]
 name = "pal_event"
 version = "0.0.0"
-source = "git+https://github.com/simongdavies/openvmm.git?rev=f7e2c8eb63bd0bb0a40e915e9c92978db8faa881#f7e2c8eb63bd0bb0a40e915e9c92978db8faa881"
+source = "git+https://github.com/simongdavies/openvmm.git?rev=f7838c69be1f2180bf8365872e6570c6541c8941#f7838c69be1f2180bf8365872e6570c6541c8941"
 dependencies = [
  "getrandom 0.4.3",
  "libc",
@@ -4747,7 +4747,7 @@ dependencies = [
 [[package]]
 name = "tracing_helpers"
 version = "0.0.0"
-source = "git+https://github.com/simongdavies/openvmm.git?rev=f7e2c8eb63bd0bb0a40e915e9c92978db8faa881#f7e2c8eb63bd0bb0a40e915e9c92978db8faa881"
+source = "git+https://github.com/simongdavies/openvmm.git?rev=f7838c69be1f2180bf8365872e6570c6541c8941#f7838c69be1f2180bf8365872e6570c6541c8941"
 dependencies = [
  "anyhow",
  "tracing",
@@ -4835,7 +4835,7 @@ checksum = "40789245bbff5f31eb773c9ac4ee5c4e15eab9640d975e124d6ce4c34a6410d7"
 [[package]]
 name = "unix_socket"
 version = "0.0.0"
-source = "git+https://github.com/simongdavies/openvmm.git?rev=f7e2c8eb63bd0bb0a40e915e9c92978db8faa881#f7e2c8eb63bd0bb0a40e915e9c92978db8faa881"
+source = "git+https://github.com/simongdavies/openvmm.git?rev=f7838c69be1f2180bf8365872e6570c6541c8941#f7838c69be1f2180bf8365872e6570c6541c8941"
 dependencies = [
  "getrandom 0.4.3",
  "libc",

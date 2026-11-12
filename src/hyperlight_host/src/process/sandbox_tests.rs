@@ -16,6 +16,24 @@ const PRINT: HostFunctionContract<(String,), i32> =
 const ADD: HostFunctionContract<(i32, i32), i32> =
     HostFunctionContract::new("HostAdd", Idempotency::NonIdempotent);
 
+#[test]
+fn dedicated_configuration_preserves_transport_geometry() {
+    let mut config = SandboxConfiguration::default();
+    config.set_g2h_queue_size(128);
+    config.set_h2g_queue_size(256);
+    config.set_g2h_buffer_size(768);
+    config.set_h2g_buffer_size(1024);
+    config.set_g2h_pool_pages(30);
+    config.set_h2g_pool_pages(40);
+    let restored = Configuration::capture(&config).unwrap().restore().unwrap();
+    assert_eq!(restored.get_g2h_queue_size(), config.get_g2h_queue_size());
+    assert_eq!(restored.get_h2g_queue_size(), config.get_h2g_queue_size());
+    assert_eq!(restored.get_g2h_buffer_size(), config.get_g2h_buffer_size());
+    assert_eq!(restored.get_h2g_buffer_size(), config.get_h2g_buffer_size());
+    assert_eq!(restored.get_g2h_pool_pages(), config.get_g2h_pool_pages());
+    assert_eq!(restored.get_h2g_pool_pages(), config.get_h2g_pool_pages());
+}
+
 fn fixture(name: &str) -> std::path::PathBuf {
     let path = std::env::current_exe()
         .unwrap()

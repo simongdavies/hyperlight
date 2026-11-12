@@ -149,10 +149,7 @@ impl Runtime {
         policy.validate()?;
         let (cancellation, cancel) = mesh::CancelContext::new().with_cancel();
         Ok(Arc::new(Self {
-            #[cfg(not(target_os = "macos"))]
             mesh: Some(Mesh::new("hyperlight-sandbox".to_owned())?),
-            #[cfg(target_os = "macos")]
-            mesh: None,
             hosts: Mutex::new(Vec::new()),
             launcher,
             policy,
@@ -323,6 +320,9 @@ impl Runtime {
         .await;
         #[cfg(target_os = "macos")]
         return super::launch::launch_legacy_owned(
+            self.mesh
+                .as_ref()
+                .ok_or_else(|| new_error!("Process runtime stopped"))?,
             config,
             bootstrap,
             guard,
@@ -501,6 +501,9 @@ impl Runtime {
         .await;
         #[cfg(target_os = "macos")]
         let launch = super::launch::launch_legacy_owned(
+            self.mesh
+                .as_ref()
+                .ok_or_else(|| new_error!("Process runtime stopped"))?,
             config,
             wire,
             guard.clone(),

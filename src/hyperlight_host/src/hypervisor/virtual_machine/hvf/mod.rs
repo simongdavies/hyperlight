@@ -82,7 +82,10 @@ use crate::mem::shared_mem::{ReadonlySharedMemory, SharedMemoryError};
     dead_code,
     non_snake_case,
     non_upper_case_globals,
-    non_camel_case_types
+    non_camel_case_types,
+    clippy::ptr_offset_with_cast,
+    clippy::manual_div_ceil,
+    clippy::useless_transmute
 )] // bindgen
 pub(crate) mod bindings {
     include!(concat!(env!("OUT_DIR"), "/hvf_bindings.rs"));

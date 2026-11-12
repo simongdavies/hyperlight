@@ -138,15 +138,24 @@ impl FunctionEntry {
         parameter_types: &'static [ParameterType],
         return_type: ReturnType,
     ) -> Self {
+        #[cfg(feature = "process-isolation")]
+        let parameter_types = parameter_types.into();
         Self {
             function,
-            parameter_types: parameter_types.into(),
+            parameter_types,
             return_type,
         }
     }
 
     fn parameter_types(&self) -> &[ParameterType] {
-        &self.parameter_types
+        #[cfg(feature = "process-isolation")]
+        {
+            &self.parameter_types
+        }
+        #[cfg(not(feature = "process-isolation"))]
+        {
+            self.parameter_types
+        }
     }
 }
 

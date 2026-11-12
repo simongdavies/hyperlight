@@ -31,6 +31,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 * Fix surrogate process creation for Windows paths containing Unicode or spaces.
+* macOS process isolation supports large guest and snapshot transfers, independent root cleanup, and VM-host plus worker topology.
+* macOS rejects restricted topologies before staging any process.
+* Dedicated sandbox hosts can declare their executable-local `HostPrint` contract.
+* Dedicated sandbox hosts preserve configured transport queues, buffers, and pools.
 * Fix restore on WHP not rewinding the guest TSC on hosts with `TSC_ADJUST` support.
 * HVF sandbox initialization accepts seeds that match Apple hypercall identifiers.
 * Host-written snapshot memory has instruction-cache coherence before guest execution.
