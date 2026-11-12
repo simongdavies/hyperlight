@@ -1268,7 +1268,6 @@ mod schema_pin {
         }"#;
         // PINNED_CALL supplies the complete x86-64 or aarch64 config shape.
         let mut expected: serde_json::Value = serde_json::from_str(PINNED_CALL).unwrap();
-        expected["abi_version"] = 3.into();
         expected["process_topology"] = serde_json::from_str(PINNED_TOPOLOGY).unwrap();
         let mut config: OciSnapshotConfig = serde_json::from_value(expected.clone()).unwrap();
         let topology: ProcessTopologyDefinition =

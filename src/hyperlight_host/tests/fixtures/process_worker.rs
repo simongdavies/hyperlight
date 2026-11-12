@@ -11,6 +11,7 @@ fn main() -> Result<()> {
     // SAFETY: this fixture is entered only by the trusted launcher, before threads.
     let startup = unsafe { process::ProcessStartup::capture() }?
         .ok_or_else(|| new_error!("Worker startup resources are required"))?;
+    env_logger::init();
     let args: Vec<_> = std::env::args().skip(1).collect();
     if let [mode, marker] = args.as_slice()
         && mode == "--block-before-run"

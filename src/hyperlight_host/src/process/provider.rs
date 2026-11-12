@@ -452,6 +452,10 @@ impl MeshProcessProvider {
         &self,
         definition: &ProcessTopologyDefinition,
     ) -> Result<Arc<dyn ProcessLauncher>> {
+        #[cfg(target_os = "macos")]
+        for process in definition.sandbox().into_iter().chain(definition.workers()) {
+            super::macos::validate_profile(&process.profile())?;
+        }
         definition.validate_programs(&self.inner.store, &self.inner.target)?;
         validate_resource_owners(
             &self.inner.resources,
@@ -747,6 +751,7 @@ fn runtime_files(image_path: &Path, source: &Path) -> Result<Vec<ProgramFile>> {
     Ok(vec![ProgramFile::new(image_path, captured.bytes)?])
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 pub(super) fn capture_file(path: &Path) -> Result<CapturedFile> {
     capture_file_with(path, |_| {})
 }

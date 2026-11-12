@@ -8,10 +8,9 @@
 //! and runs both native process roles with the caller's permissions. It cannot
 //! be combined with controls or platform limits.
 //!
-//! macOS supports unrestricted profiles only. The pinned Mesh API does not
-//! expose its owned-root API there, so each process receives a dedicated Mesh
-//! whose shutdown owns that root's cleanup. Restricted macOS profiles fail
-//! before process spawn.
+//! macOS supports unrestricted profiles only. Each root has a dedicated Mesh
+//! owner and OS exit receipt. Owners share the parent's IPC node so endpoints
+//! can cross between roles. Restricted profiles fail before process staging.
 //!
 //! # Windows VM hosts
 //!
@@ -642,17 +641,18 @@ impl Topology {
             (Some(expected), None) => expected.clone(),
             (None, None) => return Ok(None),
         };
-        for function in definition
-            .sandbox()
-            .into_iter()
-            .chain(definition.workers())
-            .flat_map(|process| process.functions())
-        {
-            if local.inner().function_signature(function.name()).is_some() {
-                return Err(new_error!(
-                    "Snapshot process topology conflicts with local host function '{}'",
-                    function.name()
-                ));
+        if definition.sandbox().is_none() {
+            for function in definition
+                .workers()
+                .iter()
+                .flat_map(|process| process.functions())
+            {
+                if local.inner().function_signature(function.name()).is_some() {
+                    return Err(new_error!(
+                        "Snapshot process topology conflicts with local host function '{}'",
+                        function.name()
+                    ));
+                }
             }
         }
         self.authorize(&definition)?;

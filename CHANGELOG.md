@@ -12,6 +12,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 * Snapshot config schema v6 persists native process topology.
 
 ### Fixed
+* macOS process isolation supports large guest and snapshot transfers, independent root cleanup, and VM-host plus worker topology.
+* macOS rejects restricted topologies before staging any process.
+* Dedicated sandbox hosts can declare their executable-local `HostPrint` contract.
+* Dedicated sandbox hosts preserve configured transport queues, buffers, and pools.
 * Fix restore on WHP not rewinding the guest TSC on hosts with `TSC_ADJUST` support.
 
 ## [v0.19.0] - 2026-11-04

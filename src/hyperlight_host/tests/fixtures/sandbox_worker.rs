@@ -14,6 +14,7 @@ fn main() -> Result<()> {
     // tracing, environment access or subprocesses precede this one-shot capture.
     let startup = unsafe { process::ProcessStartup::capture() }?
         .ok_or_else(|| new_error!("Sandbox startup resources are required"))?;
+    env_logger::init();
     let mut functions = process::ProcessHostFunctions::default();
     functions.bind(PRINT, |message: String| {
         if message == "__exit_sandbox" {

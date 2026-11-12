@@ -1363,6 +1363,29 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    fn assert_file_descriptor_released(raw: i32, source: &File) {
+        use std::os::fd::AsRawFd;
+
+        assert!(raw >= 0);
+        let identity = |descriptor| -> io::Result<_> {
+            let mut status = std::mem::MaybeUninit::<libc::stat>::uninit();
+            // SAFETY: fstat validates the descriptor and writes status on success.
+            if unsafe { libc::fstat(descriptor, status.as_mut_ptr()) } == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: fstat initialized status.
+            let status = unsafe { status.assume_init() };
+            Ok((status.st_dev, status.st_ino))
+        };
+        let expected = identity(source.as_raw_fd()).unwrap();
+        match identity(raw) {
+            // Parallel tests can reuse the descriptor, but not the live source's inode.
+            Ok(actual) => assert_ne!(actual, expected, "file descriptor was retained"),
+            Err(error) => assert_eq!(error.raw_os_error(), Some(libc::EBADF)),
+        }
+    }
+
     #[test]
     fn rejected_typed_native_payload_is_closed() {
         let manifest = ProcessResourceManifest::new()
@@ -1377,7 +1400,8 @@ mod tests {
         {
             use std::os::fd::{AsRawFd, OwnedFd};
 
-            let descriptor: OwnedFd = tempfile::tempfile().unwrap().into();
+            let source = tempfile::tempfile().unwrap();
+            let descriptor: OwnedFd = source.try_clone().unwrap().into();
             let raw = descriptor.as_raw_fd();
             let resources = vec![WireResource {
                 session_high: 1,
@@ -1390,9 +1414,7 @@ mod tests {
             }];
             assert!(manifest.validate_payloads(&resources, false).is_err());
             drop(resources);
-            // SAFETY: fcntl only probes whether the stale numeric descriptor remains live.
-            assert_eq!(unsafe { libc::fcntl(raw, libc::F_GETFD) }, -1);
-            assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EBADF));
+            assert_file_descriptor_released(raw, &source);
         }
 
         #[cfg(windows)]
@@ -1518,9 +1540,7 @@ mod tests {
         #[cfg(unix)]
         {
             let raw = sink.raw.load(Ordering::SeqCst);
-            // SAFETY: fcntl only probes whether the stale numeric descriptor remains live.
-            assert_eq!(unsafe { libc::fcntl(raw as i32, libc::F_GETFD) }, -1);
-            assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EBADF));
+            assert_file_descriptor_released(raw.try_into().unwrap(), &source);
         }
         #[cfg(windows)]
         {
@@ -1627,10 +1647,9 @@ mod tests {
             use std::os::fd::AsRawFd;
 
             let raw = exported.file.file.as_raw_fd();
+            let source = exported.file.file.try_clone().unwrap();
             drop(exported);
-            // SAFETY: fcntl only probes whether the stale numeric descriptor remains live.
-            assert_eq!(unsafe { libc::fcntl(raw, libc::F_GETFD) }, -1);
-            assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EBADF));
+            assert_file_descriptor_released(raw, &source);
         }
         #[cfg(windows)]
         {
@@ -1740,11 +1759,10 @@ mod tests {
             panic!("file registration must create a file payload");
         };
         let raw = file.as_raw_fd();
+        let source = file.try_clone().unwrap();
         drop(wire);
 
-        // SAFETY: fcntl only probes whether the numeric descriptor remains live.
-        assert_eq!(unsafe { libc::fcntl(raw, libc::F_GETFD) }, -1);
-        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EBADF));
+        assert_file_descriptor_released(raw, &source);
     }
 
     #[cfg(windows)]

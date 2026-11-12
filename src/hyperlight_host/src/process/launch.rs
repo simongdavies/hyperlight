@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Hyperlight Authors.
 
-#[cfg(target_os = "macos")]
-use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -10,7 +8,7 @@ use std::time::{Duration, Instant};
 use mesh_process::Mesh;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub(super) use mesh_process::OwnedHost;
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 use mesh_process::PendingHostLaunch;
 
 use super::program::{
@@ -21,38 +19,33 @@ use crate::{HyperlightError, Result, new_error};
 
 #[cfg(target_os = "macos")]
 pub(super) struct OwnedHost {
-    id: i32,
-    mesh: Arc<Mutex<Option<Mesh>>>,
+    root: mesh_process::OwnedHost,
+    mesh: Option<Mesh>,
+    shutdown: Option<futures::future::Shared<futures::future::BoxFuture<'static, ()>>>,
 }
-
-#[cfg(target_os = "macos")]
-static NEXT_MACOS_MESH_ID: AtomicU64 = AtomicU64::new(1);
 
 #[cfg(target_os = "macos")]
 impl OwnedHost {
     pub(super) fn id(&self) -> i32 {
-        self.id
+        self.root.id()
     }
 
     pub(super) fn terminate_root(&self) -> Result<()> {
-        let mesh = self
-            .mesh
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .take();
-        if let Some(mesh) = mesh {
-            futures_lite::future::block_on(
-                mesh::CancelContext::new()
-                    .with_timeout(Duration::from_secs(30))
-                    .until_cancelled(mesh.shutdown()),
-            )
-            .map_err(|error| new_error!("macOS process Mesh shutdown timed out: {error}"))?;
-        }
+        self.root.terminate_root()?;
         Ok(())
     }
 
     pub(super) async fn wait_root(&mut self) -> Result<()> {
-        self.terminate_root()
+        use futures::FutureExt;
+
+        self.root.wait_root().await?;
+        if let Some(mesh) = self.mesh.take() {
+            self.shutdown = Some(mesh.shutdown().boxed().shared());
+        }
+        if let Some(shutdown) = &self.shutdown {
+            shutdown.clone().await;
+        }
+        Ok(())
     }
 }
 
@@ -78,10 +71,10 @@ impl OwnedHost {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 struct PendingHostLaunch;
 
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 impl PendingHostLaunch {
     fn cancel(&self) -> Result<()> {
         Err(new_error!(
@@ -98,57 +91,17 @@ impl PendingHostLaunch {
 
 #[cfg(target_os = "macos")]
 pub(super) async fn launch_legacy_owned<T: 'static + mesh::message::MeshField + Send>(
+    parent: &Mesh,
     config: mesh_process::ProcessConfig,
     initial: T,
     guard: Arc<dyn ProcessGuard>,
     cancellation: mesh::CancelContext,
     timeout: Duration,
 ) -> Result<OwnedHost> {
-    let mesh_id = NEXT_MACOS_MESH_ID.fetch_add(1, Ordering::Relaxed);
-    let mesh = Mesh::new(format!("hyperlight-owned-process-{mesh_id}"))?;
-    guard.start_launch();
-    let result = cancellation
-        .with_timeout(timeout)
-        .until_cancelled(mesh.launch_host(config, initial))
-        .await;
-    match result {
-        Ok(Ok(id)) => Ok(OwnedHost {
-            id,
-            mesh: Arc::new(Mutex::new(Some(mesh))),
-        }),
-        result => {
-            let shutdown = mesh::CancelContext::new()
-                .with_timeout(timeout)
-                .until_cancelled(mesh.shutdown())
-                .await;
-            let deadline = Instant::now() + timeout;
-            let termination = guard.terminate_domain();
-            let empty = guard.wait_empty(deadline);
-            let release = if shutdown.is_ok() && empty.is_ok() {
-                if let Err(error) = &termination {
-                    tracing::warn!(
-                        ?error,
-                        "macOS root cleanup was confirmed after termination reported an error"
-                    );
-                }
-                guard.release_resources(deadline)
-            } else {
-                Err(new_error!(
-                    "macOS launch cleanup was not confirmed: shutdown: {shutdown:?}; termination: {termination:?}; empty: {empty:?}"
-                ))
-            };
-            if let Err(cleanup) = release {
-                return Err(new_error!(
-                    "macOS process launch failed with incomplete cleanup: launch: {result:?}; cleanup: {cleanup}"
-                ));
-            }
-            match result {
-                Ok(Err(error)) => Err(error.into()),
-                Err(error) => Err(new_error!("Process launch cancelled: {error}")),
-                Ok(Ok(_)) => unreachable!("successful launch returned above"),
-            }
-        }
-    }
+    let mesh = parent.new_sibling("hyperlight-owned-process".to_owned())?;
+    let mut root = launch_owned(&mesh, config, initial, guard, cancellation, timeout).await?;
+    root.mesh = Some(mesh);
+    Ok(root)
 }
 
 /// Effective enforcement or an explicit omission of one requested restriction.
@@ -279,7 +232,7 @@ pub(super) async fn launch_owned<T: 'static + mesh::message::MeshField + Send>(
     cancellation: mesh::CancelContext,
     timeout: Duration,
 ) -> Result<OwnedHost> {
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     {
         let _ = (mesh, config, initial, guard, cancellation, timeout);
         return Err(new_error!(
@@ -287,7 +240,7 @@ pub(super) async fn launch_owned<T: 'static + mesh::message::MeshField + Send>(
         ));
     }
 
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     {
         guard.start_launch();
         let mut pending = mesh.begin_launch_host_owned(config, initial);
@@ -296,7 +249,16 @@ pub(super) async fn launch_owned<T: 'static + mesh::message::MeshField + Send>(
             .until_cancelled(pending.wait_host())
             .await;
         let error = match result {
-            Ok(Ok(root)) => return Ok(root),
+            Ok(Ok(root)) => {
+                #[cfg(target_os = "macos")]
+                return Ok(OwnedHost {
+                    root,
+                    mesh: None,
+                    shutdown: None,
+                });
+                #[cfg(not(target_os = "macos"))]
+                return Ok(root);
+            }
             // OpenVMM owns this foreign error type. Preserve its source chain.
             Ok(Err(error)) => HyperlightError::from(error),
             Err(error) => new_error!("Process launch cancelled: {error}"),
@@ -759,7 +721,9 @@ mod tests {
         futures_lite::future::block_on(async {
             let directory = tempfile::tempdir().unwrap();
             let guard = Arc::new(RecordingGuard::default());
+            let mesh = Mesh::new("failed-macos-launch".to_owned()).unwrap();
             let error = launch_legacy_owned(
+                &mesh,
                 mesh_process::ProcessConfig::new("missing")
                     .process_name(directory.path().join("missing-executable"))
                     .skip_worker_arg(true),
@@ -775,7 +739,7 @@ mod tests {
             assert!(!error.to_string().is_empty());
             assert_eq!(
                 guard.events(),
-                vec!["start", "terminate", "empty", "release"]
+                vec!["start", "terminate", "terminate", "empty", "release"]
             );
         });
     }

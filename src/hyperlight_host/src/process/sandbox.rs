@@ -30,7 +30,7 @@ use crate::sandbox::uninitialized::{GuestBlob, GuestEnvironment};
 use crate::sandbox::{LocalSandbox, PtRootFinder, SandboxConfiguration, SandboxStatus};
 use crate::{GuestBinary, HostFunctions, HyperlightError, MultiUseSandbox, Result, new_error};
 
-const VERSION: u32 = 4;
+const VERSION: u32 = 5;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(MeshPayload)]
@@ -385,6 +385,12 @@ struct Configuration {
     msrs: Vec<u32>,
     #[cfg(crashdump)]
     crashdump: bool,
+    g2h_queue_size: u64,
+    h2g_queue_size: u64,
+    g2h_buffer_size: u64,
+    h2g_buffer_size: u64,
+    g2h_pool_pages: u64,
+    h2g_pool_pages: u64,
 }
 
 impl Configuration {
@@ -411,12 +417,24 @@ impl Configuration {
             msrs: configuration.get_guest_msrs().to_vec(),
             #[cfg(crashdump)]
             crashdump: configuration.get_guest_core_dump(),
+            g2h_queue_size: configuration.get_g2h_queue_size().try_into()?,
+            h2g_queue_size: configuration.get_h2g_queue_size().try_into()?,
+            g2h_buffer_size: configuration.get_g2h_buffer_size().try_into()?,
+            h2g_buffer_size: configuration.get_h2g_buffer_size().try_into()?,
+            g2h_pool_pages: configuration.get_g2h_pool_pages().try_into()?,
+            h2g_pool_pages: configuration.get_h2g_pool_pages().try_into()?,
         })
     }
 
     fn restore(&self) -> Result<SandboxConfiguration> {
         let mut config = SandboxConfiguration::default();
         config.set_scratch_size(self.scratch.try_into()?);
+        config.set_g2h_queue_size(self.g2h_queue_size.try_into()?);
+        config.set_h2g_queue_size(self.h2g_queue_size.try_into()?);
+        config.set_g2h_buffer_size(self.g2h_buffer_size.try_into()?);
+        config.set_h2g_buffer_size(self.h2g_buffer_size.try_into()?);
+        config.set_g2h_pool_pages(self.g2h_pool_pages.try_into()?);
+        config.set_h2g_pool_pages(self.h2g_pool_pages.try_into()?);
         if let Some(level) = &self.log_level {
             config.set_max_guest_log_level(
                 level
