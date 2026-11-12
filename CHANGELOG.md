@@ -9,6 +9,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 * Add `HYPERLIGHT_SURROGATE_EXTRACT_DIR` to configure the surrogate extraction directory on Windows.
 * Add `Sandbox::recreate()`, which rebuilds a sandbox's VM and memory from a snapshot. It recovers unrecoverable sandboxes and keeps configuration, host functions, and interrupt handles by @ludfjig in https://github.com/hyperlight-dev/hyperlight/pull/1751
 * Add ARM64 Linux MSHV support by @cshung in https://github.com/hyperlight-dev/hyperlight/pull/1626
+* Optional `process-isolation` support for dedicated VM hosts, host-function workers, typed resources, restart policy, and snapshot topology reconstruction.
+* `ProcessProfile::unrestricted` runs native process roles as the caller without process restrictions, including on macOS.
 
 ### Changed
 * `hyperlight-host` requires Rust 1.95.
@@ -25,6 +27,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   page size, and log level.
 * **Breaking:** Encode function calls with serde/postcard instead of FlatBuffers.
 * Stop resetting guest FPU state between guest calls to improve performance.
+* Snapshot config schema v7 persists native process topology.
 
 ### Fixed
 * Fix surrogate process creation for Windows paths containing Unicode or spaces.
