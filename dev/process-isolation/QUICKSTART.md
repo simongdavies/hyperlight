@@ -29,26 +29,81 @@ means no process controls and caller-user permissions.
 rights, without letting it reopen an arbitrary path.
 * **VM authority:** one-time permission for a worker to create a nested VM.
 
+## Run the guided sample
+
+`process_isolation_cli` is the application-facing walkthrough. It is one
+executable that acts as the application, function worker, and VM host. The
+default menu runs one scenario at a time and pauses while native processes are
+live. The tables show observed PIDs, parent relationships, executable paths,
+placement, requested controls, effective controls, and lifecycle changes.
+
+Build the guest and sample:
+
+```sh
+just guests
+cargo build -p hyperlight-host --features process-isolation \
+  --example process_isolation_cli
+```
+
+Run the interactive menu:
+
+```sh
+cargo run -p hyperlight-host --features process-isolation \
+  --example process_isolation_cli -- \
+  --guest src/tests/rust_guests/bin/debug/simpleguest
+```
+
+Run the complete walkthrough without prompts:
+
+```sh
+cargo run -p hyperlight-host --features process-isolation \
+  --example process_isolation_cli -- \
+  --guest src/tests/rust_guests/bin/debug/simpleguest \
+  --non-interactive --details all
+```
+
+Every subcommand is independently runnable. Replace `all` in the previous
+command with one of these names:
+
+|Subcommand|What it demonstrates|
+|-|-|
+|`placement`|Local, function-worker, VM-host, and combined placement|
+|`containment`|Unrestricted and restricted profiles with observed platform enforcement|
+|`recovery`|Worker crash, replacement PID, and idempotent retry|
+|`resources`|Typed file transfer with read/write and read-only rights|
+|`vm-authority`|Generation-bound VM authority and a nested sandbox|
+|`child-policy`|Allowed and blocked worker child-process creation|
+|`timing`|Basic local and isolated callback timing|
+|`all`|All applicable scenarios without prompts|
+
+Use `--iterations COUNT` with `timing`. Use `--details` to include native
+inspection and enforcement mechanisms. The timing output is illustrative, not
+a benchmark.
+
+Restricted macOS runs are expected to fail before spawn. The walkthrough
+reports that limitation as an observed, successful capability check. It never
+labels an unobserved control as enforced.
+
 ## Minimal worker example
 
-### 1\. Enable the feature
+### 1. Enable the feature
 
 Add the feature to the application and worker crates:
 
 ```toml
-\[dependencies]
-hyperlight-host = { workspace = true, features = \["process-isolation"] }
+[dependencies]
+hyperlight-host = { workspace = true, features = ["process-isolation"] }
 ```
 
 Replace `workspace = true` with your normal version or repository source when
 using Hyperlight outside this workspace.
 
-### 2\. Share a contract
+### 2. Share a contract
 
 Put this contract in a crate or module used by both executables:
 
 ```rust
-use hyperlight\_host::process::{HostFunctionContract, Idempotency};
+use hyperlight_host::process::{HostFunctionContract, Idempotency};
 
 pub const ADD: HostFunctionContract<(i32, i32), i32> =
     HostFunctionContract::new("HostAdd", Idempotency::Idempotent);
@@ -57,19 +112,19 @@ pub const ADD: HostFunctionContract<(i32, i32), i32> =
 `Idempotent` allows replay after an uncertain worker failure. Use
 `NonIdempotent` when repeating the function could repeat an external effect.
 
-### 3\. Build the worker executable
+### 3. Build the worker executable
 
 The worker captures its launch connection, registers `HostAdd`, and waits:
 
 ```rust
-use hyperlight\_host::process::{ProcessHostFunctions, ProcessStartup};
-use hyperlight\_host::{Result, new\_error};
-use my\_contracts::ADD;
+use hyperlight_host::process::{ProcessHostFunctions, ProcessStartup};
+use hyperlight_host::{Result, new_error};
+use my_contracts::ADD;
 
 fn main() -> Result<()> {
     // SAFETY: this is process entry, before threads or inherited-resource users.
     let startup = unsafe { ProcessStartup::capture() }?
-        .ok\_or\_else(|| new\_error!("Worker was not launched by Hyperlight"))?;
+        .ok_or_else(|| new_error!("Worker was not launched by Hyperlight"))?;
 
     let mut functions = ProcessHostFunctions::default();
     functions.bind(ADD, |left, right| left + right)?;
@@ -86,35 +141,35 @@ cargo build --features process-isolation --bin my-function-worker
 Do not start the worker yourself. Hyperlight supplies a private launch
 connection when the provider starts it.
 
-### 4\. Register the worker and build the sandbox
+### 4. Register the worker and build the sandbox
 
-`with\_program` packages the executable. The name `"calculator"` links it to
+`with_program` packages the executable. The name `"calculator"` links it to
 the matching `ProcessOptions`.
 
 ```rust
 use std::path::Path;
-use hyperlight\_host::process::{
+use hyperlight_host::process::{
     HostFunctionProcess, MeshProcessProvider, ProcessOptions, ProcessProfile,
 };
-use hyperlight\_host::{Result, SandboxBuilder};
-use my\_contracts::ADD;
+use hyperlight_host::{Result, SandboxBuilder};
+use my_contracts::ADD;
 
-fn build\_sandbox(
-    guest: \&Path,
-    worker\_exe: \&Path,
-) -> Result<hyperlight\_host::MultiUseSandbox> {
+fn build_sandbox(
+    guest: &Path,
+    worker_exe: &Path,
+) -> Result<hyperlight_host::MultiUseSandbox> {
     let provider = MeshProcessProvider::discover()?
-        .with\_program("calculator", worker\_exe)?;
+        .with_program("calculator", worker_exe)?;
 
-    let worker = HostFunctionProcess::new(ProcessOptions::for\_provider(
+    let worker = HostFunctionProcess::new(ProcessOptions::for_provider(
         "calculator",
         ProcessProfile::unrestricted(),
     ))
     .function(ADD);
 
-    SandboxBuilder::from\_file(guest)
-        .mesh\_process\_provider(provider)
-        .host\_function\_process(worker)
+    SandboxBuilder::from_file(guest)
+        .mesh_process_provider(provider)
+        .host_function_process(worker)
         .build()
 }
 ```
@@ -122,15 +177,15 @@ fn build\_sandbox(
 The provider creates a temporary local program store. The builder assigns
 `HostAdd` to the worker. The VM remains in the application process.
 
-### 5\. Call and shut down
+### 5. Call and shut down
 
 The guest makes its normal host call. Hyperlight routes it to the worker:
 
 ```rust
-let mut sandbox = build\_sandbox(guest\_path, worker\_path)?;
+let mut sandbox = build_sandbox(guest_path, worker_path)?;
 let value = sandbox.call::<i32>("Add", (17, 25))?;
-assert\_eq!(value, 42);
-assert\_eq!(sandbox.process\_reports().len(), 1);
+assert_eq!(value, 42);
+assert_eq!(sandbox.process_reports().len(), 1);
 sandbox.shutdown()?;
 ```
 
@@ -142,15 +197,15 @@ the worker and cleans up the process state owned by this sandbox.
 Build a second executable when the VM should not live in the application:
 
 ```rust
-use hyperlight\_host::process::{
+use hyperlight_host::process::{
     ProcessHostFunctions, ProcessStartup, SandboxHost,
 };
-use hyperlight\_host::{Result, new\_error};
+use hyperlight_host::{Result, new_error};
 
 fn main() -> Result<()> {
     // SAFETY: capture runs at process entry before threads are created.
     let startup = unsafe { ProcessStartup::capture() }?
-        .ok\_or\_else(|| new\_error!("VM host was not launched by Hyperlight"))?;
+        .ok_or_else(|| new_error!("VM host was not launched by Hyperlight"))?;
     SandboxHost::new(ProcessHostFunctions::default()).run(startup)
 }
 ```
@@ -159,14 +214,14 @@ Register it before cloning the provider:
 
 ```rust
 let provider = MeshProcessProvider::discover()?
-    .with\_program("calculator", worker\_exe)?
-    .with\_program("vm-host", vm\_host\_exe)?;
+    .with_program("calculator", worker_exe)?
+    .with_program("vm-host", vm_host_exe)?;
 ```
 
 On Linux and macOS:
 
 ```rust
-let builder = builder.sandbox\_process(ProcessOptions::for\_provider(
+let builder = builder.sandbox_process(ProcessOptions::for_provider(
     "vm-host",
     ProcessProfile::unrestricted(),
 ));
@@ -175,13 +230,13 @@ let builder = builder.sandbox\_process(ProcessOptions::for\_provider(
 On Windows, use the explicit WHP-compatible same-user boundary:
 
 ```rust
-let builder = builder.windows\_vm\_host\_process(ProcessOptions::for\_provider(
+let builder = builder.windows_vm_host_process(ProcessOptions::for_provider(
     "vm-host",
     ProcessProfile::unrestricted(),
 ));
 ```
 
-Use `sandbox\_host\_function(CONTRACT)` for a function implemented inside the VM
+Use `sandbox_host_function(CONTRACT)` for a function implemented inside the VM
 host executable.
 
 ## Restricted profiles
@@ -190,13 +245,13 @@ Use a restricted profile when the platform must enforce process controls.
 At least one control must be required:
 
 ```rust
-use hyperlight\_host::process::{
+use hyperlight_host::process::{
     ProcessControl, ProcessProfile, RequestedControl,
 };
 
-let profile = ProcessProfile::new(\[
+let profile = ProcessProfile::new([
     RequestedControl {
-        control: ProcessControl::MemoryLimit(512 \* 1024 \* 1024),
+        control: ProcessControl::MemoryLimit(512 * 1024 * 1024),
         required: true,
     },
     RequestedControl {
@@ -207,7 +262,7 @@ let profile = ProcessProfile::new(\[
 ```
 
 Other controls are `CpuBudget` and `DenyNetwork`. Windows also has
-`windows\_cpu\_rate\_limit\_percent`. A required unsupported control stops startup.
+`windows_cpu_rate_limit_percent`. A required unsupported control stops startup.
 macOS rejects all restricted profiles before staging or starting a process.
 
 `ProcessProfile::unrestricted()` cannot include controls or platform limits.
@@ -215,16 +270,16 @@ macOS rejects all restricted profiles before staging or starting a process.
 ## Worker restarts
 
 The default allows three worker restarts in 60 seconds. Override it with
-`SandboxBuilder::process\_restart\_policy`:
+`SandboxBuilder::process_restart_policy`:
 
 ```rust
-let policy = hyperlight\_host::process::RestartPolicy {
-    max\_restarts: 3,
-    window: std::time::Duration::from\_secs(60),
-    initial\_backoff: std::time::Duration::from\_millis(100),
-    max\_backoff: std::time::Duration::from\_secs(5),
+let policy = hyperlight_host::process::RestartPolicy {
+    max_restarts: 3,
+    window: std::time::Duration::from_secs(60),
+    initial_backoff: std::time::Duration::from_millis(100),
+    max_backoff: std::time::Duration::from_secs(5),
 };
-let builder = builder.process\_restart\_policy(policy);
+let builder = builder.process_restart_policy(policy);
 ```
 
 Replay also depends on the contract's `Idempotency`. An exhausted restart
@@ -239,10 +294,10 @@ Save provider-packaged programs with the snapshot:
 
 ```rust
 let snapshot = sandbox.snapshot()?;
-let digest = snapshot.save\_with\_process\_provider(
+let digest = snapshot.save_with_process_provider(
     "snapshot-layout",
-    \&hyperlight\_host::sandbox::snapshot::OciTag::new("placed")?,
-    \&provider,
+    &hyperlight_host::sandbox::snapshot::OciTag::new("placed")?,
+    &provider,
 )?;
 ```
 
@@ -250,40 +305,40 @@ Load it with a fresh provider:
 
 ```rust
 use std::sync::Arc;
-use hyperlight\_host::sandbox::snapshot::Snapshot;
+use hyperlight_host::sandbox::snapshot::Snapshot;
 
-let snapshot = Arc::new(Snapshot::checked\_load("snapshot-layout", digest)?);
-let provider = MeshProcessProvider::discover\_for\_snapshot("snapshot-layout")?;
-let builder = SandboxBuilder::from\_snapshot(snapshot)
-    .mesh\_process\_provider(provider);
+let snapshot = Arc::new(Snapshot::checked_load("snapshot-layout", digest)?);
+let provider = MeshProcessProvider::discover_for_snapshot("snapshot-layout")?;
+let builder = SandboxBuilder::from_snapshot(snapshot)
+    .mesh_process_provider(provider);
 ```
 
-Call `allow\_windows\_vm\_host()` again for a Windows snapshot with a VM host.
+Call `allow_windows_vm_host()` again for a Windows snapshot with a VM host.
 Register files, Linux launch resources, export policies, and VM authority again.
 
 ## Files and VM authority
 
 Use file transfer when a worker needs one open file with exact rights.
-`ProcessHostFunctions::run\_with\_resources` receives those files. Use
-`register\_vm\_authority` only when a worker must create a nested VM. The
+`ProcessHostFunctions::run_with_resources` receives those files. Use
+`register_vm_authority` only when a worker must create a nested VM. The
 authority belongs to one worker generation.
 
 Working examples:
 
-* `src/hyperlight\_host/tests/fixtures/process\_file\_resource.rs`
-* `src/hyperlight\_host/tests/fixtures/process\_vm\_authority.rs`
-* `src/hyperlight\_host/tests/fixtures/nested\_sandbox.rs`
+* `src/hyperlight_host/tests/fixtures/process_file_resource.rs`
+* `src/hyperlight_host/tests/fixtures/process_vm_authority.rs`
+* `src/hyperlight_host/tests/fixtures/nested_sandbox.rs`
 
 ## Explicit program stores
 
-Most applications should use `MeshProcessProvider::with\_program`. Custom
+Most applications should use `MeshProcessProvider::with_program`. Custom
 packagers can use `LocalProgramStore::package` with a `ProgramConfig`, then put
 the returned `ProgramArtifact` in `ProcessOptions::new`.
 
 The config contains schema version `1`, the `ProgramRole`, the exact
 `ProgramTarget`, and the worker's `FunctionContractDefinition` values. Pass the
-store and target to `SandboxBuilder::process\_programs`. See
-`src/hyperlight\_host/src/process/sandbox\_tests.rs` for compact examples.
+store and target to `SandboxBuilder::process_programs`. See
+`src/hyperlight_host/src/process/sandbox_tests.rs` for compact examples.
 
 ## Platform summary
 
@@ -300,19 +355,21 @@ for native Apple Silicon checks.
 
 ## More examples
 
-* `src/hyperlight\_host/tests/fixtures/process\_placement.rs` covers worker-only,
+* `src/hyperlight_host/examples/process-isolation-cli/` is the guided
+application sample.
+* `src/hyperlight_host/tests/fixtures/process_placement.rs` covers worker-only,
 VM-host-only, and combined placement.
-* `src/hyperlight\_host/tests/fixtures/process\_worker.rs` is a small worker.
-* `src/hyperlight\_host/tests/fixtures/sandbox\_worker.rs` is a small VM host.
-* `src/hyperlight\_host/examples/process\_worker.rs` shows explicit artifact
+* `src/hyperlight_host/tests/fixtures/process_worker.rs` is a small worker.
+* `src/hyperlight_host/tests/fixtures/sandbox_worker.rs` is a small VM host.
+* `src/hyperlight_host/examples/process_worker.rs` shows explicit artifact
 declaration.
 
 Repository commands:
 
 ```sh
 just guests
-cargo build -p hyperlight-host --features process-isolation \\
-  --example process\_worker --example sandbox\_worker --example process\_placement
+cargo build -p hyperlight-host --features process-isolation \
+  --example process_isolation_cli
 cargo test -p hyperlight-host --features process-isolation process::
 ```
 

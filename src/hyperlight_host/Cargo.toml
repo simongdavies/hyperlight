@@ -167,6 +167,12 @@ path = "tests/fixtures/process_worker.rs"
 required-features = ["process-isolation"]
 
 [[example]]
+name = "process_isolation_cli"
+path = "examples/process-isolation-cli/main.rs"
+required-features = ["process-isolation"]
+test = true
+
+[[example]]
 name = "process_child_policy"
 path = "tests/fixtures/process_child_policy.rs"
 required-features = ["process-isolation"]
