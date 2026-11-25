@@ -535,7 +535,11 @@ fn vm_authority(guest: &Path, non_interactive: bool, details: bool) -> Result<()
             return Ok(());
         }
     };
-    provider.register_vm_authority("vm-authority-worker", backend)?;
+    if let Err(error) = provider.register_vm_authority("vm-authority-worker", backend) {
+        note("unavailable", error);
+        note("authority", "none granted");
+        return Ok(());
+    }
     provider.register_file(
         "vm-authority-worker",
         File::open(guest)?,

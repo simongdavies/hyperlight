@@ -417,6 +417,8 @@ impl MeshProcessProvider {
             self.inner.store.validate(artifact, &self.inner.target)?;
             return Ok(artifact.clone());
         }
+        #[cfg(not(target_os = "linux"))]
+        let _ = profile;
         let source = self
             .inner
             .programs
