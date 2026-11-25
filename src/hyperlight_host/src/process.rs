@@ -580,6 +580,7 @@ impl Topology {
                         &options.name,
                         program::ProgramRole::SandboxHost,
                         &functions,
+                        &options.profile,
                         options.program.as_ref(),
                     )?,
                     &options.profile,
@@ -605,6 +606,7 @@ impl Topology {
                         &worker.options.name,
                         program::ProgramRole::FunctionWorker,
                         &functions,
+                        &worker.options.profile,
                         worker.options.program.as_ref(),
                     )?,
                     &worker.options.profile,
@@ -718,13 +720,14 @@ impl Topology {
         name: &str,
         role: program::ProgramRole,
         functions: &[program::FunctionContractDefinition],
+        profile: &ProcessProfile,
         artifact: Option<&program::ProgramArtifact>,
     ) -> Result<program::ProgramArtifact> {
         match artifact {
             Some(artifact) => Ok(artifact.clone()),
             None => self
                 .provider()?
-                .resolve_program(name, role, functions, None),
+                .resolve_program(name, role, functions, profile, None),
         }
     }
 

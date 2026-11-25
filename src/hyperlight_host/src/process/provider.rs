@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use super::ProcessProfile;
 use super::launch::{ConfiguredLauncher, ProcessLauncher};
 use super::program::{
     FunctionContractDefinition, LocalProgramStore, ProcessTopologyDefinition, ProgramArtifact,
@@ -409,6 +410,7 @@ impl MeshProcessProvider {
         name: &str,
         role: ProgramRole,
         functions: &[FunctionContractDefinition],
+        profile: &ProcessProfile,
         artifact: Option<&ProgramArtifact>,
     ) -> Result<ProgramArtifact> {
         if let Some(artifact) = artifact {
@@ -424,11 +426,14 @@ impl MeshProcessProvider {
                 new_error!("This MeshProcessProvider requires an explicit program artifact")
             })?;
         #[cfg(target_os = "linux")]
-        let runtime_files =
+        let runtime_files = if profile.is_unrestricted() {
+            Vec::new()
+        } else {
             super::linux::runtime_closure_in(&source._captured_executable, &source._capture_root)
                 .map_err(|error| {
-                new_error!("Mesh provider cannot package native program '{name}': {error}")
-            })?;
+                    new_error!("Mesh provider cannot package native program '{name}': {error}")
+                })?
+        };
         #[cfg(target_os = "windows")]
         let runtime_files =
             super::windows::runtime_closure(&source.executable, &source._runtime_files).map_err(
@@ -1339,6 +1344,47 @@ mod tests {
                 .to_string()
                 .contains("Configure Linux resources before cloning")
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unrestricted_program_packaging_uses_host_runtime_libraries() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("program.c");
+        let program = directory.path().join("program");
+        std::fs::write(&source, "int main(void) { return 0; }\n").unwrap();
+        assert!(
+            std::process::Command::new("cc")
+                .arg(&source)
+                .arg("-o")
+                .arg(&program)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            !super::super::linux::runtime_closure(&program)
+                .unwrap()
+                .is_empty()
+        );
+
+        let provider = provider(true).with_program("worker", &program).unwrap();
+        let artifact = provider
+            .resolve_program(
+                "worker",
+                ProgramRole::FunctionWorker,
+                &[],
+                &ProcessProfile::unrestricted(),
+                None,
+            )
+            .unwrap();
+        let validated = provider
+            .inner
+            .store
+            .validate(&artifact, &provider.inner.target)
+            .unwrap();
+
+        assert!(validated.runtime_files().is_empty());
     }
 
     #[cfg(target_os = "linux")]
