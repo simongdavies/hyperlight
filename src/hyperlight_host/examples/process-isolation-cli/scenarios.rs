@@ -448,10 +448,10 @@ fn resources(guest: &Path, non_interactive: bool, details: bool) -> Result<()> {
     writable.write_all(b"write:")?;
     writable.seek(SeekFrom::Start(0))?;
     let mut writable_check = writable.try_clone()?;
-    let mut read_only = tempfile::tempfile()?;
-    read_only.write_all(b"read-only")?;
-    read_only.seek(SeekFrom::Start(0))?;
-    let mut read_only_check = read_only.try_clone()?;
+    let mut read_only_temp = tempfile::NamedTempFile::new()?;
+    read_only_temp.write_all(b"read-only")?;
+    let mut read_only_check = read_only_temp.reopen()?;
+    let read_only = File::open(read_only_temp.path())?;
     let mut provider = MeshProcessProvider::discover()?;
     provider.register_file("resource-worker", writable, FILE_RIGHTS)?;
     provider.register_file("resource-worker", read_only, OsResourceRights::READ)?;
