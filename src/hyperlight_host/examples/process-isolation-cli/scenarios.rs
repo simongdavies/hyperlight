@@ -656,7 +656,13 @@ fn child_policy(guest: &Path, non_interactive: bool, details: bool) -> Result<()
             note("expected", "blocked mode rejected before spawn on macOS");
             note("observed", error);
         }
-        Err(error) => return Err(error),
+        Err(error) => {
+            note("unavailable", error);
+            note(
+                "enforced",
+                "none claimed. This host did not produce an enforcement report",
+            );
+        }
     }
     Ok(())
 }

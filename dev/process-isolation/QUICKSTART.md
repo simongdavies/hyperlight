@@ -45,6 +45,55 @@ cargo build -p hyperlight-host --features process-isolation \
   --example process_isolation_cli
 ```
 
+### Linux restricted-mode setup
+
+Unrestricted Linux processes need no additional setup. Restricted profiles,
+blocked child-process checks, and nested VM authority require resources
+delegated by the host operator.
+
+Provide an empty cgroup v2 directory that the application user can modify and
+create children below. A systemd unit or container supervisor should create
+this directory. For systemd, configure the owning unit with `Delegate=yes`.
+Enable the `memory` controller because the sample restricted profile requests
+a memory limit. Enable `cpu` when using `ProcessControl::CpuBudget`.
+
+Verify the delegated directory before running:
+
+```sh
+CGROUP_ROOT=/sys/fs/cgroup/your-delegated-subtree
+
+test "$(stat -fc %T "$CGROUP_ROOT")" = cgroup2fs
+test -w "$CGROUP_ROOT"
+test -w "$CGROUP_ROOT/cgroup.procs"
+grep -qw memory "$CGROUP_ROOT/cgroup.controllers"
+printf '+memory\n' > "$CGROUP_ROOT/cgroup.subtree_control"
+grep -qw memory "$CGROUP_ROOT/cgroup.subtree_control"
+```
+
+Enable `cpu` in the same file when requesting CPU budgets.
+
+Provide an explicitly trusted Minijail executable. Hyperlight requires an
+absolute path and verifies its SHA-256 before every restricted launch.
+
+```sh
+export HYPERLIGHT_MESH_PROCESS_CGROUP_ROOT="$CGROUP_ROOT"
+export HYPERLIGHT_MESH_PROCESS_MINIJAIL=/absolute/path/to/minijail0
+export HYPERLIGHT_MESH_PROCESS_MINIJAIL_SHA256="$(
+  sha256sum "$HYPERLIGHT_MESH_PROCESS_MINIJAIL" | cut -d ' ' -f1
+)"
+```
+
+Nested VM authority also requires read/write access to `/dev/kvm` or
+`/dev/mshv`:
+
+```sh
+test -r /dev/kvm && test -w /dev/kvm
+```
+
+Use `/dev/mshv` in that check when MSHV is the selected backend. The walkthrough
+reports restricted scenarios as unavailable when delegated authority or a
+required device is absent.
+
 Run the interactive menu:
 
 ```sh
